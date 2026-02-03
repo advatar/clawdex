@@ -9,7 +9,7 @@ set -euo pipefail
 #   repo/
 #     codex/              (upstream codex cli source)
 #     clawdex/        (your clawdex daemon / MCP server)
-#     apps/macos/Clawdex (this project)
+#     macClawdex/        (this project)
 #
 # If you're using a single Cargo workspace at repo root, set REPO_ROOT accordingly.
 # -----------------------------------------------------------------------------

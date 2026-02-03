@@ -125,7 +125,7 @@ This doesn’t prevent you from reaching OpenClaw parity; it just makes parity *
 
 ### Step 0 — Place the project
 - Put the folder somewhere like:
-  - `apps/macos/Clawdex`
+  - `macClawdex/`
 
 ### Step 1 — Generate/open the Xcode project
 This starter uses XcodeGen for reproducibility:
