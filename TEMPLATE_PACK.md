@@ -156,7 +156,7 @@ tools:
         - "openclaw: tools/cron add definition (fill exact file+line)"
       request_schema: "tool-schemas/cron.add.request.schema.json"
       response_schema: "tool-schemas/cron.add.response.schema.json"
-    codex_clawd:
+    clawdex:
       implemented_in: "scheduler/cron.rs::add"
       idempotency: "optional" # required | optional | none
       side_effects:
@@ -191,7 +191,7 @@ tools:
       source_refs: ["openclaw: tools/cron update definition (fill)"]
       request_schema: "tool-schemas/cron.update.request.schema.json"
       response_schema: "tool-schemas/cron.add.response.schema.json"
-    codex_clawd:
+    clawdex:
       implemented_in: "scheduler/cron.rs::update"
       idempotency: "optional"
       side_effects: ["disk_write: jobs.json"]
@@ -218,7 +218,7 @@ tools:
       source_refs: ["openclaw: tools/cron list definition (fill)"]
       request_schema: "tool-schemas/cron.list.request.schema.json"
       response_schema: "tool-schemas/cron.list.response.schema.json"
-    codex_clawd:
+    clawdex:
       implemented_in: "scheduler/cron.rs::list"
       side_effects: []
       permissions: ["disk_read"]
@@ -243,7 +243,7 @@ tools:
       source_refs: ["openclaw: tools/cron remove definition (fill)"]
       request_schema: "tool-schemas/cron.remove.request.schema.json"
       response_schema: "tool-schemas/cron.remove.response.schema.json"
-    codex_clawd:
+    clawdex:
       implemented_in: "scheduler/cron.rs::remove"
       side_effects: ["disk_write: jobs.json"]
       permissions: ["disk_write"]
@@ -271,7 +271,7 @@ tools:
       source_refs: ["openclaw: heartbeat wake definition (fill)"]
       request_schema: "tool-schemas/heartbeat.wake.request.schema.json"
       response_schema: "tool-schemas/heartbeat.wake.response.schema.json"
-    codex_clawd:
+    clawdex:
       implemented_in: "scheduler/heartbeat.rs::wake"
       side_effects: ["may_run_turn"]
       permissions: ["may_trigger_agent_turn"]
@@ -299,7 +299,7 @@ tools:
       source_refs: ["openclaw: memory_search tool definition (fill)"]
       request_schema: "tool-schemas/memory_search.request.schema.json"
       response_schema: "tool-schemas/memory_search.response.schema.json"
-    codex_clawd:
+    clawdex:
       implemented_in: "memory/search.rs::search"
       side_effects: ["may_update_index_async"]
       permissions: ["disk_read"]
@@ -327,7 +327,7 @@ tools:
       source_refs: ["openclaw: memory_get tool definition (fill)"]
       request_schema: "tool-schemas/memory_get.request.schema.json"
       response_schema: "tool-schemas/memory_get.response.schema.json"
-    codex_clawd:
+    clawdex:
       implemented_in: "memory/get.rs::get"
       side_effects: []
       permissions: ["disk_read"]
@@ -355,7 +355,7 @@ tools:
       source_refs: ["openclaw: message.send tool definition (fill)"]
       request_schema: "tool-schemas/message.send.request.schema.json"
       response_schema: "tool-schemas/message.send.response.schema.json"
-    codex_clawd:
+    clawdex:
       implemented_in: "gateway/send.rs::send"
       idempotency: "required"
       side_effects: ["network_send"]

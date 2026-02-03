@@ -1,0 +1,20 @@
+[package]
+name = "clawdex"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+json5 = "0.4"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.8"
+cron = "0.12"
+walkdir = "2"
+dirs = "5"
+serde_yaml = "0.9"
+codex-app-server-protocol = { path = "../codex/codex-rs/app-server-protocol" }
+codex-protocol = { path = "../codex/codex-rs/protocol" }

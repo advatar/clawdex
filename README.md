@@ -1,105 +1,130 @@
 # clawdex
 
-clawdex is a compatibility runtime that lets Codex behave like an OpenClaw-grade assistant by exposing OpenClaw-compatible tools via MCP, plus cron and heartbeat scheduling, memory access, and a skills sync workflow. In this repo, clawdex is implemented as an `openclaw` CLI subcommand.
+Clawdex is a Rust compatibility runtime that makes Codex feel like an OpenClaw‑grade assistant by exposing OpenClaw‑compatible tools via MCP, plus cron/heartbeat scheduling, memory access, and a skills sync workflow.
 
-This README focuses on local development setup and the clawdex CLI surface.
+This README focuses on local development and the `clawdex` CLI surface.
 
-**Quick Start**
-1. Initialize submodules: `git submodule update --init --recursive`
-2. Install dependencies: `cd openclaw && pnpm install`
-3. Run MCP server: `pnpm openclaw clawd mcp-server`
-
----
-
-**Prereqs**
-1. Node.js 22+ and `pnpm`
-2. A working Codex binary on your PATH as `codex` (used by clawdex to spawn `codex app-server`)
-3. macOS Xcode + CLT only if you plan to build the macOS app starter in `macClawdex`
+**Quick Start (Dev)**
+1. Init submodules: `git submodule update --init --recursive`
+2. Build Codex: `cd codex/codex-rs && cargo build --release -p codex-cli`
+3. Build Clawdex: `cd ../../clawdex && cargo build --release`
+4. Run MCP server: `./target/release/clawdex mcp-server`
 
 ---
 
 **Repo Layout**
-1. `openclaw/` contains the clawdex implementation and CLI integration.
-2. `codex/` is a submodule for the Codex CLI/app-server.
-3. `macClawdex/` is a SwiftUI starter app that embeds `codex` and `clawdex`.
+1. `clawdex/` is the Rust CLI/runtime (this repo’s primary implementation).
+2. `codex/` is the Codex submodule (used by `clawdex ui-bridge`).
+3. `openclaw/` is the OpenClaw submodule (optional; used as a skills source).
+4. `macClawdex/` is the macOS menu‑bar app starter that embeds `codex` + `clawdex`.
 
 ---
 
-**Development Setup**
-1. Initialize submodules:
-   - `git submodule update --init --recursive`
-2. Install dependencies:
-   - `cd openclaw`
-   - `pnpm install`
-3. Build and typecheck:
-   - `pnpm build`
-   - `pnpm check`
-4. Run tests (optional):
-   - `pnpm vitest run src/clawd/memory.test.ts src/clawd/skills-sync.test.ts`
+**Prereqs (Dev)**
+1. Rust toolchain (stable) for `clawdex` and `codex` builds.
+2. macOS + Xcode only if you plan to build `macClawdex`.
+3. OpenClaw is optional and only needed if you want to sync its skills.
 
 ---
 
-**Running clawdex**
-
-clawdex is exposed through the OpenClaw CLI:
+**Build Clawdex**
+From the repo root:
 
 ```bash
-pnpm openclaw clawd <command> [options]
+cargo build --manifest-path clawdex/Cargo.toml
 ```
 
-The runtime spawns `codex app-server` internally. Ensure `codex` is resolvable on PATH or set `codex.command` in the clawdex config.
+Release build:
+
+```bash
+cargo build --manifest-path clawdex/Cargo.toml --release
+```
 
 ---
 
-**Configuration**
+**Run the MCP Server**
 
-clawdex reads JSON5 config from:
+```bash
+clawdex mcp-server
+```
 
-1. `~/.codex/clawd/config.json` (default)
-2. `CODEX_CLAWD_CONFIG_PATH` (override path)
+Override workspace/state:
 
-Other path overrides:
-1. `CODEX_CLAWD_STATE_DIR` or `CODEX_STATE_DIR`
-2. `CODEX_CLAWD_WORKSPACE_DIR` or `CODEX_WORKSPACE_DIR`
+```bash
+clawdex mcp-server --workspace /path/to/workspace --state-dir /path/to/state
+```
+
+---
+
+**Run the Daemon (Cron + Heartbeat Loop)**
+
+```bash
+clawdex daemon --workspace /path/to/workspace --state-dir /path/to/state
+```
+
+The daemon is a stub runner today: it persists cron runs and heartbeat logs but does not execute Codex turns yet.
+
+---
+
+**Sync OpenClaw Skills**
+
+```bash
+clawdex skills sync --source-dir openclaw/skills
+```
+
+Optional flags:
+- `--prefix <prefix>`: prefix skill names (e.g. `oc-`).
+- `--link`: symlink instead of copy (skips frontmatter edits).
+- `--dry-run`: print actions without writing.
+- `--user-dir <dir>`: user skills target (default: `~/.codex/skills/openclaw`).
+- `--repo-dir <dir>`: repo skills target (optional; no default).
+
+---
+
+**Run the UI Bridge (macOS app)**
+The macOS app launches `clawdex ui-bridge` and communicates via JSONL on stdin/stdout.
+
+```bash
+clawdex ui-bridge --stdio \
+  --codex-path /path/to/codex \
+  --state-dir /path/to/state \
+  --workspace /path/to/workspace
+```
+
+The bridge spawns `codex app-server` and streams assistant messages back to stdout:
+- `{"type":"assistant_message","text":"..."}`
+- `{"type":"error","message":"..."}`
+
+---
+
+**Configuration + State**
+
+Default state root:
+- `~/.codex/clawdex/`
+
+Override paths via env:
+- `CLAWDEX_STATE_DIR` (or `CODEX_CLAWD_STATE_DIR`)
+- `CLAWDEX_CONFIG_PATH` (or `CODEX_CLAWD_CONFIG_PATH`)
+- `CLAWDEX_WORKSPACE` (or `CODEX_CLAWD_WORKSPACE_DIR` / `CODEX_WORKSPACE_DIR`)
 
 Default state layout:
-1. `~/.codex/clawd/config.json`
-2. `~/.codex/clawd/cron/jobs.json`
-3. `~/.codex/clawd/cron/runs/<jobId>.jsonl`
-4. `~/.codex/clawd/memory/<agentId>.sqlite`
-5. `~/.codex/clawd/sessions.json`
-6. `~/.codex/clawd/workspace/MEMORY.md`
-7. `~/.codex/clawd/workspace/memory/YYYY-MM-DD.md`
-8. `~/.codex/clawd/workspace/HEARTBEAT.md` (optional)
+1. `~/.codex/clawdex/config.json` (optional)
+2. `~/.codex/clawdex/cron/jobs.json`
+3. `~/.codex/clawdex/cron/runs/<jobId>.jsonl`
+4. `~/.codex/clawdex/memory/<agentId>.sqlite` (future; index placeholder)
+5. `~/.codex/clawdex/sessions.json`
+6. `WORKSPACE/MEMORY.md`
+7. `WORKSPACE/memory/YYYY-MM-DD.md`
+8. `WORKSPACE/HEARTBEAT.md` (optional)
 
-Example `config.json` (JSON5 is allowed):
+Example `config.json5`:
 
 ```json5
 {
-  codex: {
-    command: "codex",
-    args: ["app-server"],
-    cwd: "/path/to/workspace",
-    approvalPolicy: "on-request",
-    sandbox: "workspace-write",
-    autoApprove: false,
-    model: "gpt-4.1",
-    modelProvider: "openai",
-    baseInstructions: "You are Clawdex.",
-    developerInstructions: "Prefer concise replies."
-  },
+  workspace: "/path/to/workspace",
   cron: { enabled: true },
-  heartbeat: {
-    enabled: true,
-    intervalMs: 1800000,
-    activeHours: { start: "09:00", end: "17:00", timezone: "local" }
-  },
-  memory: { enabled: true, citations: "auto" },
-  gateway: {
-    url: "ws://127.0.0.1:18789",
-    token: "optional-token"
-  },
-  sessions: { storePath: "~/.codex/clawd/sessions.json" }
+  heartbeat: { enabled: true, interval_ms: 1800000 },
+  memory: { enabled: true, citations: "auto" }
 }
 ```
 
@@ -107,33 +132,48 @@ Example `config.json` (JSON5 is allowed):
 
 **CLI Reference**
 
-clawdex is accessed through `openclaw clawd`. The commands below are the canonical interface.
-
-`openclaw clawd mcp-server`
-1. Description: Run the clawdex MCP server (cron + memory + messaging).
+`clawdex mcp-server`
+1. Description: Run the MCP server that exposes OpenClaw‑compatible tool names.
 2. Options:
-   - `--no-cron` disables the cron scheduler.
-   - `--no-heartbeat` disables the heartbeat loop.
+   - `--no-cron` disables cron behavior.
+   - `--no-heartbeat` disables heartbeat behavior.
+   - `--workspace <path>` overrides workspace directory.
+   - `--state-dir <path>` overrides state directory.
 
-`openclaw clawd daemon`
-1. Description: Run the background daemon (cron + heartbeat).
-2. Options: none.
+`clawdex daemon`
+1. Description: Run the background loop for cron + heartbeat persistence.
+2. Options:
+   - `--workspace <path>` overrides workspace directory.
+   - `--state-dir <path>` overrides state directory.
 
-`openclaw clawd skills sync`
+`clawdex skills sync`
 1. Description: Sync OpenClaw skills into Codex skill directories.
 2. Options:
-   - `--prefix <prefix>` sets a skill name prefix. Default: `oc-`.
-   - `--link` uses symlinks instead of copies.
-   - `--dry-run` prints a summary without writing files.
-   - `--user-dir <dir>` sets the user skills target directory. Default: `~/.codex/skills/openclaw`.
-   - `--repo-dir <dir>` sets the repo skills target directory. Default: `.codex/skills/openclaw`.
-   - `--source-dir <dir>` sets the OpenClaw skills source directory. Default: `openclaw/skills`.
+   - `--prefix <prefix>` apply a name prefix to each skill.
+   - `--link` create symlinks instead of copies.
+   - `--dry-run` print actions without writing.
+   - `--user-dir <dir>` override the user skills directory.
+   - `--repo-dir <dir>` override the repo skills directory.
+   - `--source-dir <dir>` override the source skills directory.
+
+`clawdex ui-bridge`
+1. Description: JSONL bridge used by the macOS app.
+2. Options:
+   - `--stdio` required by the current macOS app.
+   - `--codex-path <path>` path to the `codex` binary.
+   - `--state-dir <path>` state directory (also seeds CODEX_HOME under `<state>/codex`).
+   - `--workspace <path>` workspace directory.
 
 ---
 
-**MCP Tool Surface**
+**UI Bridge Env Overrides**
+- `CLAWDEX_APPROVAL_MODE` = `deny` (default) or `approve`.
+- `CLAWDEX_APPROVAL_POLICY` = `never`, `on-request`, `on-failure`, `unless-trusted`.
+- `CLAWDEX_CODEX_CONFIG` = semicolon‑separated `--config key=value` overrides forwarded to Codex.
 
-The clawdex MCP server exposes OpenClaw-compatible tool names so OpenClaw skills can run without edits.
+---
+
+**MCP Tool Surface (Implemented)**
 
 Cron tools:
 1. `cron.list({ includeDisabled?: boolean })`
@@ -148,32 +188,40 @@ Memory tools:
 1. `memory_search({ query, maxResults?, minScore?, sessionKey? })`
 2. `memory_get({ path, from?, lines? })`
 
-Messaging tools:
+Messaging tools (stub):
 1. `message.send({ channel, to, text|message, accountId?, sessionKey?, bestEffort?, dryRun? })`
-2. `channels.list()` (stub)
-3. `channels.resolve_target({ channel?, to?, accountId? })` (stub)
+2. `channels.list()`
+3. `channels.resolve_target({ channel?, to?, accountId? })`
 
 Heartbeat tool:
 1. `heartbeat.wake({ reason? })`
 
 ---
 
-**Mac App Starter**
+**Mac App Starter (`macClawdex`)**
 
-If you want to run the macOS app starter:
+Build steps:
 1. `cd macClawdex`
 2. `xcodegen generate`
-3. `xcodebuild -project Clawdex.xcodeproj -scheme Clawdex -configuration Debug build`
+3. `DEVELOPMENT_TEAM=YOURTEAMID xcodebuild -project Clawdex.xcodeproj -scheme Clawdex -configuration Debug build`
 
-The app embeds `codex` and `clawdex` binaries under `Clawdex.app/Contents/Resources/bin/` and launches `clawdex ui-bridge` per `MAC_APP.md`.
+The build script `Scripts/build_and_embed_rust.sh`:
+- Builds **Codex** and **Clawdex** as universal2 Rust binaries (arm64 + x86_64).
+- Embeds them into `Clawdex.app/Contents/Resources/bin/`.
+- Codesigns embedded tools with helper entitlements.
+
+Override inputs as needed:
+- `CODEX_CARGO_ROOT` (default `../codex/codex-rs`)
+- `CODEX_BIN` (prebuilt Mach‑O codex binary)
+- `CLAWDEX_CARGO_ROOT` (default `../clawdex`)
+- `CLAWDEX_BIN` (prebuilt Mach‑O clawdex binary)
 
 ---
 
 **Troubleshooting**
-
-1. `codex app-server` not found:
-   - Ensure `codex` is on PATH or set `codex.command` in config.
-2. Cron/heartbeat not running:
+1. `codex app-server` fails to start:
+   - Ensure `codex` is built and the path passed to `--codex-path` is correct.
+2. MCP tools not visible:
+   - Ensure Codex `config.toml` includes an MCP server entry pointing to `clawdex mcp-server`.
+3. Cron/heartbeat not running:
    - Confirm `cron.enabled` and `heartbeat.enabled` are true in config.
-3. MCP tools not visible:
-   - Ensure Codex `config.toml` points to the clawdex MCP server (stdio or HTTP).

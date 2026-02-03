@@ -1,106 +1,175 @@
-\
 #!/bin/bash
 set -euo pipefail
 
 # -----------------------------------------------------------------------------
-# Build and embed Rust tools into the macOS app bundle.
+# Build and embed Codex + Clawdex Rust tools into the macOS app bundle.
 #
 # Expected layout (adjust as needed):
 #   repo/
 #     codex/              (upstream codex cli source)
-#     clawdex/        (your clawdex daemon / MCP server)
-#     macClawdex/        (this project)
+#     clawdex/            (Rust clawdex CLI)
+#     macClawdex/         (this project)
 #
-# If you're using a single Cargo workspace at repo root, set REPO_ROOT accordingly.
+# Supports:
+# - Codex: Rust build (default) or a prebuilt CODEX_BIN.
+# - Clawdex: Rust build (default) or a prebuilt CLAWDEX_BIN.
 # -----------------------------------------------------------------------------
 
 REPO_ROOT="${REPO_ROOT:-${SRCROOT}/..}"
 CARGO_BIN="${CARGO_BIN:-cargo}"
 
-if [[ "${SKIP_RUST_EMBED:-}" == "1" ]]; then
-  echo "[clawdex] SKIP_RUST_EMBED=1; skipping Rust build/embed."
+CODEX_CARGO_ROOT="${CODEX_CARGO_ROOT:-${REPO_ROOT}/codex/codex-rs}"
+CODEX_PACKAGE="${CODEX_PACKAGE:-codex-cli}"
+CODEX_BINARY="${CODEX_BINARY:-codex}"
+CODEX_BIN="${CODEX_BIN:-}"
+
+CLAWDEX_CARGO_ROOT="${CLAWDEX_CARGO_ROOT:-${REPO_ROOT}/clawdex}"
+CLAWDEX_PACKAGE="${CLAWDEX_PACKAGE:-clawdex}"
+CLAWDEX_BINARY="${CLAWDEX_BINARY:-clawdex}"
+CLAWDEX_BIN="${CLAWDEX_BIN:-}"
+
+if [[ "${SKIP_RUST_EMBED:-}" == "1" || "${SKIP_TOOLS_EMBED:-}" == "1" ]]; then
+  echo "[clawdex] SKIP_RUST_EMBED=1 or SKIP_TOOLS_EMBED=1; skipping tool build/embed."
   exit 0
 fi
 
-if [[ ! -f "${REPO_ROOT}/Cargo.toml" ]]; then
-  echo "[clawdex][error] Missing Cargo.toml in ${REPO_ROOT}."
-  echo "[clawdex][error] Set REPO_ROOT to your Cargo workspace or set SKIP_RUST_EMBED=1 for UI-only builds."
+is_macho() {
+  /usr/bin/file "$1" | /usr/bin/grep -q "Mach-O"
+}
+
+log() {
+  echo "[clawdex] $*"
+}
+
+die() {
+  echo "[clawdex][error] $*" >&2
   exit 1
-fi
-
-# The Cargo package names to build.
-# Adjust these to match your workspace (e.g. "codex-cli" instead of "codex").
-RUST_PACKAGES=(${RUST_PACKAGES:-codex clawdex})
-
-# The final executable names produced by cargo (often same as package name).
-# If your binary name differs from package name, update this list accordingly.
-RUST_BINARIES=(${RUST_BINARIES:-codex clawdex})
+}
 
 # Where to place intermediate artifacts
 ARTIFACT_DIR="${SRCROOT}/BuildArtifacts"
+BIN_STAGE_DIR="${ARTIFACT_DIR}/bin"
 UNIVERSAL_DIR="${ARTIFACT_DIR}/universal"
-mkdir -p "${UNIVERSAL_DIR}"
+/bin/rm -rf "${BIN_STAGE_DIR}" "${UNIVERSAL_DIR}"
+/bin/mkdir -p "${BIN_STAGE_DIR}" "${UNIVERSAL_DIR}"
 
-# Build per-arch
-ARCH_TARGETS=("aarch64-apple-darwin" "x86_64-apple-darwin")
-for TARGET in "${ARCH_TARGETS[@]}"; do
-  echo "[clawdex] Building Rust packages for ${TARGET}..."
-  pushd "${REPO_ROOT}" >/dev/null
-  for PKG in "${RUST_PACKAGES[@]}"; do
-    "${CARGO_BIN}" build --release --target "${TARGET}" -p "${PKG}"
-  done
-  popd >/dev/null
-done
+make_universal() {
+  local target_dir="$1"
+  local bin="$2"
+  local out="$3"
 
-make_universal () {
-  local bin="$1"
-  local out="${UNIVERSAL_DIR}/${bin}"
-
-  local a="${REPO_ROOT}/target/aarch64-apple-darwin/release/${bin}"
-  local x="${REPO_ROOT}/target/x86_64-apple-darwin/release/${bin}"
+  local a="${target_dir}/aarch64-apple-darwin/release/${bin}"
+  local x="${target_dir}/x86_64-apple-darwin/release/${bin}"
 
   if [[ ! -f "${a}" ]]; then
-    echo "[clawdex][error] Missing ${a} (check your Cargo package/bin names)"
-    exit 1
+    die "Missing ${a} (check your Cargo package/bin names)"
   fi
   if [[ ! -f "${x}" ]]; then
-    echo "[clawdex][error] Missing ${x} (check your Cargo package/bin names)"
-    exit 1
+    die "Missing ${x} (check your Cargo package/bin names)"
   fi
 
-  echo "[clawdex] Lipo ${bin} -> universal2"
+  log "Lipo ${bin} -> universal2"
   /usr/bin/lipo -create "${a}" "${x}" -output "${out}"
   /bin/chmod +x "${out}"
 }
 
-for BIN in "${RUST_BINARIES[@]}"; do
-  make_universal "${BIN}"
-done
+build_cargo_target() {
+  local cargo_root="$1"
+  local package="$2"
+  local target="$3"
+
+  if [[ ! -f "${cargo_root}/Cargo.toml" ]]; then
+    die "Missing Cargo.toml in ${cargo_root}"
+  fi
+  if ! command -v "${CARGO_BIN}" >/dev/null 2>&1; then
+    die "cargo not found. Install Rust or set CODEX_BIN/CLAWDEX_BIN to prebuilt binaries."
+  fi
+
+  pushd "${cargo_root}" >/dev/null
+  if /usr/bin/grep -q "\[workspace\]" Cargo.toml; then
+    "${CARGO_BIN}" build --release --target "${target}" -p "${package}"
+  else
+    "${CARGO_BIN}" build --release --target "${target}"
+  fi
+  popd >/dev/null
+}
+
+stage_prebuilt() {
+  local name="$1"
+  local bin_path="$2"
+  local dest="$3"
+
+  if [[ ! -x "${bin_path}" ]]; then
+    die "${name} binary not executable: ${bin_path}"
+  fi
+  if ! is_macho "${bin_path}"; then
+    die "${name} binary is not a Mach-O. Provide a macOS build."
+  fi
+  /bin/cp -f "${bin_path}" "${dest}"
+  /bin/chmod +x "${dest}"
+}
+
+log "Staging Codex..."
+if [[ -n "${CODEX_BIN}" ]]; then
+  log "Using codex binary at ${CODEX_BIN}"
+  stage_prebuilt "Codex" "${CODEX_BIN}" "${BIN_STAGE_DIR}/${CODEX_BINARY}"
+else
+  if [[ "${SKIP_CODEX_BUILD:-}" == "1" ]]; then
+    die "SKIP_CODEX_BUILD=1 but CODEX_BIN is not set."
+  fi
+  ARCH_TARGETS=("aarch64-apple-darwin" "x86_64-apple-darwin")
+  for TARGET in "${ARCH_TARGETS[@]}"; do
+    log "Building Codex for ${TARGET}..."
+    build_cargo_target "${CODEX_CARGO_ROOT}" "${CODEX_PACKAGE}" "${TARGET}"
+  done
+  make_universal "${CODEX_CARGO_ROOT}/target" "${CODEX_BINARY}" "${UNIVERSAL_DIR}/${CODEX_BINARY}"
+  /bin/cp -f "${UNIVERSAL_DIR}/${CODEX_BINARY}" "${BIN_STAGE_DIR}/${CODEX_BINARY}"
+fi
+
+log "Staging Clawdex..."
+if [[ -n "${CLAWDEX_BIN}" ]]; then
+  log "Using clawdex binary at ${CLAWDEX_BIN}"
+  stage_prebuilt "Clawdex" "${CLAWDEX_BIN}" "${BIN_STAGE_DIR}/${CLAWDEX_BINARY}"
+else
+  if [[ "${SKIP_CLAWDEX_BUILD:-}" == "1" ]]; then
+    die "SKIP_CLAWDEX_BUILD=1 but CLAWDEX_BIN is not set."
+  fi
+  ARCH_TARGETS=("aarch64-apple-darwin" "x86_64-apple-darwin")
+  for TARGET in "${ARCH_TARGETS[@]}"; do
+    log "Building Clawdex for ${TARGET}..."
+    build_cargo_target "${CLAWDEX_CARGO_ROOT}" "${CLAWDEX_PACKAGE}" "${TARGET}"
+  done
+  make_universal "${CLAWDEX_CARGO_ROOT}/target" "${CLAWDEX_BINARY}" "${UNIVERSAL_DIR}/${CLAWDEX_BINARY}"
+  /bin/cp -f "${UNIVERSAL_DIR}/${CLAWDEX_BINARY}" "${BIN_STAGE_DIR}/${CLAWDEX_BINARY}"
+fi
 
 # Copy into the app bundle
 APP_RES_DIR="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
 BIN_DIR="${APP_RES_DIR}/bin"
-mkdir -p "${BIN_DIR}"
-
-for BIN in "${RUST_BINARIES[@]}"; do
-  /bin/cp -f "${UNIVERSAL_DIR}/${BIN}" "${BIN_DIR}/${BIN}"
-  /bin/chmod +x "${BIN_DIR}/${BIN}"
-done
+/bin/rm -rf "${BIN_DIR}"
+/bin/mkdir -p "${BIN_DIR}"
+/usr/bin/rsync -a --delete "${BIN_STAGE_DIR}/" "${BIN_DIR}/"
 
 # Codesign the embedded executables so they can be executed from a sandboxed app.
 # NOTE: For Debug builds you may not have an expanded signing identity; skip in that case.
 if [[ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]]; then
-  echo "[clawdex] Codesigning embedded tools..."
-  for BIN in "${RUST_BINARIES[@]}"; do
-    /usr/bin/codesign --force \
-      --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \
-      --entitlements "${SRCROOT}/Resources/HelperTool.entitlements" \
-      --options runtime \
-      --timestamp \
-      "${BIN_DIR}/${BIN}"
+  log "Codesigning embedded tools..."
+  for BIN in "${BIN_DIR}/${CODEX_BINARY}" "${BIN_DIR}/${CLAWDEX_BINARY}"; do
+    if [[ -f "${BIN}" ]]; then
+      if is_macho "${BIN}"; then
+        /usr/bin/codesign --force \
+          --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \
+          --entitlements "${SRCROOT}/Resources/HelperTool.entitlements" \
+          --options runtime \
+          --timestamp \
+          "${BIN}"
+      else
+        log "Skipping codesign for non-Mach-O tool: ${BIN}"
+      fi
+    fi
   done
 else
-  echo "[clawdex] EXPANDED_CODE_SIGN_IDENTITY not set; skipping embedded-tool codesign (Debug?)"
+  log "EXPANDED_CODE_SIGN_IDENTITY not set; skipping embedded-tool codesign (Debug?)"
 fi
 
-echo "[clawdex] Done."
+log "Done."

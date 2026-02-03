@@ -5,7 +5,9 @@ options:
     macOS: "13.0"
 settings:
   base:
-    DEVELOPMENT_TEAM: YOURTEAMID
+    DEVELOPMENT_TEAM: JS498PMF4Z
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "Apple Development"
 targets:
   Clawdex:
     type: application

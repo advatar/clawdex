@@ -1,6 +1,6 @@
 # Codex + OpenClaw Compatibility Spec
 
-This document defines the Codex/OpenClaw compatibility contract implemented by `openclaw clawd`.
+This document defines the Codex/OpenClaw compatibility contract implemented by `clawdex`.
 
 ## Tool Surface (MCP)
 
@@ -37,7 +37,7 @@ The MCP server exposes OpenClaw-compatible tool names so OpenClaw skills can be 
 
 Default state root:
 
-- `~/.codex/clawd/`
+- `~/.codex/clawdex/`
   - `config.json` (optional)
   - `cron/jobs.json`
   - `cron/runs/<jobId>.jsonl`
@@ -48,7 +48,7 @@ Default state root:
     - `memory/YYYY-MM-DD.md`
     - `HEARTBEAT.md` (optional)
 
-The state directory can be overridden via `CODEX_CLAWD_STATE_DIR`.
+The state directory can be overridden via `CLAWDEX_STATE_DIR` (or `CODEX_CLAWD_STATE_DIR`).
 
 ## Session + Delivery Semantics
 
@@ -72,4 +72,3 @@ The state directory can be overridden via `CODEX_CLAWD_STATE_DIR`.
 - If `HEARTBEAT.md` exists and is effectively empty, heartbeat is skipped.
 - `HEARTBEAT_OK` responses are suppressed from delivery.
 - Active hours are honored when configured in `config.json`.
-

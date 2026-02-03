@@ -268,7 +268,7 @@ To behave like a real assistant, you need a long-running driver. Codex app-serve
   - For Codex app-server, generate schemas per version if you build typed clients (Codex can generate TS/JSON schemas).  [oai_citation:58‡OpenAI Developers](https://developers.openai.com/codex/app-server)  
 - [ ] Keep all Codex modifications isolated:
   - Ideally **zero changes** to Codex core.
-  - If you add a `codex clawd` subcommand, keep it as a thin wrapper that launches your daemon.
+  - If you add a `clawdex` subcommand, keep it as a thin wrapper that launches your daemon.
 
 **Acceptance criteria**
 - You can update Codex upstream with minimal conflict because your integration is via protocols (MCP/app-server) and separate binaries.

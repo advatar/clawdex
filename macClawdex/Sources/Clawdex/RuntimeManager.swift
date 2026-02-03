@@ -19,7 +19,7 @@ final class RuntimeManager: ObservableObject {
     let errorPublisher = PassthroughSubject<String, Never>()
 
     // Increment this whenever you change embedded tool wiring.
-    private let toolsVersion = "0.1.0"
+    private let toolsVersion = "0.3.0"
 
     func bootstrap(appState: AppState) {
         self.appState = appState
@@ -175,6 +175,9 @@ final class RuntimeManager: ObservableObject {
 
         let fm = FileManager.default
         let destDir = try toolsDir()
+        if fm.fileExists(atPath: destDir.path) {
+            try fm.removeItem(at: destDir)
+        }
         try fm.createDirectory(at: destDir, withIntermediateDirectories: true)
 
         // Embedded tool source dir (populated by Xcode build script)
@@ -182,29 +185,31 @@ final class RuntimeManager: ObservableObject {
             throw NSError(domain: "Clawdex", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing app resources dir"])
         }
 
-        let tools = ["codex", "clawdex"]
-        for tool in tools {
-            let src = srcRoot.appendingPathComponent(tool)
-            let dst = destDir.appendingPathComponent(tool)
+        let items = try fm.contentsOfDirectory(
+            at: srcRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
 
-            guard fm.fileExists(atPath: src.path) else {
-                throw NSError(domain: "Clawdex", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing embedded tool: \(src.path)"])
-            }
-
+        for src in items {
+            let dst = destDir.appendingPathComponent(src.lastPathComponent)
             if fm.fileExists(atPath: dst.path) {
                 try fm.removeItem(at: dst)
             }
             try fm.copyItem(at: src, to: dst)
 
-            // Ensure executable bit
-            var attrs = try fm.attributesOfItem(atPath: dst.path)
-            if let p = attrs[.posixPermissions] as? NSNumber {
-                let current = p.intValue
-                // add u+x
-                attrs[.posixPermissions] = NSNumber(value: current | 0o100)
-                try fm.setAttributes(attrs, ofItemAtPath: dst.path)
-            } else {
-                try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dst.path)
+            let isDir = (try? src.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            if !isDir {
+                // Ensure executable bit
+                var attrs = try fm.attributesOfItem(atPath: dst.path)
+                if let p = attrs[.posixPermissions] as? NSNumber {
+                    let current = p.intValue
+                    // add u+x
+                    attrs[.posixPermissions] = NSNumber(value: current | 0o100)
+                    try fm.setAttributes(attrs, ofItemAtPath: dst.path)
+                } else {
+                    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dst.path)
+                }
             }
         }
 
