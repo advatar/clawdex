@@ -216,7 +216,7 @@ final class RuntimeManager: ObservableObject {
         let dir = try toolsDir()
         return (
             codex: dir.appendingPathComponent("codex"),
-            codexClawd: dir.appendingPathComponent("clawdex")
+            clawdex: dir.appendingPathComponent("clawdex")
         )
     }
 
