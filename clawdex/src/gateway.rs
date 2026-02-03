@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use tiny_http::{Method, Response, Server, StatusCode};
 use uuid::Uuid;
 
-use crate::config::ClawdPaths;
+use crate::config::{ClawdPaths, GatewayConfig};
 use crate::util::{append_json_line, now_ms, read_json_value, write_json_value};
 
 const GATEWAY_DIR: &str = "gateway";
@@ -15,8 +15,6 @@ const OUTBOX_FILE: &str = "outbox.jsonl";
 const INBOX_FILE: &str = "inbox.jsonl";
 const ROUTES_FILE: &str = "routes.json";
 const IDEMPOTENCY_FILE: &str = "idempotency.json";
-const DEFAULT_CHANNEL: &str = "local";
-const DEFAULT_TO: &str = "console";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteEntry {
@@ -59,6 +57,13 @@ impl RouteStore {
 
     fn get_route(&self, session_key: &str) -> Option<RouteEntry> {
         self.routes.get(session_key).cloned()
+    }
+
+    fn entries(&self) -> Vec<(String, RouteEntry)> {
+        self.routes
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
     }
 }
 
@@ -110,12 +115,40 @@ fn inbox_path(paths: &ClawdPaths) -> PathBuf {
     gateway_dir(paths).join(INBOX_FILE)
 }
 
+fn load_gateway_config(paths: &ClawdPaths) -> Result<GatewayConfig> {
+    let (cfg, _) = crate::config::load_config(
+        Some(paths.state_dir.clone()),
+        Some(paths.workspace_dir.clone()),
+    )?;
+    Ok(cfg.gateway.unwrap_or_default())
+}
+
+fn route_cutoff_ms(cfg: &GatewayConfig) -> Option<i64> {
+    cfg.route_ttl_ms
+        .map(|ttl| now_ms().saturating_sub(ttl as i64))
+}
+
+fn route_is_fresh(route: &RouteEntry, cutoff: Option<i64>) -> bool {
+    cutoff.map(|cutoff| route.updated_at_ms >= cutoff).unwrap_or(true)
+}
+
 pub fn send_message(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     let text = args
         .get("text")
         .or_else(|| args.get("message"))
         .and_then(|v| v.as_str())
         .context("message.send requires text or message")?;
+
+    let best_effort = args
+        .get("bestEffort")
+        .or_else(|| args.get("best_effort"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let dry_run = args
+        .get("dryRun")
+        .or_else(|| args.get("dry_run"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let channel = args.get("channel").and_then(|v| v.as_str());
     let to = args.get("to").and_then(|v| v.as_str());
@@ -136,7 +169,13 @@ pub fn send_message(paths: &ClawdPaths, args: &Value) -> Result<Value> {
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("auto-{}", Uuid::new_v4()));
 
+    if dry_run {
+        return Ok(json!({ "ok": true, "dryRun": true }));
+    }
+
     let mut route_store = RouteStore::load(paths)?;
+    let cfg = load_gateway_config(paths)?;
+    let cutoff = route_cutoff_ms(&cfg);
     let route = match (channel, to) {
         (Some(c), Some(t)) => RouteEntry {
             channel: c.to_string(),
@@ -144,12 +183,21 @@ pub fn send_message(paths: &ClawdPaths, args: &Value) -> Result<Value> {
             account_id: args.get("accountId").and_then(|v| v.as_str()).map(|s| s.to_string()),
             updated_at_ms: now_ms(),
         },
-        _ => route_store.get_route(&session_key).unwrap_or(RouteEntry {
-            channel: DEFAULT_CHANNEL.to_string(),
-            to: DEFAULT_TO.to_string(),
-            account_id: None,
-            updated_at_ms: now_ms(),
-        }),
+        _ => match route_store.get_route(&session_key) {
+            Some(route) if route_is_fresh(&route, cutoff) => route,
+            _ => {
+                if best_effort {
+                    return Ok(json!({
+                        "ok": false,
+                        "bestEffort": true,
+                        "error": "no route available"
+                    }));
+                }
+                return Err(anyhow::anyhow!(
+                    "message.send missing channel/to and no last route"
+                ));
+            }
+        },
     };
 
     let mut idempotency = IdempotencyStore::load(paths)?;
@@ -179,6 +227,106 @@ pub fn send_message(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     idempotency.insert(&idempotency_key, now_ms())?;
 
     Ok(json!({ "ok": true, "queued": true, "message": entry }))
+}
+
+pub fn list_channels(paths: &ClawdPaths) -> Result<Value> {
+    let store = RouteStore::load(paths)?;
+    let cfg = load_gateway_config(paths)?;
+    let cutoff = route_cutoff_ms(&cfg);
+
+    let mut entries = store
+        .entries()
+        .into_iter()
+        .filter(|(_, route)| route_is_fresh(route, cutoff))
+        .map(|(session_key, route)| {
+            json!({
+                "channel": route.channel,
+                "to": route.to,
+                "accountId": route.account_id,
+                "sessionKey": session_key,
+                "updatedAtMs": route.updated_at_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_by(|a, b| {
+        let a_ts = a.get("updatedAtMs").and_then(|v| v.as_i64()).unwrap_or(0);
+        let b_ts = b.get("updatedAtMs").and_then(|v| v.as_i64()).unwrap_or(0);
+        b_ts.cmp(&a_ts)
+    });
+
+    Ok(json!({
+        "channels": entries,
+        "count": entries.len(),
+        "routeTtlMs": cfg.route_ttl_ms,
+    }))
+}
+
+pub fn resolve_target(paths: &ClawdPaths, args: &Value) -> Result<Value> {
+    let channel = args
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let to = args
+        .get("to")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let account_id = args
+        .get("accountId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    if let (Some(channel), Some(to)) = (channel.clone(), to.clone()) {
+        let session_key = format!("{channel}:{to}");
+        return Ok(json!({
+            "ok": true,
+            "channel": channel,
+            "to": to,
+            "accountId": account_id,
+            "sessionKey": session_key,
+        }));
+    }
+
+    let store = RouteStore::load(paths)?;
+    let cfg = load_gateway_config(paths)?;
+    let cutoff = route_cutoff_ms(&cfg);
+
+    let mut routes = store
+        .entries()
+        .into_iter()
+        .filter(|(_, route)| route_is_fresh(route, cutoff))
+        .collect::<Vec<_>>();
+
+    if let Some(ref channel) = channel {
+        routes.retain(|(_, route)| route.channel == *channel);
+    }
+    if let Some(ref to) = to {
+        routes.retain(|(_, route)| route.to == *to);
+    }
+    if let Some(ref account_id) = account_id {
+        routes.retain(|(_, route)| route.account_id.as_deref() == Some(account_id.as_str()));
+    }
+
+    routes.sort_by(|a, b| b.1.updated_at_ms.cmp(&a.1.updated_at_ms));
+
+    if let Some((session_key, route)) = routes.first() {
+        return Ok(json!({
+            "ok": true,
+            "channel": route.channel,
+            "to": route.to,
+            "accountId": route.account_id,
+            "sessionKey": session_key,
+            "updatedAtMs": route.updated_at_ms,
+        }));
+    }
+
+    Ok(json!({
+        "ok": false,
+        "reason": "no matching route",
+        "channel": channel,
+        "to": to,
+        "accountId": account_id,
+    }))
 }
 
 pub fn record_incoming(paths: &ClawdPaths, payload: &Value) -> Result<Value> {

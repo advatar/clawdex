@@ -27,8 +27,8 @@ The MCP server exposes OpenClaw-compatible tool names so OpenClaw skills can be 
 ### Messaging (gateway-backed)
 
 - `message.send({ channel, to, text|message, accountId?, sessionKey?, bestEffort?, dryRun? })`
-- `channels.list()` (stub)
-- `channels.resolve_target({ channel?, to?, accountId? })` (stub)
+- `channels.list()` (returns known routes)
+- `channels.resolve_target({ channel?, to?, accountId? })` (resolves from last routes)
 
 ### Heartbeat
 
@@ -62,7 +62,7 @@ The state directory can be overridden via `CLAWDEX_STATE_DIR` (or `CODEX_CLAWD_S
 - `message.send` updates `gateway/routes.json` with the last route per session key.
 - Cron delivery rules:
   - If `payload.channel`/`payload.to` are omitted, delivery falls back to the last route.
-  - If no route exists, the gateway defaults to `local/console` (minimal gateway mode).
+  - If no route exists and `bestEffort` is true, delivery is skipped instead of failing.
 
 ## Cron Payload Semantics
 

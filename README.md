@@ -160,7 +160,7 @@ Example `config.json5`:
     approval_policy: "on-request",
     config_overrides: ["model=gpt-5.2-codex"]
   },
-  gateway: { bind: "127.0.0.1:18789" }
+  gateway: { bind: "127.0.0.1:18789", route_ttl_ms: 86400000 }
 }
 ```
 
@@ -240,8 +240,8 @@ Memory tools:
 
 Messaging tools:
 1. `message.send({ channel, to, text|message, accountId?, sessionKey?, bestEffort?, dryRun? })` (queues to gateway outbox)
-2. `channels.list()` (stub)
-3. `channels.resolve_target({ channel?, to?, accountId? })` (stub)
+2. `channels.list()` (returns known routes)
+3. `channels.resolve_target({ channel?, to?, accountId? })` (resolves from last routes)
 
 Heartbeat tool:
 1. `heartbeat.wake({ reason? })`

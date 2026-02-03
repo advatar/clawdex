@@ -299,7 +299,11 @@ fn tool_definitions() -> Vec<Tool> {
                     "channel": { "type": "string" },
                     "to": { "type": "string" },
                     "text": { "type": "string" },
-                    "message": { "type": "string" }
+                    "message": { "type": "string" },
+                    "accountId": { "type": "string" },
+                    "sessionKey": { "type": "string" },
+                    "bestEffort": { "type": "boolean" },
+                    "dryRun": { "type": "boolean" }
                 },
                 "additionalProperties": true
             }),
@@ -311,7 +315,7 @@ fn tool_definitions() -> Vec<Tool> {
         Tool {
             name: "channels.list".to_string(),
             title: None,
-            description: Some("List channels (stub)".to_string()),
+            description: Some("List gateway routes".to_string()),
             input_schema: json!({ "type": "object", "additionalProperties": true }),
             output_schema: None,
             annotations: None,
@@ -321,12 +325,13 @@ fn tool_definitions() -> Vec<Tool> {
         Tool {
             name: "channels.resolve_target".to_string(),
             title: None,
-            description: Some("Resolve messaging target (stub)".to_string()),
+            description: Some("Resolve messaging target from known routes".to_string()),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "channel": { "type": "string" },
-                    "to": { "type": "string" }
+                    "to": { "type": "string" },
+                    "accountId": { "type": "string" }
                 },
                 "additionalProperties": true
             }),
@@ -378,8 +383,8 @@ fn handle_tool_call(
         "memory_search" => memory::memory_search(paths, &arguments)?,
         "memory_get" => memory::memory_get(paths, &arguments)?,
         "message.send" => gateway::send_message(paths, &arguments)?,
-        "channels.list" => json!({ "channels": [] }),
-        "channels.resolve_target" => json!({ "ok": false, "reason": "channels not configured" }),
+        "channels.list" => gateway::list_channels(paths)?,
+        "channels.resolve_target" => gateway::resolve_target(paths, &arguments)?,
         "heartbeat.wake" => {
             if !heartbeat_enabled {
                 json!({ "ok": false, "reason": "heartbeat disabled" })

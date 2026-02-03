@@ -9,6 +9,7 @@
 - [x] Memory index: SQLite FTS5 + embeddings hybrid search (provider-configurable)
 - [x] Update docs for gateway/daemon/memory/approval options + prebuilt binaries flow
 - [x] Track `macClawdex/Resources/prebuilt` binaries in Git LFS
+- [x] Implement non-stub channel tools (`channels.list`, `channels.resolve_target`) and complete `message.send` options
 
 Notes:
 - `TEMPLATE_PACK.md` is the parity checklist: use it later to fill tool schemas, routing rules, and tests, then implement remaining gaps using the name `Clawdex`.
