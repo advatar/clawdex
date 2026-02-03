@@ -20,6 +20,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: se.advatar.Clawdex
         CODE_SIGN_ENTITLEMENTS: Resources/Clawdex.entitlements
+        GENERATE_INFOPLIST_FILE: YES
         MACOSX_DEPLOYMENT_TARGET: "26.0"
         SWIFT_VERSION: "6.2"
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Advatar Systems AB"

@@ -66,7 +66,8 @@ struct SettingsView: View {
             Section("Workspace") {
                 HStack {
                     Button("Choose workspace folder…") {
-                        WorkspaceAccess.pickFolderAndPersistBookmark { result in
+                        Task { @MainActor in
+                            let result = await WorkspaceAccess.pickFolderAndPersistBookmark()
                             switch result {
                             case .success(let url):
                                 workspaceStatus = "Workspace set: \(url.path)"

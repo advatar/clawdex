@@ -17,6 +17,17 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-${SRCROOT}/..}"
 CARGO_BIN="${CARGO_BIN:-cargo}"
 
+if [[ "${SKIP_RUST_EMBED:-}" == "1" ]]; then
+  echo "[clawdex] SKIP_RUST_EMBED=1; skipping Rust build/embed."
+  exit 0
+fi
+
+if [[ ! -f "${REPO_ROOT}/Cargo.toml" ]]; then
+  echo "[clawdex][error] Missing Cargo.toml in ${REPO_ROOT}."
+  echo "[clawdex][error] Set REPO_ROOT to your Cargo workspace or set SKIP_RUST_EMBED=1 for UI-only builds."
+  exit 1
+fi
+
 # The Cargo package names to build.
 # Adjust these to match your workspace (e.g. "codex-cli" instead of "codex").
 RUST_PACKAGES=(${RUST_PACKAGES:-codex clawdex})

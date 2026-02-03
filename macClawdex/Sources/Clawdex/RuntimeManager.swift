@@ -245,16 +245,28 @@ final class RuntimeManager: ObservableObject {
 
     // MARK: - Log streaming
 
-    private func attachReaders(stdout: Pipe, stderr: Pipe) {
-        stdout.fileHandleForReading.readabilityHandler = { [weak self] h in
-            let data = h.availableData
-            if data.isEmpty { return }
-            self?.handleOutput(data: data, stream: "stdout")
+    private final class WeakRuntimeManager: @unchecked Sendable {
+        weak var value: RuntimeManager?
+        init(_ value: RuntimeManager) {
+            self.value = value
         }
-        stderr.fileHandleForReading.readabilityHandler = { [weak self] h in
+    }
+
+    private func attachReaders(stdout: Pipe, stderr: Pipe) {
+        let weakSelf = WeakRuntimeManager(self)
+        stdout.fileHandleForReading.readabilityHandler = { h in
             let data = h.availableData
             if data.isEmpty { return }
-            self?.handleOutput(data: data, stream: "stderr")
+            Task { @MainActor in
+                weakSelf.value?.handleOutput(data: data, stream: "stdout")
+            }
+        }
+        stderr.fileHandleForReading.readabilityHandler = { h in
+            let data = h.availableData
+            if data.isEmpty { return }
+            Task { @MainActor in
+                weakSelf.value?.handleOutput(data: data, stream: "stderr")
+            }
         }
     }
 
@@ -293,11 +305,13 @@ final class RuntimeManager: ObservableObject {
     }
 
     private func appendLog(_ line: String) {
-        DispatchQueue.main.async {
-            self.logs.append(line)
+        let weakSelf = WeakRuntimeManager(self)
+        Task { @MainActor in
+            guard let strongSelf = weakSelf.value else { return }
+            strongSelf.logs.append(line)
             // keep memory bounded
-            if self.logs.count > 2000 {
-                self.logs.removeFirst(self.logs.count - 2000)
+            if strongSelf.logs.count > 2000 {
+                strongSelf.logs.removeFirst(strongSelf.logs.count - 2000)
             }
         }
     }

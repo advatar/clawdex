@@ -9,30 +9,29 @@ enum WorkspaceAccessError: Error {
 
 enum WorkspaceAccess {
     /// Prompts user to pick a folder. Stores an app-scoped security-scoped bookmark in UserDefaults.
-    static func pickFolderAndPersistBookmark(completion: @escaping (Result<URL, Error>) -> Void) {
+    @MainActor
+    static func pickFolderAndPersistBookmark() async -> Result<URL, Error> {
         let panel = NSOpenPanel()
         panel.title = "Choose workspace folder"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
 
-        panel.begin { response in
-            guard response == .OK, let url = panel.url else {
-                completion(.failure(WorkspaceAccessError.userCancelled))
-                return
-            }
+        let response = panel.runModal()
+        guard response == .OK, let url = panel.url else {
+            return .failure(WorkspaceAccessError.userCancelled)
+        }
 
-            do {
-                let bookmark = try url.bookmarkData(
-                    options: [.withSecurityScope],
-                    includingResourceValuesForKeys: nil,
-                    relativeTo: nil
-                )
-                UserDefaults.standard.set(bookmark, forKey: DefaultsKeys.workspaceBookmark)
-                completion(.success(url))
-            } catch {
-                completion(.failure(error))
-            }
+        do {
+            let bookmark = try url.bookmarkData(
+                options: [.withSecurityScope],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            UserDefaults.standard.set(bookmark, forKey: DefaultsKeys.workspaceBookmark)
+            return .success(url)
+        } catch {
+            return .failure(error)
         }
     }
 
