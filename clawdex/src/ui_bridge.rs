@@ -64,6 +64,7 @@ pub fn run_ui_bridge(
                     &thread_id,
                     text,
                     approval_policy,
+                    None,
                     workspace.as_ref().map(|p| p.to_path_buf()),
                 ) {
                     Ok(outcome) => {

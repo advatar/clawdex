@@ -59,10 +59,24 @@ clawdex mcp-server --workspace /path/to/workspace --state-dir /path/to/state
 **Run the Daemon (Cron + Heartbeat Loop)**
 
 ```bash
-clawdex daemon --workspace /path/to/workspace --state-dir /path/to/state
+clawdex daemon --codex-path /path/to/codex --workspace /path/to/workspace --state-dir /path/to/state
 ```
 
-The daemon is a stub runner today: it persists cron runs and heartbeat logs but does not execute Codex turns yet.
+The daemon executes due cron jobs + heartbeat turns by spawning `codex app-server`.
+Provide a `codex` path via `--codex-path` or `codex.path` in config.
+
+---
+
+**Run the Gateway (HTTP)**
+
+```bash
+clawdex gateway --bind 127.0.0.1:18789
+```
+
+The gateway accepts:
+- `GET /v1/health`
+- `POST /v1/send` (queue outbound message)
+- `POST /v1/incoming` (record inbound message + update last route)
 
 ---
 
@@ -106,16 +120,21 @@ Override paths via env:
 - `CLAWDEX_STATE_DIR` (or `CODEX_CLAWD_STATE_DIR`)
 - `CLAWDEX_CONFIG_PATH` (or `CODEX_CLAWD_CONFIG_PATH`)
 - `CLAWDEX_WORKSPACE` (or `CODEX_CLAWD_WORKSPACE_DIR` / `CODEX_WORKSPACE_DIR`)
+- `CLAWDEX_CODEX_PATH` (daemon only; overrides `codex.path`)
 
 Default state layout:
 1. `~/.codex/clawdex/config.json` (optional)
 2. `~/.codex/clawdex/cron/jobs.json`
 3. `~/.codex/clawdex/cron/runs/<jobId>.jsonl`
-4. `~/.codex/clawdex/memory/<agentId>.sqlite` (future; index placeholder)
-5. `~/.codex/clawdex/sessions.json`
-6. `WORKSPACE/MEMORY.md`
-7. `WORKSPACE/memory/YYYY-MM-DD.md`
-8. `WORKSPACE/HEARTBEAT.md` (optional)
+4. `~/.codex/clawdex/cron/pending.json`
+5. `~/.codex/clawdex/memory/fts.sqlite`
+6. `~/.codex/clawdex/gateway/outbox.jsonl`
+7. `~/.codex/clawdex/gateway/inbox.jsonl`
+8. `~/.codex/clawdex/gateway/routes.json`
+9. `~/.codex/clawdex/gateway/idempotency.json`
+10. `WORKSPACE/MEMORY.md`
+11. `WORKSPACE/memory/YYYY-MM-DD.md`
+12. `WORKSPACE/HEARTBEAT.md` (optional)
 
 Example `config.json5`:
 
@@ -124,7 +143,24 @@ Example `config.json5`:
   workspace: "/path/to/workspace",
   cron: { enabled: true },
   heartbeat: { enabled: true, interval_ms: 1800000 },
-  memory: { enabled: true, citations: "auto" }
+  memory: {
+    enabled: true,
+    citations: "auto",
+    embeddings: {
+      enabled: true,
+      provider: "openai",
+      model: "text-embedding-3-large",
+      api_base: "https://api.openai.com",
+      api_key_env: "OPENAI_API_KEY",
+      batch_size: 32
+    }
+  },
+  codex: {
+    path: "/path/to/codex",
+    approval_policy: "on-request",
+    config_overrides: ["model=gpt-5.2-codex"]
+  },
+  gateway: { bind: "127.0.0.1:18789" }
 }
 ```
 
@@ -141,8 +177,16 @@ Example `config.json5`:
    - `--state-dir <path>` overrides state directory.
 
 `clawdex daemon`
-1. Description: Run the background loop for cron + heartbeat persistence.
+1. Description: Run the background loop for cron + heartbeat execution.
 2. Options:
+   - `--workspace <path>` overrides workspace directory.
+   - `--state-dir <path>` overrides state directory.
+   - `--codex-path <path>` overrides the `codex` binary path.
+
+`clawdex gateway`
+1. Description: Run the minimal HTTP gateway (outbox/inbox + route tracking).
+2. Options:
+   - `--bind <addr>` overrides bind address (default `127.0.0.1:18789`).
    - `--workspace <path>` overrides workspace directory.
    - `--state-dir <path>` overrides state directory.
 
@@ -171,6 +215,12 @@ Example `config.json5`:
 - `CLAWDEX_APPROVAL_POLICY` = `never`, `on-request`, `on-failure`, `unless-trusted`.
 - `CLAWDEX_CODEX_CONFIG` = semicolon‑separated `--config key=value` overrides forwarded to Codex.
 
+Approval policy options:
+- `never`
+- `on-request` (default for `clawdex daemon`)
+- `on-failure`
+- `unless-trusted`
+
 ---
 
 **MCP Tool Surface (Implemented)**
@@ -188,10 +238,10 @@ Memory tools:
 1. `memory_search({ query, maxResults?, minScore?, sessionKey? })`
 2. `memory_get({ path, from?, lines? })`
 
-Messaging tools (stub):
-1. `message.send({ channel, to, text|message, accountId?, sessionKey?, bestEffort?, dryRun? })`
-2. `channels.list()`
-3. `channels.resolve_target({ channel?, to?, accountId? })`
+Messaging tools:
+1. `message.send({ channel, to, text|message, accountId?, sessionKey?, bestEffort?, dryRun? })` (queues to gateway outbox)
+2. `channels.list()` (stub)
+3. `channels.resolve_target({ channel?, to?, accountId? })` (stub)
 
 Heartbeat tool:
 1. `heartbeat.wake({ reason? })`

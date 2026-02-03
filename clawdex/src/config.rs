@@ -11,6 +11,8 @@ pub struct ClawdConfig {
     pub cron: Option<CronConfig>,
     pub heartbeat: Option<HeartbeatConfig>,
     pub memory: Option<MemoryConfig>,
+    pub codex: Option<CodexConfig>,
+    pub gateway: Option<GatewayConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -28,6 +30,30 @@ pub struct HeartbeatConfig {
 pub struct MemoryConfig {
     pub enabled: Option<bool>,
     pub citations: Option<String>,
+    pub embeddings: Option<EmbeddingsConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EmbeddingsConfig {
+    pub enabled: Option<bool>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub api_base: Option<String>,
+    pub api_key_env: Option<String>,
+    pub batch_size: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CodexConfig {
+    pub path: Option<String>,
+    pub approval_policy: Option<String>,
+    pub config_overrides: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GatewayConfig {
+    pub bind: Option<String>,
+    pub route_ttl_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +187,13 @@ pub fn resolve_citations_mode(cfg: &ClawdConfig) -> String {
         .as_ref()
         .and_then(|m| m.citations.clone())
         .unwrap_or_else(|| "auto".to_string())
+}
+
+pub fn resolve_embeddings_config(cfg: &ClawdConfig) -> EmbeddingsConfig {
+    cfg.memory
+        .as_ref()
+        .and_then(|m| m.embeddings.clone())
+        .unwrap_or_default()
 }
 
 pub fn resolve_workspace_path(paths: &ClawdPaths, rel: &str) -> Result<PathBuf> {

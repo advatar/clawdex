@@ -2,3 +2,4 @@ VALIDATE.md
 .DS_Store
 clawdex/target/
 macClawdex/BuildArtifacts/
+macClawdex/Resources/prebuilt/

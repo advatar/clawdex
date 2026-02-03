@@ -6,9 +6,12 @@ use clap::{Parser, Subcommand};
 mod app_server;
 mod config;
 mod cron;
+mod daemon;
+mod gateway;
 mod heartbeat;
 mod mcp;
 mod memory;
+mod runner;
 mod skills_sync;
 mod ui_bridge;
 mod util;
@@ -45,6 +48,9 @@ enum Commands {
         /// State directory (overrides default)
         #[arg(long = "state-dir")]
         state_dir: Option<PathBuf>,
+        /// Path to the codex binary (overrides config/env)
+        #[arg(long = "codex-path")]
+        codex_path: Option<PathBuf>,
     },
     /// Sync OpenClaw skills into Codex skill directories
     Skills {
@@ -65,6 +71,18 @@ enum Commands {
         /// Workspace directory
         #[arg(long)]
         workspace: Option<PathBuf>,
+    },
+    /// Run the minimal gateway server (HTTP)
+    Gateway {
+        /// Bind address (overrides config; default: 127.0.0.1:18789)
+        #[arg(long)]
+        bind: Option<String>,
+        /// Workspace directory (overrides config/env)
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// State directory (overrides default)
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
     },
 }
 
@@ -99,9 +117,13 @@ fn main() -> Result<()> {
             let (cfg, paths) = config::load_config(state_dir, workspace)?;
             mcp::run_mcp_server(cfg, paths, !no_cron, !no_heartbeat)
         }
-        Commands::Daemon { workspace, state_dir } => {
+        Commands::Daemon {
+            workspace,
+            state_dir,
+            codex_path,
+        } => {
             let (cfg, paths) = config::load_config(state_dir, workspace)?;
-            heartbeat::run_daemon(cfg, paths)
+            daemon::run_daemon(cfg, paths, codex_path)
         }
         Commands::Skills { command } => match command {
             SkillsCommand::Sync {
@@ -126,5 +148,16 @@ fn main() -> Result<()> {
             state_dir,
             workspace,
         } => ui_bridge::run_ui_bridge(codex_path, state_dir, workspace),
+        Commands::Gateway {
+            bind,
+            workspace,
+            state_dir,
+        } => {
+            let (cfg, paths) = config::load_config(state_dir, workspace)?;
+            let resolved_bind = bind
+                .or_else(|| cfg.gateway.and_then(|g| g.bind))
+                .unwrap_or_else(|| "127.0.0.1:18789".to_string());
+            gateway::run_gateway(&resolved_bind, &paths)
+        }
     }
 }

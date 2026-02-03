@@ -13,7 +13,7 @@ The MCP server exposes OpenClaw-compatible tool names so OpenClaw skills can be 
 - `cron.add(CronJobCreate) -> CronJob`
 - `cron.update({ id?: string, jobId?: string, patch: CronJobPatch }) -> CronJob`
 - `cron.remove({ id?: string, jobId?: string }) -> { ok, removed }`
-- `cron.run({ id?: string, jobId?: string, mode?: "due" | "force" }) -> { ok, ran, reason? }`
+- `cron.run({ id?: string, jobId?: string, mode?: "due" | "force" }) -> { ok, queued, entries }`
 - `cron.runs({ id?: string, jobId?: string, limit?: number }) -> { entries: CronRunLogEntry[] }`
 
 ### Memory
@@ -22,8 +22,9 @@ The MCP server exposes OpenClaw-compatible tool names so OpenClaw skills can be 
 - `memory_get({ path, from?, lines? })`
 
 `memory_get` only permits `MEMORY.md` and `memory/**/*.md` relative to the workspace.
+`memory_search` uses SQLite FTS5 with optional embeddings if configured.
 
-### Messaging (stub-compatible)
+### Messaging (gateway-backed)
 
 - `message.send({ channel, to, text|message, accountId?, sessionKey?, bestEffort?, dryRun? })`
 - `channels.list()` (stub)
@@ -41,8 +42,12 @@ Default state root:
   - `config.json` (optional)
   - `cron/jobs.json`
   - `cron/runs/<jobId>.jsonl`
-  - `memory/<agentId>.sqlite` (index, when embeddings are available)
-  - `sessions.json`
+  - `cron/pending.json`
+  - `memory/fts.sqlite`
+  - `gateway/outbox.jsonl`
+  - `gateway/inbox.jsonl`
+  - `gateway/routes.json`
+  - `gateway/idempotency.json`
   - `workspace/`
     - `MEMORY.md`
     - `memory/YYYY-MM-DD.md`
@@ -53,12 +58,11 @@ The state directory can be overridden via `CLAWDEX_STATE_DIR` (or `CODEX_CLAWD_S
 ## Session + Delivery Semantics
 
 - Main session key: `agent:main:main`.
-- Cron isolated sessions use `agent:main:cron:<jobId>`.
-- If `message.send` succeeds, `sessions.json` updates the last route for the session.
+- Cron isolated sessions use `cron:<jobId>`.
+- `message.send` updates `gateway/routes.json` with the last route per session key.
 - Cron delivery rules:
-  - If `payload.to` is provided, delivery occurs even when `payload.deliver` is omitted.
   - If `payload.channel`/`payload.to` are omitted, delivery falls back to the last route.
-  - If no route exists and `bestEffortDeliver` is `true`, the run is marked `skipped` instead of `error`.
+  - If no route exists, the gateway defaults to `local/console` (minimal gateway mode).
 
 ## Cron Payload Semantics
 
@@ -71,4 +75,3 @@ The state directory can be overridden via `CLAWDEX_STATE_DIR` (or `CODEX_CLAWD_S
 - Interval default: 30 minutes.
 - If `HEARTBEAT.md` exists and is effectively empty, heartbeat is skipped.
 - `HEARTBEAT_OK` responses are suppressed from delivery.
-- Active hours are honored when configured in `config.json`.

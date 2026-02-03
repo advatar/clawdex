@@ -11,8 +11,8 @@ use codex_app_server_protocol::{
     FileChangeApprovalDecision, FileChangeRequestApprovalParams,
     FileChangeRequestApprovalResponse, InitializeCapabilities, InitializeParams, JSONRPCMessage,
     JSONRPCNotification, JSONRPCRequest, JSONRPCResponse, RequestId, ServerNotification,
-    ServerRequest, ThreadStartParams, ToolRequestUserInputResponse, TurnStartParams, TurnStatus,
-    UserInput as V2UserInput,
+    SandboxPolicy, ServerRequest, ThreadStartParams, ToolRequestUserInputResponse, TurnStartParams,
+    TurnStatus, UserInput as V2UserInput,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -135,6 +135,7 @@ impl CodexClient {
         thread_id: &str,
         message: &str,
         approval_policy: Option<AskForApproval>,
+        sandbox_policy: Option<SandboxPolicy>,
         cwd: Option<std::path::PathBuf>,
     ) -> Result<TurnOutcome> {
         let request_id = self.request_id();
@@ -147,6 +148,7 @@ impl CodexClient {
             ..Default::default()
         };
         params.approval_policy = approval_policy;
+        params.sandbox_policy = sandbox_policy;
         params.cwd = cwd;
 
         let request = ClientRequest::TurnStart {

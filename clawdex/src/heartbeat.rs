@@ -1,15 +1,9 @@
 use std::path::PathBuf;
-use std::thread;
-use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use crate::config::{
-    resolve_cron_enabled, resolve_heartbeat_enabled, resolve_heartbeat_interval_ms, ClawdConfig,
-    ClawdPaths,
-};
-use crate::cron;
+use crate::config::ClawdPaths;
 use crate::util::{append_json_line, now_ms};
 
 fn heartbeat_log_path(paths: &ClawdPaths) -> PathBuf {
@@ -53,22 +47,4 @@ pub fn wake(paths: &ClawdPaths, reason: Option<String>) -> Result<Value> {
     Ok(entry)
 }
 
-pub fn run_daemon(cfg: ClawdConfig, paths: ClawdPaths) -> Result<()> {
-    let cron_enabled = resolve_cron_enabled(&cfg);
-    let heartbeat_enabled = resolve_heartbeat_enabled(&cfg);
-    let interval = resolve_heartbeat_interval_ms(&cfg);
-
-    let mut next_heartbeat = now_ms() + interval as i64;
-
-    loop {
-        let now = now_ms();
-        if cron_enabled {
-            let _ = cron::run_due_jobs(&paths, now);
-        }
-        if heartbeat_enabled && now >= next_heartbeat {
-            let _ = wake(&paths, Some("interval".to_string()));
-            next_heartbeat = now + interval as i64;
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
-}
+// Daemon loop moved to daemon.rs

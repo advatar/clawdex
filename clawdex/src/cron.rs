@@ -4,6 +4,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use chrono_tz::Tz;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
@@ -12,6 +13,21 @@ use crate::util::{append_json_line, now_ms, read_json_lines, read_json_value, wr
 
 const JOBS_FILE: &str = "jobs.json";
 const RUNS_DIR: &str = "runs";
+const PENDING_FILE: &str = "pending.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronJob {
+    pub id: String,
+    pub name: Option<String>,
+    pub session_target: String,
+    pub wake_mode: String,
+    pub payload: Value,
+    pub deliver: bool,
+    pub channel: Option<String>,
+    pub to: Option<String>,
+    pub best_effort: bool,
+    pub delete_after_run: bool,
+}
 
 #[derive(Debug, Clone)]
 struct ScheduleSpec {
@@ -149,6 +165,10 @@ fn runs_path(paths: &ClawdPaths, job_id: &str) -> PathBuf {
     paths.cron_dir.join(RUNS_DIR).join(format!("{job_id}.jsonl"))
 }
 
+fn pending_path(paths: &ClawdPaths) -> PathBuf {
+    paths.cron_dir.join(PENDING_FILE)
+}
+
 fn load_jobs(paths: &ClawdPaths) -> Result<Vec<Value>> {
     let path = jobs_path(paths);
     let Some(value) = read_json_value(&path)? else {
@@ -224,6 +244,129 @@ fn find_job_mut<'a>(jobs: &'a mut [Value], job_id: &str) -> Option<&'a mut Map<S
         }
     }
     None
+}
+
+fn payload_message(payload: &Value) -> Option<String> {
+    if let Some(text) = payload.as_str() {
+        return Some(text.to_string());
+    }
+    payload
+        .get("message")
+        .or_else(|| payload.get("text"))
+        .or_else(|| payload.get("prompt"))
+        .or_else(|| payload.get("event"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn build_cron_job(job: &Value) -> Option<CronJob> {
+    let id = job
+        .get("id")
+        .or_else(|| job.get("jobId"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())?;
+    let name = job.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let session_target = job
+        .get("sessionTarget")
+        .and_then(|v| v.as_str())
+        .unwrap_or("main")
+        .to_string();
+    let wake_mode = job
+        .get("wakeMode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("now")
+        .to_string();
+    let payload = job.get("payload").cloned().unwrap_or(Value::Null);
+    let deliver = payload
+        .get("deliver")
+        .or_else(|| job.get("deliver"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let channel = payload
+        .get("channel")
+        .or_else(|| job.get("channel"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let to = payload
+        .get("to")
+        .or_else(|| job.get("to"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let best_effort = payload
+        .get("bestEffortDeliver")
+        .or_else(|| job.get("bestEffortDeliver"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let delete_after_run = job
+        .get("deleteAfterRun")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    Some(CronJob {
+        id,
+        name,
+        session_target,
+        wake_mode,
+        payload,
+        deliver,
+        channel,
+        to,
+        best_effort,
+        delete_after_run,
+    })
+}
+
+pub fn job_prompt(job: &CronJob, now: i64) -> Option<String> {
+    let kind = job
+        .payload
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("agentTurn");
+    let message = payload_message(&job.payload)?;
+    let stamp = Utc
+        .timestamp_millis_opt(now)
+        .single()
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| "unknown-time".to_string());
+    let label = match &job.name {
+        Some(name) => format!("[cron:{} {}]", job.id, name),
+        None => format!("[cron:{}]", job.id),
+    };
+    let prefix = match kind {
+        "systemEvent" => "System event",
+        _ => "Cron job",
+    };
+    Some(format!("{label} {prefix} @ {stamp}\n\n{message}"))
+}
+
+pub fn job_session_key(job: &CronJob) -> String {
+    match job.session_target.as_str() {
+        "isolated" => format!("cron:{}", job.id),
+        _ => "agent:main:main".to_string(),
+    }
+}
+
+pub fn drain_pending_jobs(paths: &ClawdPaths) -> Result<Vec<CronJob>> {
+    let path = pending_path(paths);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let data = read_json_value(&path)?.unwrap_or(Value::Array(Vec::new()));
+    let jobs: Vec<CronJob> = serde_json::from_value(data).unwrap_or_default();
+    write_json_value(&path, &Value::Array(Vec::new()))?;
+    Ok(jobs)
+}
+
+fn enqueue_pending_job(paths: &ClawdPaths, job: &CronJob) -> Result<()> {
+    let path = pending_path(paths);
+    let mut pending: Vec<CronJob> = if let Some(value) = read_json_value(&path)? {
+        serde_json::from_value(value).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    pending.push(job.clone());
+    write_json_value(&path, &serde_json::to_value(pending)?)?;
+    Ok(())
 }
 
 pub fn list_jobs(paths: &ClawdPaths, include_disabled: bool) -> Result<Value> {
@@ -327,7 +470,13 @@ pub fn runs(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     Ok(json!({ "entries": entries }))
 }
 
-fn record_run(paths: &ClawdPaths, job_id: &str, status: &str, reason: &str) -> Result<Value> {
+pub fn record_run(
+    paths: &ClawdPaths,
+    job_id: &str,
+    status: &str,
+    reason: &str,
+    details: Option<Value>,
+) -> Result<Value> {
     let now = now_ms();
     let entry = json!({
         "runId": Uuid::new_v4().to_string(),
@@ -336,6 +485,7 @@ fn record_run(paths: &ClawdPaths, job_id: &str, status: &str, reason: &str) -> R
         "endedAtMs": now,
         "status": status,
         "reason": reason,
+        "details": details,
     });
     append_json_line(&runs_path(paths, job_id), &entry)?;
     Ok(entry)
@@ -348,65 +498,24 @@ pub fn run_jobs(paths: &ClawdPaths, args: &Value) -> Result<Value> {
         .unwrap_or("due");
     let job_id = job_id_from_args(args);
     let now = now_ms();
-    let mut jobs = load_jobs(paths)?;
-    let mut ran = 0usize;
-    let mut skipped = 0usize;
-    let mut entries = Vec::new();
-
-    let target_ids: Vec<String> = if let Some(id) = job_id {
-        vec![id]
-    } else {
-        jobs.iter()
-            .filter_map(|job| job.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
-            .collect()
-    };
-
-    for target in target_ids {
-        let Some(job) = find_job_mut(&mut jobs, &target) else {
-            continue;
-        };
-        let enabled = job.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-        if !enabled {
-            skipped += 1;
-            continue;
-        }
-        let schedule = job
-            .get("schedule")
-            .and_then(ScheduleSpec::from_value);
-        let last_run = job_last_run_at(&Value::Object(job.clone()));
-        let created_at = job_created_at(&Value::Object(job.clone()));
-        let due = schedule
-            .as_ref()
-            .map(|s| s.is_due(last_run, created_at, now))
-            .unwrap_or(false);
-
-        if mode == "due" && !due {
-            skipped += 1;
-            continue;
-        }
-
-        let entry = record_run(paths, &target, "skipped", "execution not implemented")?;
-        entries.push(entry);
-        ran += 1;
-        job.insert("lastRunAtMs".to_string(), Value::Number(now.into()));
-
-        let delete_after = job
-            .get("deleteAfterRun")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if delete_after {
-            *job = Map::new();
-        }
-    }
-
-    jobs.retain(|job| !job.as_object().map(|m| m.is_empty()).unwrap_or(false));
-    save_jobs(paths, &jobs)?;
-    Ok(json!({ "ok": true, "ran": ran, "skipped": skipped, "entries": entries }))
+    let (queued_jobs, entries) = collect_due_jobs(paths, now, mode, job_id)?;
+    Ok(json!({
+        "ok": true,
+        "queued": queued_jobs.len(),
+        "entries": entries
+    }))
 }
 
-pub fn run_due_jobs(paths: &ClawdPaths, now: i64) -> Result<Vec<Value>> {
+pub fn collect_due_jobs(
+    paths: &ClawdPaths,
+    now: i64,
+    mode: &str,
+    job_filter: Option<String>,
+) -> Result<(Vec<CronJob>, Vec<Value>)> {
     let mut jobs = load_jobs(paths)?;
+    let mut queued = Vec::new();
     let mut entries = Vec::new();
+
     for job in &mut jobs {
         let Some(map) = job.as_object_mut() else { continue };
         let enabled = map.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -422,26 +531,48 @@ pub fn run_due_jobs(paths: &ClawdPaths, now: i64) -> Result<Vec<Value>> {
             .as_ref()
             .map(|s| s.is_due(last_run, created_at, now))
             .unwrap_or(false);
-        if !due {
-            continue;
-        }
+
         let job_id = map
             .get("id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let entry = record_run(paths, &job_id, "skipped", "execution not implemented")?;
-        entries.push(entry);
+
+        if let Some(ref filter) = job_filter {
+            if &job_id != filter {
+                continue;
+            }
+        }
+
+        if mode == "due" && !due {
+            continue;
+        }
+
         map.insert("lastRunAtMs".to_string(), Value::Number(now.into()));
-        let delete_after = map
-            .get("deleteAfterRun")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if delete_after {
-            map.clear();
+        map.insert("updatedAtMs".to_string(), Value::Number(now.into()));
+
+        let job_value = Value::Object(map.clone());
+        if let Some(cron_job) = build_cron_job(&job_value) {
+            let wake_mode = cron_job.wake_mode.clone();
+            if wake_mode == "next-heartbeat" {
+                enqueue_pending_job(paths, &cron_job)?;
+                let entry = record_run(paths, &job_id, "queued", "next-heartbeat", None)?;
+                entries.push(entry);
+            } else {
+                let entry = record_run(paths, &job_id, "queued", "scheduled", None)?;
+                entries.push(entry);
+                queued.push(cron_job.clone());
+            }
+            if cron_job.delete_after_run {
+                map.clear();
+            }
+        } else {
+            let entry = record_run(paths, &job_id, "skipped", "invalid job", None)?;
+            entries.push(entry);
         }
     }
+
     jobs.retain(|job| !job.as_object().map(|m| m.is_empty()).unwrap_or(false));
     save_jobs(paths, &jobs)?;
-    Ok(entries)
+    Ok((queued, entries))
 }

@@ -9,6 +9,7 @@ use crate::config::{
     resolve_cron_enabled, resolve_heartbeat_enabled, ClawdConfig, ClawdPaths,
 };
 use crate::cron;
+use crate::gateway;
 use crate::heartbeat;
 use crate::memory;
 
@@ -376,7 +377,7 @@ fn handle_tool_call(
         "cron.runs" => cron::runs(paths, &arguments)?,
         "memory_search" => memory::memory_search(paths, &arguments)?,
         "memory_get" => memory::memory_get(paths, &arguments)?,
-        "message.send" => json!({ "ok": false, "reason": "message.send not configured" }),
+        "message.send" => gateway::send_message(paths, &arguments)?,
         "channels.list" => json!({ "channels": [] }),
         "channels.resolve_target" => json!({ "ok": false, "reason": "channels not configured" }),
         "heartbeat.wake" => {
