@@ -14,14 +14,14 @@ This README focuses on local development setup and the clawdex CLI surface.
 **Prereqs**
 1. Node.js 22+ and `pnpm`
 2. A working Codex binary on your PATH as `codex` (used by clawdex to spawn `codex app-server`)
-3. macOS Xcode + CLT only if you plan to build the macOS app starter in `clawd-macos-app-starter`
+3. macOS Xcode + CLT only if you plan to build the macOS app starter in `macClawdex`
 
 ---
 
 **Repo Layout**
 1. `openclaw/` contains the clawdex implementation and CLI integration.
 2. `codex/` is a submodule for the Codex CLI/app-server.
-3. `clawd-macos-app-starter/` is a SwiftUI starter app that embeds `codex` and `clawdex`.
+3. `macClawdex/` is a SwiftUI starter app that embeds `codex` and `clawdex`.
 
 ---
 
@@ -161,7 +161,7 @@ Heartbeat tool:
 **Mac App Starter**
 
 If you want to run the macOS app starter:
-1. `cd clawd-macos-app-starter`
+1. `cd macClawdex`
 2. `xcodegen generate`
 3. `xcodebuild -project Clawdex.xcodeproj -scheme Clawdex -configuration Debug build`
 
