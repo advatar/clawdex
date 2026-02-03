@@ -56,6 +56,7 @@ Key inputs (override via environment variables):
    - `PREBUILT_DIR` (default `macClawdex/Resources/prebuilt`)
    - Place `codex` and/or `clawdex` binaries at that path to skip Cargo.
    - Helper: `Scripts/stage_prebuilt.sh` copies built binaries into the prebuilt folder.
+   - The `prebuilt/` folder is tracked with Git LFS; ensure `git lfs install` is run before committing binaries.
 3. Skips:
    - `SKIP_CODEX_BUILD=1` (requires `CODEX_BIN`)
    - `SKIP_CLAWDEX_BUILD=1` (requires `CLAWDEX_BIN`)

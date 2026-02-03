@@ -8,6 +8,7 @@
 - [x] Execute cron/heartbeat via Codex runner (`clawdex daemon`) with on-request approvals
 - [x] Memory index: SQLite FTS5 + embeddings hybrid search (provider-configurable)
 - [x] Update docs for gateway/daemon/memory/approval options + prebuilt binaries flow
+- [x] Track `macClawdex/Resources/prebuilt` binaries in Git LFS
 
 Notes:
 - `TEMPLATE_PACK.md` is the parity checklist: use it later to fill tool schemas, routing rules, and tests, then implement remaining gaps using the name `Clawdex`.
