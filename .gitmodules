@@ -1,0 +1,6 @@
+[submodule "codex"]
+	path = codex
+	url = git@github.com:advatar/codex.git
+[submodule "openclaw"]
+	path = openclaw
+	url = git@github.com:advatar/openclaw.git
