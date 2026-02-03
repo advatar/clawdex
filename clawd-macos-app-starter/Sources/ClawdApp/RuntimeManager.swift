@@ -70,16 +70,16 @@ final class RuntimeManager: ObservableObject {
 
         do {
             let toolPaths = try toolInstallPaths()
-            let clawdURL = toolPaths.codexClawd
+            let clawdexURL = toolPaths.clawdex
             let codexURL = toolPaths.codex
 
             let stateDir = try ensureStateDir()
 
             let p = Process()
-            p.executableURL = clawdURL
+            p.executableURL = clawdexURL
 
-            // NOTE: These arguments are a suggested contract. Implement them in codex-clawd.
-            // You can change them, but keep the app and codex-clawd in sync.
+            // NOTE: These arguments are a suggested contract. Implement them in clawdex.
+            // You can change them, but keep the app and clawdex in sync.
             var args: [String] = []
             args += ["ui-bridge", "--stdio"]  // recommended: JSONL over stdin/stdout
             args += ["--codex-path", codexURL.path]
@@ -94,7 +94,7 @@ final class RuntimeManager: ObservableObject {
             // Environment: pass API key and any other required vars.
             var env = ProcessInfo.processInfo.environment
             env["OPENAI_API_KEY"] = openAIKey
-            env["CLAWD_APP"] = "1"
+            env["CLAWDEX_APP"] = "1"
             p.environment = env
 
             // Pipes
@@ -116,7 +116,7 @@ final class RuntimeManager: ObservableObject {
             try p.run()
             self.process = p
             self.isRunning = true
-            appendLog("[app] Started codex-clawd (pid \(p.processIdentifier))")
+            appendLog("[app] Started clawdex (pid \(p.processIdentifier))")
 
         } catch {
             appState.lastError = error.localizedDescription
@@ -129,7 +129,7 @@ final class RuntimeManager: ObservableObject {
         workspaceURL = nil
 
         if let p = process {
-            appendLog("[app] Stopping codex-clawd (pid \(p.processIdentifier))…")
+            appendLog("[app] Stopping clawdex (pid \(p.processIdentifier))…")
             p.terminate()
         }
         process = nil
@@ -149,7 +149,7 @@ final class RuntimeManager: ObservableObject {
             return
         }
 
-        // Simple JSONL protocol (implement in codex-clawd):
+        // Simple JSONL protocol (implement in clawdex):
         // {"type":"user_message","text":"..."}
         let payload: [String: Any] = [
             "type": "user_message",
@@ -179,16 +179,16 @@ final class RuntimeManager: ObservableObject {
 
         // Embedded tool source dir (populated by Xcode build script)
         guard let srcRoot = Bundle.main.resourceURL?.appendingPathComponent("bin", isDirectory: true) else {
-            throw NSError(domain: "ClawdApp", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing app resources dir"])
+            throw NSError(domain: "Clawdex", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing app resources dir"])
         }
 
-        let tools = ["codex", "codex-clawd"]
+        let tools = ["codex", "clawdex"]
         for tool in tools {
             let src = srcRoot.appendingPathComponent(tool)
             let dst = destDir.appendingPathComponent(tool)
 
             guard fm.fileExists(atPath: src.path) else {
-                throw NSError(domain: "ClawdApp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing embedded tool: \(src.path)"])
+                throw NSError(domain: "Clawdex", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing embedded tool: \(src.path)"])
             }
 
             if fm.fileExists(atPath: dst.path) {
@@ -212,11 +212,11 @@ final class RuntimeManager: ObservableObject {
         appendLog("[app] Installed tools into \(destDir.path) (version \(toolsVersion))")
     }
 
-    private func toolInstallPaths() throws -> (codex: URL, codexClawd: URL) {
+    private func toolInstallPaths() throws -> (codex: URL, clawdex: URL) {
         let dir = try toolsDir()
         return (
             codex: dir.appendingPathComponent("codex"),
-            codexClawd: dir.appendingPathComponent("codex-clawd")
+            codexClawd: dir.appendingPathComponent("clawdex")
         )
     }
 
@@ -235,9 +235,9 @@ final class RuntimeManager: ObservableObject {
     private func appSupportDir() throws -> URL {
         let fm = FileManager.default
         guard let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            throw NSError(domain: "ClawdApp", code: 3, userInfo: [NSLocalizedDescriptionKey: "No Application Support directory"])
+            throw NSError(domain: "Clawdex", code: 3, userInfo: [NSLocalizedDescriptionKey: "No Application Support directory"])
         }
-        let bid = Bundle.main.bundleIdentifier ?? "ClawdApp"
+        let bid = Bundle.main.bundleIdentifier ?? "Clawdex"
         let dir = base.appendingPathComponent(bid, isDirectory: true)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
@@ -262,9 +262,9 @@ final class RuntimeManager: ObservableObject {
         guard let s = String(data: data, encoding: .utf8) else { return }
         for line in s.split(separator: "\n", omittingEmptySubsequences: true) {
             let text = String(line)
-            appendLog("[clawd][\(stream)] \(text)")
+            appendLog("[clawdex][\(stream)] \(text)")
 
-            // Suggested convention: codex-clawd prints JSON lines for UI events.
+            // Suggested convention: clawdex prints JSON lines for UI events.
             // Example:
             //   {"type":"assistant_message","text":"hello"}
             //   {"type":"error","message":"..."}

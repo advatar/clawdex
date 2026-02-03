@@ -1,8 +1,8 @@
 
 This starter is a **menu-bar macOS app** that:
-- **Builds universal2** Rust binaries (`codex`, `codex-clawd`) in an Xcode build phase
+- **Builds universal2** Rust binaries (`codex`, `clawdex`) in an Xcode build phase
 - **Embeds** them into the app bundle, **codesigns** them, and copies them into the app’s **Application Support** container
-- Runs `codex-clawd` as a **child process** and talks to it over **JSONL on stdin/stdout** (a small, reliable bridge)
+- Runs `clawdex` as a **child process** and talks to it over **JSONL on stdin/stdout** (a small, reliable bridge)
 - Provides UI for:
   - **Launch at login** (user-controlled via `SMAppService`)
   - **OpenAI key** stored in **Keychain**
@@ -10,12 +10,12 @@ This starter is a **menu-bar macOS app** that:
 
 ---
 
-## 1) What you need to implement on the Rust side (codex-clawd)
+## 1) What you need to implement on the Rust side (clawdex)
 
-The starter app expects `codex-clawd` to support a UI bridge mode:
+The starter app expects `clawdex` to support a UI bridge mode:
 
 - Command:
-  - `codex-clawd ui-bridge --stdio --codex-path <path> --state-dir <path> [--workspace <path>]`
+  - `clawdex ui-bridge --stdio --codex-path <path> --state-dir <path> [--workspace <path>]`
 - Transport:
   - stdin: newline-delimited JSON (JSONL)
   - stdout: JSONL events (assistant messages + errors)
@@ -42,7 +42,7 @@ The Xcode build script does the following:
 2. Uses `lipo` to create universal2 binaries
 
 3. Copies binaries into:
-- `ClawdApp.app/Contents/Resources/bin/`
+- `Clawdex.app/Contents/Resources/bin/`
 
 4. Codesigns those embedded executables using an “inherit” entitlement:
 - `Resources/HelperTool.entitlements` includes `com.apple.security.inherit` (common pattern for embedded helpers)
@@ -58,7 +58,7 @@ If your Cargo package or binary names differ, adjust:
 On app start, `RuntimeManager` copies embedded tools into the app’s container:
 - `~/Library/Application Support/<bundle-id>/tools/`
 
-Then it runs `codex-clawd` from there.
+Then it runs `clawdex` from there.
 
 This avoids trying to mutate the app bundle and keeps all state within the sandbox container.
 
@@ -77,7 +77,7 @@ For workspace access outside the container, you typically need:
 A practical explanation of why *passing arbitrary paths is not enough* and how bookmarks help is here.  [oai_citation:1‡Timac](https://blog.timac.org/2021/0516-mac-app-store-embedding-a-command-line-tool-using-paths-as-arguments/)
 
 The starter app already includes:
-- `com.apple.security.files.user-selected.read-write` and bookmark entitlement in `Resources/ClawdApp.entitlements`
+- `com.apple.security.files.user-selected.read-write` and bookmark entitlement in `Resources/Clawdex.entitlements`
 - Folder picker + bookmark persistence (`WorkspaceAccess.swift`)
 
 ### B) Login/background behavior must be user-consented
@@ -125,19 +125,19 @@ This doesn’t prevent you from reaching OpenClaw parity; it just makes parity *
 
 ### Step 0 — Place the project
 - Put the folder somewhere like:
-  - `apps/macos/ClawdApp`
+  - `apps/macos/Clawdex`
 
 ### Step 1 — Generate/open the Xcode project
 This starter uses XcodeGen for reproducibility:
 - Run `xcodegen generate`
-- Open `ClawdApp.xcodeproj`
+- Open `Clawdex.xcodeproj`
 
 (If you don’t want XcodeGen, create a new SwiftUI macOS app in Xcode and copy `Sources/`, `Resources/`, and the build script.)
 
 ### Step 2 — Set signing + bundle IDs
 Edit `project.yml`:
 - `DEVELOPMENT_TEAM: YOURTEAMID`
-- `PRODUCT_BUNDLE_IDENTIFIER: com.yourcompany.ClawdApp`
+- `PRODUCT_BUNDLE_IDENTIFIER: com.yourcompany.Clawdex`
 
 ### Step 3 — Make sure Rust can build universal2
 Install targets:
@@ -149,7 +149,7 @@ In `Scripts/build_and_embed_rust.sh`, update:
 - `RUST_PACKAGES` (Cargo package names)
 - `RUST_BINARIES` (produced binary names)
 
-### Step 5 — Implement `codex-clawd ui-bridge --stdio`
+### Step 5 — Implement `clawdex ui-bridge --stdio`
 - Parse stdin JSONL `user_message`
 - Run a Codex “turn” (however you’re already doing it)
 - Emit stdout JSONL events:
@@ -176,7 +176,7 @@ Starter includes a minimal manifest at `Resources/PrivacyInfo.xcprivacy` (you mu
 
 ---
 
-## 6) How to bundle “all binaries” (beyond codex + codex-clawd)
+## 6) How to bundle “all binaries” (beyond codex + clawdex)
 
 If you have additional helpers (gateway, extra MCP servers, etc.):
 
@@ -186,7 +186,7 @@ If you have additional helpers (gateway, extra MCP servers, etc.):
    - copy into `Resources/bin/`
    - codesign them (same identity + inherit entitlements)
 
-2. Add a small “tool registry” in `codex-clawd`:
+2. Add a small “tool registry” in `clawdex`:
    - discover tool paths under `Application Support/<bid>/tools/`
    - spawn them on-demand
 

@@ -29,7 +29,7 @@ struct ChatView: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading) {
-                Text("Clawd")
+                Text("Clawdex")
                     .font(.headline)
                 Text(runtime.isRunning ? "Agent running" : "Agent stopped")
                     .font(.caption)
@@ -104,7 +104,7 @@ struct ChatView: View {
     private func label(for role: ChatMessage.Role) -> String {
         switch role {
         case .user: return "You"
-        case .assistant: return "Clawd"
+        case .assistant: return "Clawdex"
         case .system: return "System"
         }
     }

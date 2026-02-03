@@ -7,7 +7,7 @@ This project is intentionally minimal. Before submitting to the Mac App Store:
 - Ensure all embedded executables are bundled and signed.
 
 This repo includes:
-- sandbox entitlements (Resources/ClawdApp.entitlements)
+- sandbox entitlements (Resources/Clawdex.entitlements)
 - helper-tool entitlements with `com.apple.security.inherit` (Resources/HelperTool.entitlements)
 - a starter PrivacyInfo.xcprivacy manifest (Resources/PrivacyInfo.xcprivacy)
 

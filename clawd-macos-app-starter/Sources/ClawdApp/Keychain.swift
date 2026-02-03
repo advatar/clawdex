@@ -7,7 +7,7 @@ enum KeychainError: Error {
 }
 
 enum Keychain {
-    private static let service = "com.yourcompany.ClawdApp"
+    private static let service = "se.advatar.Clawdex"
     private static let account = "openai_api_key"
 
     static func saveOpenAIKey(_ key: String) throws {

@@ -8,8 +8,8 @@ set -euo pipefail
 # Expected layout (adjust as needed):
 #   repo/
 #     codex/              (upstream codex cli source)
-#     codex-clawd/        (your clawd daemon / MCP server)
-#     apps/macos/ClawdApp (this project)
+#     clawdex/        (your clawdex daemon / MCP server)
+#     apps/macos/Clawdex (this project)
 #
 # If you're using a single Cargo workspace at repo root, set REPO_ROOT accordingly.
 # -----------------------------------------------------------------------------
@@ -19,11 +19,11 @@ CARGO_BIN="${CARGO_BIN:-cargo}"
 
 # The Cargo package names to build.
 # Adjust these to match your workspace (e.g. "codex-cli" instead of "codex").
-RUST_PACKAGES=(${RUST_PACKAGES:-codex codex-clawd})
+RUST_PACKAGES=(${RUST_PACKAGES:-codex clawdex})
 
 # The final executable names produced by cargo (often same as package name).
 # If your binary name differs from package name, update this list accordingly.
-RUST_BINARIES=(${RUST_BINARIES:-codex codex-clawd})
+RUST_BINARIES=(${RUST_BINARIES:-codex clawdex})
 
 # Where to place intermediate artifacts
 ARTIFACT_DIR="${SRCROOT}/BuildArtifacts"
@@ -33,7 +33,7 @@ mkdir -p "${UNIVERSAL_DIR}"
 # Build per-arch
 ARCH_TARGETS=("aarch64-apple-darwin" "x86_64-apple-darwin")
 for TARGET in "${ARCH_TARGETS[@]}"; do
-  echo "[clawd] Building Rust packages for ${TARGET}..."
+  echo "[clawdex] Building Rust packages for ${TARGET}..."
   pushd "${REPO_ROOT}" >/dev/null
   for PKG in "${RUST_PACKAGES[@]}"; do
     "${CARGO_BIN}" build --release --target "${TARGET}" -p "${PKG}"
@@ -49,15 +49,15 @@ make_universal () {
   local x="${REPO_ROOT}/target/x86_64-apple-darwin/release/${bin}"
 
   if [[ ! -f "${a}" ]]; then
-    echo "[clawd][error] Missing ${a} (check your Cargo package/bin names)"
+    echo "[clawdex][error] Missing ${a} (check your Cargo package/bin names)"
     exit 1
   fi
   if [[ ! -f "${x}" ]]; then
-    echo "[clawd][error] Missing ${x} (check your Cargo package/bin names)"
+    echo "[clawdex][error] Missing ${x} (check your Cargo package/bin names)"
     exit 1
   fi
 
-  echo "[clawd] Lipo ${bin} -> universal2"
+  echo "[clawdex] Lipo ${bin} -> universal2"
   /usr/bin/lipo -create "${a}" "${x}" -output "${out}"
   /bin/chmod +x "${out}"
 }
@@ -79,7 +79,7 @@ done
 # Codesign the embedded executables so they can be executed from a sandboxed app.
 # NOTE: For Debug builds you may not have an expanded signing identity; skip in that case.
 if [[ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]]; then
-  echo "[clawd] Codesigning embedded tools..."
+  echo "[clawdex] Codesigning embedded tools..."
   for BIN in "${RUST_BINARIES[@]}"; do
     /usr/bin/codesign --force \
       --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \
@@ -89,7 +89,7 @@ if [[ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]]; then
       "${BIN_DIR}/${BIN}"
   done
 else
-  echo "[clawd] EXPANDED_CODE_SIGN_IDENTITY not set; skipping embedded-tool codesign (Debug?)"
+  echo "[clawdex] EXPANDED_CODE_SIGN_IDENTITY not set; skipping embedded-tool codesign (Debug?)"
 fi
 
-echo "[clawd] Done."
+echo "[clawdex] Done."

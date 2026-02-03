@@ -1,8 +1,8 @@
-# Runtime protocol (suggested) — codex-clawd ui-bridge --stdio
+# Runtime protocol (suggested) — clawdex ui-bridge --stdio
 
-The starter macOS app talks to `codex-clawd` via **newline-delimited JSON** over stdin/stdout.
+The starter macOS app talks to `clawdex` via **newline-delimited JSON** over stdin/stdout.
 
-## App → codex-clawd (stdin)
+## App → clawdex (stdin)
 
 ### User message
 ```json
@@ -13,7 +13,7 @@ The starter macOS app talks to `codex-clawd` via **newline-delimited JSON** over
 - `thread` (string) — optional thread/session key
 - `route`  — optional delivery route key (channel/to)
 
-## codex-clawd → App (stdout)
+## clawdex → App (stdout)
 
 ### Assistant message
 ```json

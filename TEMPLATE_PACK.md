@@ -1,4 +1,4 @@
-Below is a **drop-in template pack** you can use as the single “source of truth” for parity: tools, schemas, skill dependencies, routing rules, and the test matrix. It’s designed so you can fill it mostly by **grepping OpenClaw skills + tool definitions**, then implement against it in your **`codex-clawd` MCP server + scheduler daemon**.
+Below is a **drop-in template pack** you can use as the single “source of truth” for parity: tools, schemas, skill dependencies, routing rules, and the test matrix. It’s designed so you can fill it mostly by **grepping OpenClaw skills + tool definitions**, then implement against it in your **`clawdex` MCP server + scheduler daemon**.
 
 ---
 
@@ -46,7 +46,7 @@ This folder defines the parity contract for instrumenting Codex to behave like a
 1) This spec is the only definition of “done”.
 2) Tools listed under `tools[]` MUST exist as callable MCP tools with request/response schemas.
 3) Skills listed under `skills-inventory.yaml` MUST run without editing their bodies, except for documented shims.
-4) Any divergence from OpenClaw naming MUST be handled inside `codex-clawd` (tool aliasing), not in skills.
+4) Any divergence from OpenClaw naming MUST be handled inside `clawdex` (tool aliasing), not in skills.
 5) Upstream Codex must remain unmodified unless explicitly approved in `meta.exceptions`.
 
 ## How to fill this spec
@@ -74,8 +74,8 @@ This folder defines the parity contract for instrumenting Codex to behave like a
   - 1 scenario test proving it completes end-to-end
 
 ## Deliverables
-- `codex-clawd` MCP server implements all tools in this spec.
-- `codex-clawd` scheduler implements cron + heartbeat semantics.
+- `clawdex` MCP server implements all tools in this spec.
+- `clawdex` scheduler implements cron + heartbeat semantics.
 - Optional gateway bridge implements message routing/delivery.
 
 ```
@@ -101,7 +101,7 @@ meta:
       commit: "FILL_ME"
   constraints:
     - "Prefer extension mechanisms (MCP + Skills) over patching Codex core"
-    - "Any naming mismatch resolved in codex-clawd tool aliasing"
+    - "Any naming mismatch resolved in clawdex tool aliasing"
   exceptions: []
   owners:
     - handle: "FILL_ME"
@@ -133,7 +133,7 @@ runtime:
 mcp:
   server_id: "clawd"
   transport: "stdio"  # stdio | http
-  command: "codex-clawd"
+  command: "clawdex"
   args: ["mcp-server"]
   env:
     # API keys etc. resolved externally; keep secrets out of this spec

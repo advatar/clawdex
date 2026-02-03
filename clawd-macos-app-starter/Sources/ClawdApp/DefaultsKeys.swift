@@ -1,7 +1,7 @@
 import Foundation
 
 enum DefaultsKeys {
-    static let agentAutoStart = "clawd.agentAutoStart"
-    static let workspaceBookmark = "clawd.workspaceBookmark"
-    static let toolsVersion = "clawd.toolsVersion"
+    static let agentAutoStart = "clawdex.agentAutoStart"
+    static let workspaceBookmark = "clawdex.workspaceBookmark"
+    static let toolsVersion = "clawdex.toolsVersion"
 }

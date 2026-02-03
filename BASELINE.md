@@ -14,7 +14,7 @@ Below is a concrete build plan that gets you to “Codex + OpenClaw-grade capabi
    - Connects to MCP servers via `mcp_servers.*` in `config.toml`  [oai_citation:3‡OpenAI Developers](https://developers.openai.com/codex/config-reference/)  
    - Optionally run via **Codex app-server** (best for long-running “assistant” mode)  [oai_citation:4‡OpenAI Developers](https://developers.openai.com/codex/app-server)  
 
-2. **codex-clawd (new, yours)** — the “always-on assistant runtime”
+2. **clawdex (new, yours)** — the “always-on assistant runtime”
    - Runs continuously (like OpenClaw Gateway does) and provides:
      - **Internal scheduler**: cron + heartbeat (OpenClaw semantics)  [oai_citation:5‡OpenClaw](https://docs.openclaw.ai/automation/cron-jobs)  
      - **Persistent memory service**: `memory_search`/`memory_get` compatible tools  [oai_citation:6‡OpenClaw](https://docs.openclaw.ai/concepts/memory)  
@@ -81,7 +81,7 @@ Goal: implement the OpenClaw tool surface so copied skills “just work”.
 Codex can connect to MCP servers via `mcp_servers.<id>…` config entries (stdio or HTTP).  [oai_citation:20‡OpenAI Developers](https://developers.openai.com/codex/mcp)
 
 **Checklist**
-- [ ] Create `codex-clawd mcp-server` (Rust or Node—pick what reuses the most OpenClaw code fastest).
+- [ ] Create `clawdex mcp-server` (Rust or Node—pick what reuses the most OpenClaw code fastest).
 - [ ] Implement tool namespaces (initially):
   - **cron**: `cron.list`, `cron.status`, `cron.add`, `cron.update`, `cron.remove`, `cron.run`, `cron.runs`  [oai_citation:21‡OpenClaw](https://docs.openclaw.ai/automation/cron-jobs)  
   - **memory**: `memory_search`, `memory_get`  [oai_citation:22‡OpenClaw](https://docs.openclaw.ai/concepts/memory)  
@@ -205,7 +205,7 @@ OpenClaw Gateway basics:
 **Checklist (reuse OpenClaw Gateway route)**
 - [ ] Run OpenClaw Gateway with agent execution disabled (or no-op), and cron disabled to avoid double scheduling:
   - cron is normally inside Gateway; disable it so **your Codex scheduler is authoritative**.  [oai_citation:48‡OpenClaw](https://docs.openclaw.ai/automation/cron-jobs)  
-- [ ] Implement `clawd-gateway-bridge` (inside `codex-clawd`):
+- [ ] Implement `clawd-gateway-bridge` (inside `clawdex`):
   - Connect to OpenClaw Gateway WS as operator.
   - Subscribe to inbound message events and resolve channel/session identity.  [oai_citation:49‡OpenClaw](https://docs.openclaw.ai/gateway/protocol)  
 - [ ] Implement session mapping:
@@ -236,7 +236,7 @@ OpenClaw Gateway basics:
 To behave like a real assistant, you need a long-running driver. Codex app-server is explicitly meant for rich clients and streaming agent events.  [oai_citation:51‡OpenAI Developers](https://developers.openai.com/codex/app-server)
 
 **Checklist**
-- [ ] Implement a “Codex runner” abstraction in `codex-clawd`:
+- [ ] Implement a “Codex runner” abstraction in `clawdex`:
   - start/stop the Codex backend
   - `ensure_thread(routeKey) -> threadId`
   - `run_turn(threadId, input, overrides) -> streamed output`

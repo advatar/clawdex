@@ -1,29 +1,29 @@
-name: ClawdApp
+name: Clawdex
 options:
-  bundleIdPrefix: com.yourcompany
+  bundleIdPrefix: se.advatar
   deploymentTarget:
     macOS: "13.0"
 settings:
   base:
     DEVELOPMENT_TEAM: YOURTEAMID
 targets:
-  ClawdApp:
+  Clawdex:
     type: application
     platform: macOS
     sources:
-      - path: Sources/ClawdApp
+      - path: Sources/Clawdex
     resources:
       - path: Resources
     entitlements:
-      path: Resources/ClawdApp.entitlements
+      path: Resources/Clawdex.entitlements
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.yourcompany.ClawdApp
-        CODE_SIGN_ENTITLEMENTS: Resources/ClawdApp.entitlements
-        MACOSX_DEPLOYMENT_TARGET: "13.0"
-        SWIFT_VERSION: "5.9"
-        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Your Company"
+        PRODUCT_BUNDLE_IDENTIFIER: se.advatar.Clawdex
+        CODE_SIGN_ENTITLEMENTS: Resources/Clawdex.entitlements
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        SWIFT_VERSION: "6.2"
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Advatar Systems AB"
     postBuildScripts:
-      - name: Build and embed Rust tools (codex + codex-clawd)
+      - name: Build and embed Rust tools (codex + clawdex)
         script: Scripts/build_and_embed_rust.sh
         basedOnDependencyAnalysis: false

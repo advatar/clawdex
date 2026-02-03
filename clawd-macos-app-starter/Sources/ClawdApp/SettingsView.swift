@@ -93,7 +93,7 @@ struct SettingsView: View {
             }
 
             Section("Embedded runtime") {
-                Text("This app expects `codex` and `codex-clawd` to be embedded in Resources/bin by the build script.")
+                Text("This app expects `codex` and `clawdex` to be embedded in Resources/bin by the build script.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 

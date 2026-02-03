@@ -1,12 +1,12 @@
 import SwiftUI
 
 @main
-struct ClawdAppApp: App {
+struct ClawdexApp: App {
     @StateObject private var appState = AppState()
     @StateObject private var runtime = RuntimeManager()
 
     var body: some Scene {
-        WindowGroup("Clawd") {
+        WindowGroup("Clawdex") {
             ChatView()
                 .environmentObject(appState)
                 .environmentObject(runtime)
@@ -20,7 +20,7 @@ struct ClawdAppApp: App {
                 .environmentObject(runtime)
         }
         // Optional: menu bar presence so the scheduler can keep running while windows are closed.
-        MenuBarExtra("Clawd", systemImage: "bolt.horizontal.circle") {
+        MenuBarExtra("Clawdex", systemImage: "bolt.horizontal.circle") {
             MenuBarView()
                 .environmentObject(appState)
                 .environmentObject(runtime)
@@ -50,7 +50,7 @@ struct MenuBarView: View {
 
             Divider()
 
-            Button("Open Clawd") {
+            Button("Open Clawdex") {
                 NSApp.activate(ignoringOtherApps: true)
                 for window in NSApp.windows {
                     window.makeKeyAndOrderFront(nil)
