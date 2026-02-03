@@ -292,7 +292,7 @@ fn tool_definitions() -> Vec<Tool> {
         Tool {
             name: "message.send".to_string(),
             title: None,
-            description: Some("Send a message via gateway (stub)".to_string()),
+            description: Some("Queue a message via the gateway outbox".to_string()),
             input_schema: json!({
                 "type": "object",
                 "properties": {
