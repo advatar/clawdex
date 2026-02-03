@@ -215,6 +215,7 @@ Override inputs as needed:
 - `CODEX_BIN` (prebuilt Mach‑O codex binary)
 - `CLAWDEX_CARGO_ROOT` (default `../clawdex`)
 - `CLAWDEX_BIN` (prebuilt Mach‑O clawdex binary)
+- `PREBUILT_DIR` (default `macClawdex/Resources/prebuilt`, looks for `codex`/`clawdex` if Rust is unavailable)
 
 ---
 

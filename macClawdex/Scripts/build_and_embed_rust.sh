@@ -27,6 +27,7 @@ CLAWDEX_CARGO_ROOT="${CLAWDEX_CARGO_ROOT:-${REPO_ROOT}/clawdex}"
 CLAWDEX_PACKAGE="${CLAWDEX_PACKAGE:-clawdex}"
 CLAWDEX_BINARY="${CLAWDEX_BINARY:-clawdex}"
 CLAWDEX_BIN="${CLAWDEX_BIN:-}"
+PREBUILT_DIR="${PREBUILT_DIR:-${SRCROOT}/Resources/prebuilt}"
 
 if [[ "${SKIP_RUST_EMBED:-}" == "1" || "${SKIP_TOOLS_EMBED:-}" == "1" ]]; then
   echo "[clawdex] SKIP_RUST_EMBED=1 or SKIP_TOOLS_EMBED=1; skipping tool build/embed."
@@ -52,6 +53,11 @@ BIN_STAGE_DIR="${ARTIFACT_DIR}/bin"
 UNIVERSAL_DIR="${ARTIFACT_DIR}/universal"
 /bin/rm -rf "${BIN_STAGE_DIR}" "${UNIVERSAL_DIR}"
 /bin/mkdir -p "${BIN_STAGE_DIR}" "${UNIVERSAL_DIR}"
+
+CARGO_AVAILABLE=1
+if ! command -v "${CARGO_BIN}" >/dev/null 2>&1; then
+  CARGO_AVAILABLE=0
+fi
 
 make_universal() {
   local target_dir="$1"
@@ -81,8 +87,8 @@ build_cargo_target() {
   if [[ ! -f "${cargo_root}/Cargo.toml" ]]; then
     die "Missing Cargo.toml in ${cargo_root}"
   fi
-  if ! command -v "${CARGO_BIN}" >/dev/null 2>&1; then
-    die "cargo not found. Install Rust or set CODEX_BIN/CLAWDEX_BIN to prebuilt binaries."
+  if [[ "${CARGO_AVAILABLE}" != "1" ]]; then
+    die "cargo not found. Install Rust or set CODEX_BIN/CLAWDEX_BIN or place prebuilt binaries under ${PREBUILT_DIR}."
   fi
 
   pushd "${cargo_root}" >/dev/null
@@ -92,6 +98,35 @@ build_cargo_target() {
     "${CARGO_BIN}" build --release --target "${target}"
   fi
   popd >/dev/null
+}
+
+resolve_prebuilt_bin() {
+  local name="$1"
+  local binary="$2"
+  local current="$3"
+  local resolved="$current"
+
+  if [[ -n "${resolved}" ]]; then
+    echo "${resolved}"
+    return 0
+  fi
+
+  local candidate
+  candidate="${PREBUILT_DIR}/${binary}"
+  if [[ -x "${candidate}" ]]; then
+    log "Using prebuilt ${name} at ${candidate}"
+    echo "${candidate}"
+    return 0
+  fi
+
+  candidate="${SRCROOT}/Resources/bin/${binary}"
+  if [[ -x "${candidate}" ]]; then
+    log "Using embedded ${name} at ${candidate}"
+    echo "${candidate}"
+    return 0
+  fi
+
+  echo ""
 }
 
 stage_prebuilt() {
@@ -110,12 +145,16 @@ stage_prebuilt() {
 }
 
 log "Staging Codex..."
+CODEX_BIN="$(resolve_prebuilt_bin "Codex" "${CODEX_BINARY}" "${CODEX_BIN}")"
 if [[ -n "${CODEX_BIN}" ]]; then
   log "Using codex binary at ${CODEX_BIN}"
   stage_prebuilt "Codex" "${CODEX_BIN}" "${BIN_STAGE_DIR}/${CODEX_BINARY}"
 else
   if [[ "${SKIP_CODEX_BUILD:-}" == "1" ]]; then
     die "SKIP_CODEX_BUILD=1 but CODEX_BIN is not set."
+  fi
+  if [[ "${CARGO_AVAILABLE}" != "1" ]]; then
+    die "cargo not found. Set CODEX_BIN or place a prebuilt codex at ${PREBUILT_DIR}/${CODEX_BINARY}."
   fi
   ARCH_TARGETS=("aarch64-apple-darwin" "x86_64-apple-darwin")
   for TARGET in "${ARCH_TARGETS[@]}"; do
@@ -127,12 +166,16 @@ else
 fi
 
 log "Staging Clawdex..."
+CLAWDEX_BIN="$(resolve_prebuilt_bin "Clawdex" "${CLAWDEX_BINARY}" "${CLAWDEX_BIN}")"
 if [[ -n "${CLAWDEX_BIN}" ]]; then
   log "Using clawdex binary at ${CLAWDEX_BIN}"
   stage_prebuilt "Clawdex" "${CLAWDEX_BIN}" "${BIN_STAGE_DIR}/${CLAWDEX_BINARY}"
 else
   if [[ "${SKIP_CLAWDEX_BUILD:-}" == "1" ]]; then
     die "SKIP_CLAWDEX_BUILD=1 but CLAWDEX_BIN is not set."
+  fi
+  if [[ "${CARGO_AVAILABLE}" != "1" ]]; then
+    die "cargo not found. Set CLAWDEX_BIN or place a prebuilt clawdex at ${PREBUILT_DIR}/${CLAWDEX_BINARY}."
   fi
   ARCH_TARGETS=("aarch64-apple-darwin" "x86_64-apple-darwin")
   for TARGET in "${ARCH_TARGETS[@]}"; do

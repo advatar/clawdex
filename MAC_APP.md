@@ -52,6 +52,9 @@ Key inputs (override via environment variables):
    - `CLAWDEX_PACKAGE` (default `clawdex`)
    - `CLAWDEX_BINARY` (default `clawdex`)
    - `CLAWDEX_BIN` (use a prebuilt Mach‑O binary instead of Cargo)
+3. Prebuilt fallback (when Rust is not installed on the build machine):
+   - `PREBUILT_DIR` (default `macClawdex/Resources/prebuilt`)
+   - Place `codex` and/or `clawdex` binaries at that path to skip Cargo.
 3. Skips:
    - `SKIP_CODEX_BUILD=1` (requires `CODEX_BIN`)
    - `SKIP_CLAWDEX_BUILD=1` (requires `CLAWDEX_BIN`)
