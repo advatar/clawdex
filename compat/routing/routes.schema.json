@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "routes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "channel": {"type": "string"},
+          "to": {"type": "string"},
+          "accountId": {"type": ["string", "null"]},
+          "updatedAtMs": {"type": "number"}
+        },
+        "required": ["channel", "to", "updatedAtMs"],
+        "additionalProperties": true
+      }
+    }
+  },
+  "required": ["routes"],
+  "additionalProperties": true
+}

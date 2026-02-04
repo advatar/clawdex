@@ -1,0 +1,10 @@
+{
+  "routes": {
+    "slack:U12345": {
+      "channel": "slack",
+      "to": "U12345",
+      "accountId": "workspace-1",
+      "updatedAtMs": 1738710000000
+    }
+  }
+}

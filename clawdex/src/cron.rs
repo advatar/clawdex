@@ -582,3 +582,68 @@ pub fn collect_due_jobs(
     save_jobs(paths, &jobs)?;
     Ok((queued, entries))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ScheduleSpec;
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
+
+    fn ms(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> i64 {
+        Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
+            .single()
+            .expect("valid datetime")
+            .timestamp_millis()
+    }
+
+    #[test]
+    fn at_schedule_due_and_next_run() {
+        let now = ms(2026, 2, 4, 12, 0, 0);
+        let at_ms = now + 60_000;
+        let spec = ScheduleSpec::from_value(&json!({
+            "kind": "at",
+            "atMs": at_ms
+        }))
+        .expect("schedule spec");
+
+        assert!(!spec.is_due(None, None, now));
+        assert_eq!(spec.next_run_after(None, None, now), Some(at_ms));
+        assert!(spec.is_due(None, None, at_ms));
+        assert_eq!(spec.next_run_after(None, None, at_ms), None);
+    }
+
+    #[test]
+    fn every_schedule_due_and_next_run() {
+        let created_at = ms(2026, 2, 4, 12, 0, 0);
+        let spec = ScheduleSpec::from_value(&json!({
+            "kind": "every",
+            "everyMs": 60_000
+        }))
+        .expect("schedule spec");
+
+        assert!(!spec.is_due(None, Some(created_at), created_at + 30_000));
+        assert!(spec.is_due(None, Some(created_at), created_at + 60_000));
+        assert_eq!(
+            spec.next_run_after(None, Some(created_at), created_at + 30_000),
+            Some(created_at + 60_000)
+        );
+    }
+
+    #[test]
+    fn cron_schedule_due_and_next_run() {
+        let last_run = ms(2026, 2, 4, 12, 0, 0);
+        let now = ms(2026, 2, 4, 12, 1, 0);
+        let spec = ScheduleSpec::from_value(&json!({
+            "kind": "cron",
+            "cron": "0 * * * * * *",
+            "timezone": "UTC"
+        }))
+        .expect("schedule spec");
+
+        assert!(spec.is_due(Some(last_run), None, now));
+        assert_eq!(
+            spec.next_run_after(Some(last_run), None, last_run + 30_000),
+            Some(now)
+        );
+    }
+}

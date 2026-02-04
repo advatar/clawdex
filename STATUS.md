@@ -26,6 +26,8 @@
 - [x] Stop Xcode signing team resets by moving Development Team config to a local override
 - [x] Build and stage prebuilt `clawdexd` universal binary
 - [x] Add helper script to build/stage `clawdexd` prebuilt binary and document it in README
+- [x] Create compat parity spec scaffolding (compat/README.md, clawd-compat.yaml, tool schemas, routing schema, test matrix)
+- [x] Add cron schedule unit tests (at/every/cron+tz)
 
 Notes:
 - `TEMPLATE_PACK.md` is the parity checklist: use it later to fill tool schemas, routing rules, and tests, then implement remaining gaps using the name `Clawdex`.

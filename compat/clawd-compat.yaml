@@ -1,0 +1,112 @@
+meta:
+  spec_version: "0.1.0"
+  goal: "Codex runtime with OpenClaw/ClawdBot tool & behavior parity via MCP + sidecar daemon"
+  updated: "2026-02-04"
+  upstreams:
+    codex:
+      repo: ""
+      commit: ""
+      integration_mode: "app_server"
+    openclaw:
+      repo: ""
+      commit: ""
+  constraints:
+    - "Prefer extension mechanisms (MCP + Skills) over patching Codex core"
+    - "Any naming mismatch resolved in clawdex tool aliasing"
+  exceptions: []
+  owners: []
+
+runtime:
+  codex_runner:
+    mode: "app_server"
+    thread_keying: "routeKey"
+  state_dirs:
+    root: "~/.codex/clawdex"
+    cron:
+      jobs_json: "~/.codex/clawdex/cron/jobs.json"
+      runs_dir: "~/.codex/clawdex/cron/runs"
+    memory:
+      index_dir: "~/.codex/clawdex/memory"
+      workspace_default: "~/clawdex-workspace"
+    routing:
+      routes_json: "~/.codex/clawdex/gateway/routes.json"
+  concurrency:
+    max_concurrent_runs: 1
+    queue_policy: "fifo"
+    drop_policy: "never"
+
+mcp:
+  server_id: "clawd"
+  transport: "stdio"
+  command: "clawdex"
+  args: ["mcp-server"]
+  env:
+    OPENAI_API_KEY: "${OPENAI_API_KEY}"
+
+# Tool contract: each entry = 1 callable MCP tool
+tools:
+  - name: "cron.add"
+    status: "wired"
+    priority: "P0"
+    request_schema: "tool-schemas/cron.add.request.schema.json"
+    response_schema: "tool-schemas/cron.add.response.schema.json"
+  - name: "cron.update"
+    status: "wired"
+    priority: "P0"
+    request_schema: "tool-schemas/cron.update.request.schema.json"
+    response_schema: "tool-schemas/cron.add.response.schema.json"
+  - name: "cron.list"
+    status: "wired"
+    priority: "P0"
+    request_schema: "tool-schemas/cron.list.request.schema.json"
+    response_schema: "tool-schemas/cron.list.response.schema.json"
+  - name: "cron.remove"
+    status: "wired"
+    priority: "P0"
+    request_schema: "tool-schemas/cron.remove.request.schema.json"
+    response_schema: "tool-schemas/cron.remove.response.schema.json"
+  - name: "cron.run"
+    status: "wired"
+    priority: "P1"
+    request_schema: "tool-schemas/cron.run.request.schema.json"
+    response_schema: "tool-schemas/cron.run.response.schema.json"
+  - name: "cron.runs"
+    status: "wired"
+    priority: "P1"
+    request_schema: "tool-schemas/cron.runs.request.schema.json"
+    response_schema: "tool-schemas/cron.runs.response.schema.json"
+  - name: "cron.status"
+    status: "wired"
+    priority: "P1"
+    request_schema: "tool-schemas/cron.status.request.schema.json"
+    response_schema: "tool-schemas/cron.status.response.schema.json"
+  - name: "memory_search"
+    status: "wired"
+    priority: "P0"
+    request_schema: "tool-schemas/memory_search.request.schema.json"
+    response_schema: "tool-schemas/memory_search.response.schema.json"
+  - name: "memory_get"
+    status: "wired"
+    priority: "P0"
+    request_schema: "tool-schemas/memory_get.request.schema.json"
+    response_schema: "tool-schemas/memory_get.response.schema.json"
+  - name: "message.send"
+    status: "wired"
+    priority: "P0"
+    request_schema: "tool-schemas/message.send.request.schema.json"
+    response_schema: "tool-schemas/message.send.response.schema.json"
+  - name: "channels.list"
+    status: "wired"
+    priority: "P1"
+    request_schema: "tool-schemas/channels.list.request.schema.json"
+    response_schema: "tool-schemas/channels.list.response.schema.json"
+  - name: "channels.resolve_target"
+    status: "wired"
+    priority: "P1"
+    request_schema: "tool-schemas/channels.resolve_target.request.schema.json"
+    response_schema: "tool-schemas/channels.resolve_target.response.schema.json"
+  - name: "heartbeat.wake"
+    status: "wired"
+    priority: "P0"
+    request_schema: "tool-schemas/heartbeat.wake.request.schema.json"
+    response_schema: "tool-schemas/heartbeat.wake.response.schema.json"
