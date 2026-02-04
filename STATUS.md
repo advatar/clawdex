@@ -31,6 +31,7 @@
 - [x] Fill compat tool schemas with OpenClaw-aligned JSON definitions
 - [x] Implement P0 scenario tests from compat/tests/matrix.md
 - [x] Implement gateway bridge session mapping + outbound delivery parity
+- [x] Produce OpenClaw parity delta checklist and start closing gaps
 
 Notes:
 - `TEMPLATE_PACK.md` is the parity checklist: use it later to fill tool schemas, routing rules, and tests, then implement remaining gaps using the name `Clawdex`.

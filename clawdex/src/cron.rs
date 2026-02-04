@@ -176,6 +176,204 @@ impl ScheduleSpec {
     }
 }
 
+fn parse_at_ms(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(num) => num.as_i64(),
+        Value::String(s) => {
+            if let Ok(ms) = s.parse::<i64>() {
+                return Some(ms);
+            }
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                return Some(dt.timestamp_millis());
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn normalize_schedule(mut schedule: Map<String, Value>) -> Map<String, Value> {
+    if !schedule.contains_key("kind") {
+        if schedule.contains_key("atMs") || schedule.contains_key("at") {
+            schedule.insert("kind".to_string(), Value::String("at".to_string()));
+        } else if schedule.contains_key("everyMs") || schedule.contains_key("every_ms") {
+            schedule.insert("kind".to_string(), Value::String("every".to_string()));
+        } else if schedule.contains_key("expr") || schedule.contains_key("cron") {
+            schedule.insert("kind".to_string(), Value::String("cron".to_string()));
+        }
+    }
+
+    if let Some(at_value) = schedule.get("at").cloned() {
+        if let Some(ms) = parse_at_ms(&at_value) {
+            schedule.insert("atMs".to_string(), Value::Number(ms.into()));
+        }
+        schedule.remove("at");
+    }
+
+    if let Some(Value::String(expr)) = schedule.get("expr").cloned() {
+        if !expr.is_empty() {
+            schedule
+                .entry("cron".to_string())
+                .or_insert_with(|| Value::String(expr));
+        }
+    }
+
+    if let Some(Value::String(tz)) = schedule.get("tz").cloned() {
+        if !tz.is_empty() {
+            schedule
+                .entry("timezone".to_string())
+                .or_insert_with(|| Value::String(tz));
+        }
+    }
+
+    schedule
+}
+
+fn normalize_job_input(raw: &Value, apply_defaults: bool) -> Result<Map<String, Value>> {
+    let base = if let Some(obj) = raw.as_object() {
+        if let Some(data) = obj.get("data").and_then(|v| v.as_object()) {
+            data.clone()
+        } else if let Some(job) = obj.get("job").and_then(|v| v.as_object()) {
+            job.clone()
+        } else {
+            obj.clone()
+        }
+    } else {
+        anyhow::bail!("cron job input must be an object");
+    };
+
+    let mut map = base.clone();
+
+    if let Some(agent) = map.get("agentId") {
+        match agent {
+            Value::Null => {}
+            Value::String(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    map.remove("agentId");
+                } else {
+                    map.insert("agentId".to_string(), Value::String(trimmed.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(enabled) = map.get("enabled") {
+        if let Value::String(s) = enabled {
+            let trimmed = s.trim().to_lowercase();
+            if trimmed == "true" {
+                map.insert("enabled".to_string(), Value::Bool(true));
+            } else if trimmed == "false" {
+                map.insert("enabled".to_string(), Value::Bool(false));
+            }
+        }
+    }
+
+    if let Some(Value::Object(schedule)) = map.get("schedule").cloned() {
+        map.insert("schedule".to_string(), Value::Object(normalize_schedule(schedule)));
+    }
+
+    if apply_defaults {
+        map.entry("enabled".to_string())
+            .or_insert_with(|| Value::Bool(true));
+        map.entry("wakeMode".to_string())
+            .or_insert_with(|| Value::String("next-heartbeat".to_string()));
+        if !map.contains_key("sessionTarget") {
+            if let Some(kind) = map
+                .get("payload")
+                .and_then(|v| v.get("kind"))
+                .and_then(|v| v.as_str())
+            {
+                let target = match kind {
+                    "systemEvent" => "main",
+                    "agentTurn" => "isolated",
+                    _ => "",
+                };
+                if !target.is_empty() {
+                    map.insert("sessionTarget".to_string(), Value::String(target.to_string()));
+                }
+            }
+        }
+        if let Some(Value::Object(schedule)) = map.get("schedule") {
+            if schedule
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .map(|v| v == "at")
+                .unwrap_or(false)
+                && !map.contains_key("deleteAfterRun")
+            {
+                map.insert("deleteAfterRun".to_string(), Value::Bool(true));
+            }
+        }
+        let deliver_missing = map.get("deliver").is_none()
+            && map
+                .get("payload")
+                .and_then(|v| v.get("deliver"))
+                .is_none();
+        if deliver_missing {
+            let session_target = map
+                .get("sessionTarget")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let payload_kind = map
+                .get("payload")
+                .and_then(|v| v.get("kind"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if session_target == "isolated" && payload_kind == "agentTurn" {
+                map.insert("deliver".to_string(), Value::Bool(true));
+            }
+        }
+    }
+
+    Ok(map)
+}
+
+fn merge_payload(existing: &Value, patch: &Value) -> Value {
+    let Some(Value::Object(existing_map)) = existing.as_object().map(|m| Value::Object(m.clone())) else {
+        return patch.clone();
+    };
+    if let Value::Object(patch_map) = patch {
+        if let Some(Value::String(kind)) = patch_map.get("kind") {
+            if existing_map
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .map(|v| v != kind.as_str())
+                .unwrap_or(true)
+            {
+                return Value::Object(patch_map.clone());
+            }
+        }
+        let mut merged = existing_map.clone();
+        for (key, value) in patch_map {
+            merged.insert(key.clone(), value.clone());
+        }
+        return Value::Object(merged);
+    }
+    patch.clone()
+}
+
+fn validate_job_spec(map: &Map<String, Value>) -> Result<()> {
+    let session_target = map
+        .get("sessionTarget")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let payload_kind = map
+        .get("payload")
+        .and_then(|v| v.get("kind"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if session_target == "main" && payload_kind != "systemEvent" {
+        anyhow::bail!("main cron jobs require payload.kind=\"systemEvent\"");
+    }
+    if session_target == "isolated" && payload_kind != "agentTurn" {
+        anyhow::bail!("isolated cron jobs require payload.kind=\"agentTurn\"");
+    }
+    Ok(())
+}
+
 fn jobs_path(paths: &ClawdPaths) -> PathBuf {
     paths.cron_dir.join(JOBS_FILE)
 }
@@ -430,10 +628,7 @@ pub fn status(paths: &ClawdPaths, enabled: bool) -> Result<Value> {
 
 pub fn add_job(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     let mut jobs = load_jobs(paths)?;
-    let mut map = args
-        .as_object()
-        .cloned()
-        .context("cron.add expects an object")?;
+    let mut map = normalize_job_input(args, true)?;
 
     let _id = ensure_job_id(&mut map);
     let now = now_ms();
@@ -442,6 +637,7 @@ pub fn add_job(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     map.insert("updatedAtMs".to_string(), Value::Number(now.into()));
     map.entry("enabled".to_string())
         .or_insert_with(|| Value::Bool(true));
+    validate_job_spec(&map)?;
 
     let value = Value::Object(map);
     jobs.push(value.clone());
@@ -456,17 +652,20 @@ pub fn update_job(paths: &ClawdPaths, args: &Value) -> Result<Value> {
         .get("patch")
         .cloned()
         .context("cron.update requires patch")?;
-    let patch_map = patch
-        .as_object()
-        .cloned()
-        .context("cron.update patch must be an object")?;
+    let patch_map = normalize_job_input(&patch, false)?;
     let now = now_ms();
 
     let job = find_job_mut(&mut jobs, &job_id).context("job not found")?;
     for (key, value) in patch_map {
-        job.insert(key, value);
+        if key == "payload" {
+            let merged = merge_payload(job.get("payload").unwrap_or(&Value::Null), &value);
+            job.insert(key, merged);
+        } else {
+            job.insert(key, value);
+        }
     }
     job.insert("updatedAtMs".to_string(), Value::Number(now.into()));
+    validate_job_spec(job)?;
     let updated = Value::Object(job.clone());
     save_jobs(paths, &jobs)?;
     Ok(updated)
@@ -482,7 +681,7 @@ pub fn remove_job(paths: &ClawdPaths, args: &Value) -> Result<Value> {
             .map(|v| v != job_id)
             .unwrap_or(true)
     });
-    let removed = before.saturating_sub(jobs.len());
+    let removed = before.saturating_sub(jobs.len()) > 0;
     save_jobs(paths, &jobs)?;
     Ok(json!({ "ok": true, "removed": removed }))
 }
@@ -663,5 +862,42 @@ mod tests {
             spec.next_run_after(Some(last_run), None, last_run + 30_000),
             Some(now)
         );
+    }
+
+    #[test]
+    fn normalize_job_defaults_from_payload() {
+        let input = json!({
+            "name": "job",
+            "schedule": { "kind": "at", "at": "2026-02-04T12:00:00Z" },
+            "payload": { "kind": "agentTurn", "message": "hi" }
+        });
+        let normalized = super::normalize_job_input(&input, true).expect("normalize");
+        assert_eq!(normalized.get("wakeMode").and_then(|v| v.as_str()), Some("next-heartbeat"));
+        assert_eq!(normalized.get("enabled").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            normalized.get("sessionTarget").and_then(|v| v.as_str()),
+            Some("isolated")
+        );
+        let schedule = normalized.get("schedule").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(schedule.get("kind").and_then(|v| v.as_str()), Some("at"));
+        assert!(schedule.get("atMs").is_some());
+    }
+
+    #[test]
+    fn normalize_wraps_job_payload() {
+        let input = json!({
+            "job": {
+                "name": "wrapped",
+                "enabled": "false",
+                "schedule": { "everyMs": 60000 },
+                "payload": { "kind": "systemEvent", "text": "ping" },
+                "sessionTarget": "main",
+                "wakeMode": "now"
+            }
+        });
+        let normalized = super::normalize_job_input(&input, true).expect("normalize");
+        assert_eq!(normalized.get("enabled").and_then(|v| v.as_bool()), Some(false));
+        let schedule = normalized.get("schedule").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(schedule.get("kind").and_then(|v| v.as_str()), Some("every"));
     }
 }
