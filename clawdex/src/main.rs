@@ -3,22 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-mod app_server;
-mod config;
-mod cron;
-mod daemon;
-mod gateway;
-mod heartbeat;
-mod mcp;
-mod memory;
-mod permissions;
-mod plugins;
-mod runner;
-mod skills_sync;
-mod task_db;
-mod tasks;
-mod ui_bridge;
-mod util;
+use clawdex::{config, daemon, gateway, mcp, permissions, plugins, skills_sync, tasks, ui_bridge};
 
 #[derive(Parser)]
 #[command(author, version, about = "Clawdex compatibility runtime", long_about = None)]

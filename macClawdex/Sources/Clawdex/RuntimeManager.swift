@@ -7,12 +7,16 @@ final class RuntimeManager: ObservableObject {
     @Published private(set) var logs: [String] = []
     @Published private(set) var plugins: [PluginInfo] = []
     @Published private(set) var pluginCommands: [PluginCommand] = []
+    @Published private(set) var daemonRunning: Bool = false
 
     private var appState: AppState?
     private var process: Process?
+    private var daemonProcess: Process?
     private var stdinPipe: Pipe?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
+    private var daemonStdoutPipe: Pipe?
+    private var daemonStderrPipe: Pipe?
     private var workspaceURL: URL?
 
     private var cancellables = Set<AnyCancellable>()
@@ -74,8 +78,15 @@ final class RuntimeManager: ObservableObject {
             let toolPaths = try toolInstallPaths()
             let clawdexURL = toolPaths.clawdex
             let codexURL = toolPaths.codex
+            let clawdexdURL = toolPaths.clawdexd
 
             let stateDir = try ensureStateDir()
+
+            try startDaemonProcess(
+                clawdexdURL: clawdexdURL,
+                codexURL: codexURL,
+                stateDir: stateDir
+            )
 
             let p = Process()
             p.executableURL = clawdexURL
@@ -136,11 +147,19 @@ final class RuntimeManager: ObservableObject {
             appendLog("[app] Stopping clawdex (pid \(p.processIdentifier))…")
             p.terminate()
         }
+        if let p = daemonProcess {
+            appendLog("[app] Stopping clawdexd (pid \(p.processIdentifier))…")
+            p.terminate()
+        }
         process = nil
+        daemonProcess = nil
         stdinPipe = nil
         stdoutPipe = nil
         stderrPipe = nil
+        daemonStdoutPipe = nil
+        daemonStderrPipe = nil
         isRunning = false
+        daemonRunning = false
     }
 
     func sendUserMessage(_ text: String) {
@@ -154,7 +173,7 @@ final class RuntimeManager: ObservableObject {
                 "type": "plugin_command",
                 "pluginId": command.pluginId,
                 "command": command.command,
-                "input": command.input
+                "input": command.input as Any
             ]
             sendControlMessage(payload)
             return
@@ -310,11 +329,12 @@ final class RuntimeManager: ObservableObject {
         appendLog("[app] Installed tools into \(destDir.path) (version \(toolsVersion))")
     }
 
-    private func toolInstallPaths() throws -> (codex: URL, clawdex: URL) {
+    private func toolInstallPaths() throws -> (codex: URL, clawdex: URL, clawdexd: URL) {
         let dir = try toolsDir()
         return (
             codex: dir.appendingPathComponent("codex"),
-            clawdex: dir.appendingPathComponent("clawdex")
+            clawdex: dir.appendingPathComponent("clawdex"),
+            clawdexd: dir.appendingPathComponent("clawdexd")
         )
     }
 
@@ -368,6 +388,24 @@ final class RuntimeManager: ObservableObject {
         }
     }
 
+    private func attachDaemonReaders(stdout: Pipe, stderr: Pipe) {
+        let weakSelf = WeakRuntimeManager(self)
+        stdout.fileHandleForReading.readabilityHandler = { h in
+            let data = h.availableData
+            if data.isEmpty { return }
+            Task { @MainActor in
+                weakSelf.value?.handleDaemonOutput(data: data, stream: "stdout")
+            }
+        }
+        stderr.fileHandleForReading.readabilityHandler = { h in
+            let data = h.availableData
+            if data.isEmpty { return }
+            Task { @MainActor in
+                weakSelf.value?.handleDaemonOutput(data: data, stream: "stderr")
+            }
+        }
+    }
+
     private func handleOutput(data: Data, stream: String) {
         guard let s = String(data: data, encoding: .utf8) else { return }
         for line in s.split(separator: "\n", omittingEmptySubsequences: true) {
@@ -390,6 +428,49 @@ final class RuntimeManager: ObservableObject {
                 applyPluginCommands(commands)
             }
         }
+    }
+
+    private func handleDaemonOutput(data: Data, stream: String) {
+        guard let s = String(data: data, encoding: .utf8) else { return }
+        for line in s.split(separator: "\n", omittingEmptySubsequences: true) {
+            let text = String(line)
+            appendLog("[clawdexd][\(stream)] \(text)")
+        }
+    }
+
+    private func startDaemonProcess(clawdexdURL: URL, codexURL: URL, stateDir: URL) throws {
+        guard daemonProcess == nil else { return }
+        let p = Process()
+        p.executableURL = clawdexdURL
+
+        var args: [String] = []
+        args += ["--bind", "127.0.0.1:18791"]
+        args += ["--codex-path", codexURL.path]
+        args += ["--state-dir", stateDir.path]
+        if let workspaceURL {
+            args += ["--workspace", workspaceURL.path]
+        }
+        p.arguments = args
+
+        var env = ProcessInfo.processInfo.environment
+        if let openAIKey = try? Keychain.loadOpenAIKey(), !openAIKey.isEmpty {
+            env["OPENAI_API_KEY"] = openAIKey
+        }
+        env["CLAWDEX_APP"] = "1"
+        p.environment = env
+
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        p.standardOutput = outPipe
+        p.standardError = errPipe
+        daemonStdoutPipe = outPipe
+        daemonStderrPipe = errPipe
+        attachDaemonReaders(stdout: outPipe, stderr: errPipe)
+
+        try p.run()
+        daemonProcess = p
+        daemonRunning = true
+        appendLog("[app] Started clawdexd (pid \(p.processIdentifier))")
     }
 
     private func parseAssistantMessage(from line: String) -> String? {

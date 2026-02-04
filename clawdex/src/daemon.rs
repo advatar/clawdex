@@ -6,6 +6,9 @@ use anyhow::Result;
 use codex_app_server_protocol::AskForApproval;
 use serde_json::json;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use crate::config::{resolve_heartbeat_enabled, resolve_heartbeat_interval_ms, ClawdConfig, ClawdPaths};
 use crate::cron::{collect_due_jobs, drain_pending_jobs, job_prompt, job_session_key, record_run};
 use crate::gateway;
@@ -17,6 +20,15 @@ pub fn run_daemon(
     cfg: ClawdConfig,
     paths: ClawdPaths,
     codex_path_override: Option<PathBuf>,
+) -> Result<()> {
+    run_daemon_loop(cfg, paths, codex_path_override, Arc::new(AtomicBool::new(false)))
+}
+
+pub fn run_daemon_loop(
+    cfg: ClawdConfig,
+    paths: ClawdPaths,
+    codex_path_override: Option<PathBuf>,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
     let codex_path = resolve_codex_path(&cfg, codex_path_override)?;
     let workspace = paths.workspace_dir.clone();
@@ -38,6 +50,9 @@ pub fn run_daemon(
     let mut next_heartbeat = now_ms() + interval as i64;
 
     loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
         let now = now_ms();
 
         // Drain pending jobs (wakeMode = next-heartbeat or manual cron.run)
@@ -59,6 +74,7 @@ pub fn run_daemon(
 
         thread::sleep(Duration::from_millis(500));
     }
+    Ok(())
 }
 
 fn execute_job(runner: &mut CodexRunner, paths: &ClawdPaths, job: &crate::cron::CronJob) -> Result<()> {

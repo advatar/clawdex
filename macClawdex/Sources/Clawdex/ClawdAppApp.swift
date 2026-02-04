@@ -7,7 +7,7 @@ struct ClawdexApp: App {
 
     var body: some Scene {
         WindowGroup("Clawdex") {
-            ChatView()
+            MainView()
                 .environmentObject(appState)
                 .environmentObject(runtime)
                 .onAppear {

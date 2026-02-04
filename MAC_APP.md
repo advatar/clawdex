@@ -1,7 +1,7 @@
 This starter is a **menu‑bar macOS app** that:
-- **Builds universal2** Rust binaries (`codex`, `clawdex`) in an Xcode build phase
+- **Builds universal2** Rust binaries (`codex`, `clawdex`, `clawdexd`) in an Xcode build phase
 - **Embeds** them into the app bundle, **codesigns** them, and copies them into the app’s **Application Support** container
-- Runs `clawdex` as a **child process** and talks to it over **JSONL on stdin/stdout**
+- Runs `clawdex` (UI bridge) and `clawdexd` (daemon IPC) as **child processes**
 - Provides UI for:
   - **Launch at login** (user‑controlled via `SMAppService`)
   - **OpenAI API key** stored in **Keychain**
@@ -33,6 +33,7 @@ The Xcode build script does the following:
 
 1. Builds Codex as a universal2 Rust binary (arm64 + x86_64).
 2. Builds Clawdex as a universal2 Rust binary (arm64 + x86_64).
+3. Builds Clawdexd as a universal2 Rust binary (arm64 + x86_64).
 3. Copies tools into:
    - `Clawdex.app/Contents/Resources/bin/`
 4. Codesigns embedded executables using helper entitlements:
@@ -52,9 +53,11 @@ Key inputs (override via environment variables):
    - `CLAWDEX_PACKAGE` (default `clawdex`)
    - `CLAWDEX_BINARY` (default `clawdex`)
    - `CLAWDEX_BIN` (use a prebuilt Mach‑O binary instead of Cargo)
+   - `CLAWDEXD_BINARY` (default `clawdexd`)
+   - `CLAWDEXD_BIN` (use a prebuilt Mach‑O binary instead of Cargo)
 3. Prebuilt fallback (when Rust is not installed on the build machine):
    - `PREBUILT_DIR` (default `macClawdex/Resources/prebuilt`)
-   - Place `codex` and/or `clawdex` binaries at that path to skip Cargo.
+   - Place `codex`, `clawdex`, and/or `clawdexd` binaries at that path to skip Cargo.
    - Helper: `Scripts/stage_prebuilt.sh` copies built binaries into the prebuilt folder.
    - The `prebuilt/` folder is tracked with Git LFS; ensure `git lfs install` is run before committing binaries.
 3. Skips:
@@ -66,7 +69,7 @@ Key inputs (override via environment variables):
 On app start, `RuntimeManager` copies embedded tools into the app’s container:
 - `~/Library/Application Support/<bundle-id>/tools/`
 
-Then it runs `clawdex` from there.
+Then it runs `clawdex` and `clawdexd` from there.
 
 This avoids mutating the app bundle and keeps all state inside the sandbox container.
 

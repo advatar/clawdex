@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::thread;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use codex_app_server_protocol::{
@@ -16,13 +18,15 @@ use tiny_http::{Method, Response, Server, StatusCode};
 use crate::app_server::{ApprovalHandler, ApprovalMode, CodexClient, EventSink, UserInputHandler};
 use crate::config::{load_config, ClawdConfig, ClawdPaths};
 use crate::runner::workspace_sandbox_policy;
-use crate::task_db::{Task, TaskStore};
+use crate::approvals::{ApprovalBroker, BrokerApprovalHandler, BrokerUserInputHandler};
+use crate::task_db::{Task, TaskRun, TaskStore};
 
 pub struct TaskEngine {
     cfg: ClawdConfig,
     paths: ClawdPaths,
 }
 
+#[derive(Clone)]
 pub struct TaskRunOptions {
     pub codex_path: Option<PathBuf>,
     pub workspace: Option<PathBuf>,
@@ -38,6 +42,12 @@ pub fn run_task_command(opts: TaskRunOptions) -> Result<()> {
     let (cfg, paths) = load_config(opts.state_dir.clone(), opts.workspace.clone())?;
     let engine = TaskEngine { cfg, paths };
     engine.run_task(opts)
+}
+
+pub fn start_task_command(opts: TaskRunOptions) -> Result<TaskRun> {
+    let (cfg, paths) = load_config(opts.state_dir.clone(), opts.workspace.clone())?;
+    let engine = TaskEngine { cfg, paths };
+    engine.start_task_async(opts)
 }
 
 pub fn list_tasks_command(state_dir: Option<PathBuf>, workspace: Option<PathBuf>) -> Result<Value> {
@@ -85,9 +95,59 @@ pub fn run_task_server(bind: &str, state_dir: Option<PathBuf>, workspace: Option
 }
 
 impl TaskEngine {
+    pub fn new(cfg: ClawdConfig, paths: ClawdPaths) -> Self {
+        Self { cfg, paths }
+    }
+
     pub fn run_task(&self, opts: TaskRunOptions) -> Result<()> {
+        let prepared = self.prepare_run(&opts)?;
+        self.execute_run(prepared, opts.auto_approve, true, None)
+    }
+
+    pub fn start_task_async(&self, opts: TaskRunOptions) -> Result<TaskRun> {
+        let prepared = self.prepare_run(&opts)?;
+        let run = prepared.run.clone();
+        let cfg = self.cfg.clone();
+        let paths = self.paths.clone();
+        let auto_approve = opts.auto_approve;
+        thread::spawn(move || {
+            let engine = TaskEngine { cfg, paths };
+            let _ = engine.execute_run(prepared, auto_approve, false, None);
+        });
+        Ok(run)
+    }
+
+    pub fn start_task_async_with_broker(
+        &self,
+        opts: TaskRunOptions,
+        broker: Arc<ApprovalBroker>,
+    ) -> Result<TaskRun> {
+        let prepared = self.prepare_run(&opts)?;
+        let run = prepared.run.clone();
+        let cfg = self.cfg.clone();
+        let paths = self.paths.clone();
+        let auto_approve = opts.auto_approve;
+        thread::spawn(move || {
+            let engine = TaskEngine { cfg, paths };
+            let _ = engine.execute_run(prepared, auto_approve, false, Some(broker));
+        });
+        Ok(run)
+    }
+}
+
+struct PreparedRun {
+    task: Task,
+    created: bool,
+    run: TaskRun,
+    prompt: String,
+    codex_path: PathBuf,
+    approval_policy: Option<AskForApproval>,
+}
+
+impl TaskEngine {
+    fn prepare_run(&self, opts: &TaskRunOptions) -> Result<PreparedRun> {
         let store = TaskStore::open(&self.paths)?;
-        let (task, created) = resolve_task(&store, &opts)?;
+        let (task, created) = resolve_task(&store, opts)?;
 
         let approval_policy = opts
             .approval_policy
@@ -106,8 +166,35 @@ impl TaskEngine {
             approval_policy.map(|p| format!("{p:?}")),
         )?;
 
-        let prompt = resolve_prompt(&opts)?;
-        let codex_path = resolve_codex_path(&self.cfg, opts.codex_path)?;
+        let prompt = resolve_prompt(opts)?;
+        let codex_path = resolve_codex_path(&self.cfg, opts.codex_path.clone())?;
+
+        Ok(PreparedRun {
+            task,
+            created,
+            run,
+            prompt,
+            codex_path,
+            approval_policy,
+        })
+    }
+
+    fn execute_run(
+        &self,
+        prepared: PreparedRun,
+        auto_approve: bool,
+        emit_output: bool,
+        broker: Option<Arc<ApprovalBroker>>,
+    ) -> Result<()> {
+        let store = TaskStore::open(&self.paths)?;
+        let PreparedRun {
+            task,
+            created,
+            run,
+            prompt,
+            codex_path,
+            approval_policy,
+        } = prepared;
 
         let codex_home = self.paths.state_dir.join("codex");
         std::fs::create_dir_all(&codex_home)
@@ -132,19 +219,30 @@ impl TaskEngine {
 
         let store_rc = Rc::new(RefCell::new(store));
         let event_sink = TaskEventSink::new(store_rc.clone(), run.id.clone());
-        let approval_mode = if opts.auto_approve {
-            ApprovalPromptMode::AutoApprove
+        let approval_handler: Box<dyn ApprovalHandler> = if let Some(broker) = broker.clone() {
+            Box::new(BrokerApprovalHandler::new(broker, run.id.clone()))
         } else {
-            ApprovalPromptMode::Interactive
+            let approval_mode = if auto_approve {
+                ApprovalPromptMode::AutoApprove
+            } else {
+                ApprovalPromptMode::Interactive
+            };
+            Box::new(TaskApprovalHandler::new(
+                store_rc.clone(),
+                run.id.clone(),
+                approval_mode,
+            ))
         };
-        let approval_handler =
-            TaskApprovalHandler::new(store_rc.clone(), run.id.clone(), approval_mode);
-        let user_input_handler = TaskUserInputHandler::new(store_rc.clone(), run.id.clone());
+        let user_input_handler: Box<dyn UserInputHandler> = if let Some(broker) = broker {
+            Box::new(BrokerUserInputHandler::new(broker, run.id.clone()))
+        } else {
+            Box::new(TaskUserInputHandler::new(store_rc.clone(), run.id.clone()))
+        };
 
         let mut client = CodexClient::spawn(&codex_path, &config_overrides, &env, ApprovalMode::AutoDeny)?;
         client.set_event_sink(Some(Box::new(event_sink)));
-        client.set_approval_handler(Some(Box::new(approval_handler)));
-        client.set_user_input_handler(Some(Box::new(user_input_handler)));
+        client.set_approval_handler(Some(approval_handler));
+        client.set_user_input_handler(Some(user_input_handler));
         client.initialize()?;
 
         let thread_id = client.thread_start()?;
@@ -176,10 +274,12 @@ impl TaskEngine {
                     "turn_completed",
                     &json!({ "message": turn_outcome.message, "warnings": turn_outcome.warnings }),
                 )?;
-                if created {
-                    println!("[task] created {} ({})", task.id, task.title);
+                if emit_output {
+                    if created {
+                        println!("[task] created {} ({})", task.id, task.title);
+                    }
+                    println!("{}", turn_outcome.message.trim());
                 }
-                println!("{}", turn_outcome.message.trim());
                 Ok(())
             }
             Err(err) => {

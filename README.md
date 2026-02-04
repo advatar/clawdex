@@ -212,6 +212,14 @@ Workspace policy notes:
    - `--state-dir <path>` overrides state directory.
    - `--codex-path <path>` overrides the `codex` binary path.
 
+`clawdexd`
+1. Description: Run the daemon runtime with HTTP IPC (`/v1/tasks`, `/v1/runs`).
+2. Options:
+   - `--bind <addr>` bind address (default `127.0.0.1:18791`).
+   - `--workspace <path>` overrides workspace directory.
+   - `--state-dir <path>` overrides state directory.
+   - `--codex-path <path>` overrides the `codex` binary path.
+
 `clawdex gateway`
 1. Description: Run the minimal HTTP gateway (outbox/inbox + route tracking).
 2. Options:
@@ -411,11 +419,12 @@ Build steps:
 
 The build script `Scripts/build_and_embed_rust.sh`:
 - Builds **Codex** and **Clawdex** as universal2 Rust binaries (arm64 + x86_64).
-- Embeds them into `Clawdex.app/Contents/Resources/bin/`.
+- Builds **Clawdexd** (daemon) alongside **Clawdex** and embeds all tools into `Clawdex.app/Contents/Resources/bin/`.
 - Codesigns embedded tools with helper entitlements.
 
 Plugin commands in the mac app:
 - Type `/plugin <id> <command> [input]` in chat to run a plugin command.
+- Use the **Commands** button to open the command palette.
 
 Override inputs as needed:
 - `CODEX_CARGO_ROOT` (default `../codex/codex-rs`)

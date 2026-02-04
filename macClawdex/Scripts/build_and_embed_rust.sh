@@ -27,6 +27,8 @@ CLAWDEX_CARGO_ROOT="${CLAWDEX_CARGO_ROOT:-${REPO_ROOT}/clawdex}"
 CLAWDEX_PACKAGE="${CLAWDEX_PACKAGE:-clawdex}"
 CLAWDEX_BINARY="${CLAWDEX_BINARY:-clawdex}"
 CLAWDEX_BIN="${CLAWDEX_BIN:-}"
+CLAWDEXD_BINARY="${CLAWDEXD_BINARY:-clawdexd}"
+CLAWDEXD_BIN="${CLAWDEXD_BIN:-}"
 PREBUILT_DIR="${PREBUILT_DIR:-${SRCROOT}/Resources/prebuilt}"
 
 if [[ "${SKIP_RUST_EMBED:-}" == "1" || "${SKIP_TOOLS_EMBED:-}" == "1" ]]; then
@@ -83,6 +85,7 @@ build_cargo_target() {
   local cargo_root="$1"
   local package="$2"
   local target="$3"
+  local bin_name="${4:-}"
 
   if [[ ! -f "${cargo_root}/Cargo.toml" ]]; then
     die "Missing Cargo.toml in ${cargo_root}"
@@ -92,10 +95,14 @@ build_cargo_target() {
   fi
 
   pushd "${cargo_root}" >/dev/null
+  local args=(build --release --target "${target}")
+  if [[ -n "${bin_name}" ]]; then
+    args+=(--bin "${bin_name}")
+  fi
   if /usr/bin/grep -q "\[workspace\]" Cargo.toml; then
-    "${CARGO_BIN}" build --release --target "${target}" -p "${package}"
+    "${CARGO_BIN}" "${args[@]}" -p "${package}"
   else
-    "${CARGO_BIN}" build --release --target "${target}"
+    "${CARGO_BIN}" "${args[@]}"
   fi
   popd >/dev/null
 }
@@ -114,14 +121,14 @@ resolve_prebuilt_bin() {
   local candidate
   candidate="${PREBUILT_DIR}/${binary}"
   if [[ -x "${candidate}" ]]; then
-    log "Using prebuilt ${name} at ${candidate}"
+    echo "[clawdex] Using prebuilt ${name} at ${candidate}" >&2
     echo "${candidate}"
     return 0
   fi
 
   candidate="${SRCROOT}/Resources/bin/${binary}"
   if [[ -x "${candidate}" ]]; then
-    log "Using embedded ${name} at ${candidate}"
+    echo "[clawdex] Using embedded ${name} at ${candidate}" >&2
     echo "${candidate}"
     return 0
   fi
@@ -180,10 +187,31 @@ else
   ARCH_TARGETS=("aarch64-apple-darwin" "x86_64-apple-darwin")
   for TARGET in "${ARCH_TARGETS[@]}"; do
     log "Building Clawdex for ${TARGET}..."
-    build_cargo_target "${CLAWDEX_CARGO_ROOT}" "${CLAWDEX_PACKAGE}" "${TARGET}"
+    build_cargo_target "${CLAWDEX_CARGO_ROOT}" "${CLAWDEX_PACKAGE}" "${TARGET}" "${CLAWDEX_BINARY}"
   done
   make_universal "${CLAWDEX_CARGO_ROOT}/target" "${CLAWDEX_BINARY}" "${UNIVERSAL_DIR}/${CLAWDEX_BINARY}"
   /bin/cp -f "${UNIVERSAL_DIR}/${CLAWDEX_BINARY}" "${BIN_STAGE_DIR}/${CLAWDEX_BINARY}"
+fi
+
+log "Staging Clawdexd..."
+CLAWDEXD_BIN="$(resolve_prebuilt_bin "Clawdexd" "${CLAWDEXD_BINARY}" "${CLAWDEXD_BIN}")"
+if [[ -n "${CLAWDEXD_BIN}" ]]; then
+  log "Using clawdexd binary at ${CLAWDEXD_BIN}"
+  stage_prebuilt "Clawdexd" "${CLAWDEXD_BIN}" "${BIN_STAGE_DIR}/${CLAWDEXD_BINARY}"
+else
+  if [[ "${SKIP_CLAWDEX_BUILD:-}" == "1" ]]; then
+    die "SKIP_CLAWDEX_BUILD=1 but CLAWDEXD_BIN is not set."
+  fi
+  if [[ "${CARGO_AVAILABLE}" != "1" ]]; then
+    die "cargo not found. Set CLAWDEXD_BIN or place a prebuilt clawdexd at ${PREBUILT_DIR}/${CLAWDEXD_BINARY}."
+  fi
+  ARCH_TARGETS=("aarch64-apple-darwin" "x86_64-apple-darwin")
+  for TARGET in "${ARCH_TARGETS[@]}"; do
+    log "Building Clawdexd for ${TARGET}..."
+    build_cargo_target "${CLAWDEX_CARGO_ROOT}" "${CLAWDEX_PACKAGE}" "${TARGET}" "${CLAWDEXD_BINARY}"
+  done
+  make_universal "${CLAWDEX_CARGO_ROOT}/target" "${CLAWDEXD_BINARY}" "${UNIVERSAL_DIR}/${CLAWDEXD_BINARY}"
+  /bin/cp -f "${UNIVERSAL_DIR}/${CLAWDEXD_BINARY}" "${BIN_STAGE_DIR}/${CLAWDEXD_BINARY}"
 fi
 
 # Copy into the app bundle
@@ -197,7 +225,7 @@ BIN_DIR="${APP_RES_DIR}/bin"
 # NOTE: For Debug builds you may not have an expanded signing identity; skip in that case.
 if [[ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]]; then
   log "Codesigning embedded tools..."
-  for BIN in "${BIN_DIR}/${CODEX_BINARY}" "${BIN_DIR}/${CLAWDEX_BINARY}"; do
+  for BIN in "${BIN_DIR}/${CODEX_BINARY}" "${BIN_DIR}/${CLAWDEX_BINARY}" "${BIN_DIR}/${CLAWDEXD_BINARY}"; do
     if [[ -f "${BIN}" ]]; then
       if is_macho "${BIN}"; then
         /usr/bin/codesign --force \

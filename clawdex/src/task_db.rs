@@ -357,6 +357,33 @@ impl TaskStore {
         Ok(events)
     }
 
+    pub fn list_events_after(
+        &self,
+        run_id: &str,
+        after_ts_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<TaskEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_run_id, ts_ms, kind, payload_json FROM events WHERE task_run_id = ? AND ts_ms > ? ORDER BY ts_ms ASC LIMIT ?",
+        )?;
+        let rows = stmt.query_map(params![run_id, after_ts_ms, limit as i64], |row| {
+            let payload_json: String = row.get(4)?;
+            let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
+            Ok(TaskEvent {
+                id: row.get(0)?,
+                task_run_id: row.get(1)?,
+                ts_ms: row.get(2)?,
+                kind: row.get(3)?,
+                payload,
+            })
+        })?;
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        Ok(events)
+    }
+
     pub fn upsert_plugin(&self, plugin: &PluginRecord) -> Result<PluginRecord> {
         self.conn.execute(
             r#"
