@@ -148,14 +148,7 @@ struct ApprovalsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
-                        if !approval.requestJson.isEmpty {
-                            Text(approval.requestJson)
-                                .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
-                                .padding(8)
-                                .background(Color.gray.opacity(0.08))
-                                .cornerRadius(6)
-                        }
+                        approvalDetails(approval)
 
                         HStack {
                             Button("Approve") {
@@ -332,6 +325,126 @@ struct ApprovalsView: View {
             }
         }
         return answers
+    }
+
+    @ViewBuilder
+    private func approvalDetails(_ approval: PendingApproval) -> some View {
+        if let details = parseRequest(approval.requestJson) {
+            if let reason = details["reason"] as? String, !reason.isEmpty {
+                Text("Reason: \(reason)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let command = details["command"] as? String {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Command")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(command)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+
+            if let cwd = details["cwd"] as? String, !cwd.isEmpty {
+                Text("Working dir: \(cwd)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let grantRoot = details["grantRoot"] as? String {
+                Text("Grant root: \(grantRoot)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let actions = details["commandActions"] as? [[String: Any]], !actions.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Command Actions")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(actions.indices, id: \.self) { index in
+                        Text(formatCommandAction(actions[index]))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            if let fileChanges = details["fileChanges"] as? [String: Any], !fileChanges.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("File Changes")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(fileChanges.keys.sorted(), id: \.self) { path in
+                        Text(path)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            if let patch = (details["diff"] as? String) ?? (details["patch"] as? String),
+               !patch.isEmpty {
+                rawJsonBlock(patch)
+            }
+
+            if let proposed = details["proposedExecpolicyAmendment"] as? [String: Any]
+                ?? details["proposedExecPolicyAmendment"] as? [String: Any] {
+                if let command = proposed["command"] as? [String], !command.isEmpty {
+                    Text("Allow similar command: \(command.joined(separator: " "))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if !approval.requestJson.isEmpty {
+                DisclosureGroup("Raw request") {
+                    rawJsonBlock(approval.requestJson)
+                }
+            }
+        } else if !approval.requestJson.isEmpty {
+            rawJsonBlock(approval.requestJson)
+        }
+    }
+
+    private func rawJsonBlock(_ json: String) -> some View {
+        Text(json)
+            .font(.system(.caption, design: .monospaced))
+            .textSelection(.enabled)
+            .padding(8)
+            .background(Color.gray.opacity(0.08))
+            .cornerRadius(6)
+    }
+
+    private func parseRequest(_ json: String) -> [String: Any]? {
+        guard let data = json.data(using: .utf8) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private func formatCommandAction(_ action: [String: Any]) -> String {
+        let type = action["type"] as? String ?? "unknown"
+        switch type {
+        case "read":
+            let path = action["path"] as? String ?? "unknown"
+            return "Read \(path)"
+        case "listFiles":
+            let path = action["path"] as? String ?? ""
+            return path.isEmpty ? "List files" : "List files in \(path)"
+        case "search":
+            let query = action["query"] as? String ?? ""
+            let path = action["path"] as? String ?? ""
+            if !query.isEmpty && !path.isEmpty {
+                return "Search '\(query)' in \(path)"
+            }
+            if !query.isEmpty {
+                return "Search '\(query)'"
+            }
+            return "Search"
+        default:
+            return "Command action"
+        }
     }
 
     private func formatMs(_ ms: Int64) -> String {

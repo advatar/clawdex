@@ -49,6 +49,20 @@ struct PendingUserInput: Identifiable, Hashable {
     let questions: [UserInputQuestion]
 }
 
+struct CronJob: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let enabled: Bool
+    let scheduleKind: String
+    let cronExpr: String
+    let timezone: String
+    let everyMs: Int64?
+    let atMs: Int64?
+    let sessionTarget: String
+    let payloadKind: String
+    let message: String
+}
+
 @MainActor
 final class DaemonClient {
     private let baseURL: URL
@@ -233,6 +247,48 @@ final class DaemonClient {
         let obj = try parseObject(data: data)
         return obj["ok"] as? Bool ?? false
     }
+
+    func fetchCronJobs(includeDisabled: Bool) async throws -> [CronJob] {
+        var components = URLComponents(url: baseURL.appendingPathComponent("/v1/cron/jobs"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "includeDisabled", value: includeDisabled ? "true" : "false")
+        ]
+        guard let url = components?.url else {
+            throw NSError(domain: "Clawdex", code: 20, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])
+        }
+        let (data, _) = try await URLSession.shared.data(from: url)
+        let obj = try parseObject(data: data)
+        let items = obj["jobs"] as? [[String: Any]] ?? []
+        return items.compactMap { parseCronJob(item: $0) }
+    }
+
+    func createCronJob(payload: [String: Any]) async throws -> CronJob {
+        var request = URLRequest(url: baseURL.appendingPathComponent("/v1/cron/jobs"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        let (data, _) = try await URLSession.shared.data(for: request)
+        let obj = try parseObject(data: data)
+        guard let jobObj = obj["job"] as? [String: Any],
+              let job = parseCronJob(item: jobObj) else {
+            throw NSError(domain: "Clawdex", code: 21, userInfo: [NSLocalizedDescriptionKey: "Invalid cron job response"])
+        }
+        return job
+    }
+
+    func updateCronJob(id: String, patch: [String: Any]) async throws -> CronJob {
+        var request = URLRequest(url: baseURL.appendingPathComponent("/v1/cron/jobs/\(id)"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: patch)
+        let (data, _) = try await URLSession.shared.data(for: request)
+        let obj = try parseObject(data: data)
+        guard let jobObj = obj["job"] as? [String: Any],
+              let job = parseCronJob(item: jobObj) else {
+            throw NSError(domain: "Clawdex", code: 22, userInfo: [NSLocalizedDescriptionKey: "Invalid cron job response"])
+        }
+        return job
+    }
 }
 
 private func parseObject(data: Data) throws -> [String: Any] {
@@ -251,4 +307,35 @@ private func int64Value(_ any: Any?) -> Int64? {
         return value.int64Value
     }
     return nil
+}
+
+private func parseCronJob(item: [String: Any]) -> CronJob? {
+    guard let id = item["id"] as? String else { return nil }
+    let name = item["name"] as? String ?? "(untitled)"
+    let enabled = item["enabled"] as? Bool ?? true
+    let schedule = item["schedule"] as? [String: Any] ?? [:]
+    let scheduleKind = schedule["kind"] as? String ?? "cron"
+    let cronExpr = schedule["cron"] as? String ?? ""
+    let timezone = schedule["timezone"] as? String ?? "UTC"
+    let everyMs = int64Value(schedule["everyMs"])
+    let atMs = int64Value(schedule["atMs"])
+
+    let sessionTarget = item["sessionTarget"] as? String ?? "main"
+    let payload = item["payload"] as? [String: Any] ?? [:]
+    let payloadKind = payload["kind"] as? String ?? "agentTurn"
+    let message = payload["message"] as? String ?? (payload["text"] as? String ?? "")
+
+    return CronJob(
+        id: id,
+        name: name,
+        enabled: enabled,
+        scheduleKind: scheduleKind,
+        cronExpr: cronExpr,
+        timezone: timezone,
+        everyMs: everyMs,
+        atMs: atMs,
+        sessionTarget: sessionTarget,
+        payloadKind: payloadKind,
+        message: message
+    )
 }

@@ -19,6 +19,8 @@
 - [x] Add permissions UI plus MCP allow/deny policies
 - [x] Add command palette UX for plugin commands
 - [x] Add per-plugin MCP toggles in config + UI
+- [x] Add richer approval detail rendering (diff/command previews) in mac app
+- [x] Add cron schedule UI for creating/editing jobs (mac app)
 - [x] Add approvals + user-input UI (macOS) backed by daemon IPC
 - [x] Implement cron runner loop + per-job policy execution
 

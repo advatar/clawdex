@@ -9,6 +9,7 @@ use tiny_http::{Method, Response, Server, StatusCode};
 
 use crate::approvals::{ApprovalBroker, ApprovalDecision};
 use crate::config::{ClawdConfig, ClawdPaths};
+use crate::cron;
 use crate::daemon::run_daemon_loop;
 use crate::task_db::TaskStore;
 use crate::tasks::{TaskEngine, TaskRunOptions};
@@ -97,6 +98,33 @@ fn handle_request(
                 task_id,
             }, broker.clone())?;
             Ok(json_response(json!({ "run": run }))?)
+        }
+        _ if method == Method::Get && url.starts_with("/v1/cron/jobs") => {
+            let (path, query) = split_path_query(&url);
+            if path != "/v1/cron/jobs" {
+                return Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)));
+            }
+            let include_disabled = query_param_bool(query, "includeDisabled").unwrap_or(true);
+            let value = cron::list_jobs(paths, include_disabled)?;
+            Ok(json_response(value)?)
+        }
+        (&Method::Post, "/v1/cron/jobs") => {
+            let body = read_body(request)?;
+            let payload: Value = serde_json::from_str(&body).context("parse cron job create")?;
+            let job = cron::add_job(paths, &payload)?;
+            Ok(json_response(json!({ "job": job }))?)
+        }
+        _ if method == Method::Post && url.starts_with("/v1/cron/jobs/") => {
+            let id = url.trim_start_matches("/v1/cron/jobs/");
+            let body = read_body(request)?;
+            let payload: Value = serde_json::from_str(&body).context("parse cron job patch")?;
+            let patch = payload.get("patch").cloned().unwrap_or(payload);
+            let update_args = json!({
+                "id": id,
+                "patch": patch
+            });
+            let job = cron::update_job(paths, &update_args)?;
+            Ok(json_response(json!({ "job": job }))?)
         }
         (&Method::Get, "/v1/approvals") => {
             let approvals = broker.list_pending_approvals();
@@ -230,6 +258,23 @@ fn query_param_usize(query: Option<&str>, key: &str) -> Option<usize> {
         let v = parts.next().unwrap_or("").trim();
         if k == key {
             return v.parse::<usize>().ok();
+        }
+    }
+    None
+}
+
+fn query_param_bool(query: Option<&str>, key: &str) -> Option<bool> {
+    let query = query?;
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let k = parts.next()?.trim();
+        let v = parts.next().unwrap_or("").trim().to_lowercase();
+        if k == key {
+            return match v.as_str() {
+                "1" | "true" | "yes" | "on" => Some(true),
+                "0" | "false" | "no" | "off" => Some(false),
+                _ => None,
+            };
         }
     }
     None

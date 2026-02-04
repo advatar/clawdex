@@ -15,6 +15,10 @@ struct MainView: View {
                 .tabItem {
                     Label("Approvals", systemImage: "hand.raised")
                 }
+            CronView()
+                .tabItem {
+                    Label("Schedule", systemImage: "calendar")
+                }
         }
     }
 }

@@ -428,6 +428,7 @@ Plugin commands in the mac app:
 
 Approvals in the mac app:
 - Use the **Approvals** tab to review pending approvals and respond to tool input requests.
+- Use the **Schedule** tab to create and edit cron jobs.
 
 Override inputs as needed:
 - `CODEX_CARGO_ROOT` (default `../codex/codex-rs`)
