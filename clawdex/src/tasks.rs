@@ -126,11 +126,13 @@ impl TaskEngine {
 
         let store_rc = Rc::new(RefCell::new(store));
         let event_sink = TaskEventSink::new(store_rc.clone(), run.id.clone());
-        let approval_handler = TaskApprovalHandler::new(
-            store_rc.clone(),
-            run.id.clone(),
-            !opts.auto_approve,
-        );
+        let approval_mode = if opts.auto_approve {
+            ApprovalPromptMode::AutoApprove
+        } else {
+            ApprovalPromptMode::Interactive
+        };
+        let approval_handler =
+            TaskApprovalHandler::new(store_rc.clone(), run.id.clone(), approval_mode);
         let user_input_handler = TaskUserInputHandler::new(store_rc.clone(), run.id.clone());
 
         let mut client = CodexClient::spawn(&codex_path, &config_overrides, &env, ApprovalMode::AutoDeny)?;
@@ -266,19 +268,20 @@ impl EventSink for TaskEventSink {
     }
 }
 
+enum ApprovalPromptMode {
+    Interactive,
+    AutoApprove,
+}
+
 struct TaskApprovalHandler {
     store: Rc<RefCell<TaskStore>>,
     run_id: String,
-    interactive: bool,
+    mode: ApprovalPromptMode,
 }
 
 impl TaskApprovalHandler {
-    fn new(store: Rc<RefCell<TaskStore>>, run_id: String, interactive: bool) -> Self {
-        Self {
-            store,
-            run_id,
-            interactive,
-        }
+    fn new(store: Rc<RefCell<TaskStore>>, run_id: String, mode: ApprovalPromptMode) -> Self {
+        Self { store, run_id, mode }
     }
 
     fn record_decision(&self, kind: &str, request: &Value, decision: &str) {
@@ -295,7 +298,15 @@ impl ApprovalHandler for TaskApprovalHandler {
         params: &CommandExecutionRequestApprovalParams,
     ) -> CommandExecutionApprovalDecision {
         let request = serde_json::to_value(params).unwrap_or(Value::Null);
-        if self.interactive {
+        match self.mode {
+            ApprovalPromptMode::AutoApprove => {
+                self.record_decision("command", &request, "accept");
+                return CommandExecutionApprovalDecision::Accept;
+            }
+            ApprovalPromptMode::Interactive => {}
+        }
+
+        {
             println!("\n[approval] Command execution requested");
             if let Some(cmd) = params.command.as_deref() {
                 println!("  command: {}", cmd);
@@ -313,8 +324,6 @@ impl ApprovalHandler for TaskApprovalHandler {
             self.record_decision("command", &request, "decline");
             return CommandExecutionApprovalDecision::Decline;
         }
-        self.record_decision("command", &request, "decline");
-        CommandExecutionApprovalDecision::Decline
     }
 
     fn file_decision(
@@ -322,7 +331,15 @@ impl ApprovalHandler for TaskApprovalHandler {
         params: &FileChangeRequestApprovalParams,
     ) -> FileChangeApprovalDecision {
         let request = serde_json::to_value(params).unwrap_or(Value::Null);
-        if self.interactive {
+        match self.mode {
+            ApprovalPromptMode::AutoApprove => {
+                self.record_decision("file_change", &request, "accept");
+                return FileChangeApprovalDecision::Accept;
+            }
+            ApprovalPromptMode::Interactive => {}
+        }
+
+        {
             println!("\n[approval] File change requested");
             if let Some(reason) = params.reason.as_deref() {
                 println!("  reason: {}", reason);
@@ -337,8 +354,6 @@ impl ApprovalHandler for TaskApprovalHandler {
             self.record_decision("file_change", &request, "decline");
             return FileChangeApprovalDecision::Decline;
         }
-        self.record_decision("file_change", &request, "decline");
-        FileChangeApprovalDecision::Decline
     }
 }
 

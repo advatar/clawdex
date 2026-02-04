@@ -230,7 +230,7 @@ Example `config.json5`:
    - `--title <text>` create or reuse a task by title.
    - `--prompt <text>` prompt text (or provide via stdin).
    - `--codex-path <path>` overrides Codex binary.
-   - `--auto-approve` bypasses interactive approvals (declines by default when unset).
+   - `--auto-approve` accepts approvals automatically (default is interactive prompting).
    - `--state-dir <path>` overrides state directory.
    - `--workspace <path>` overrides workspace directory.
 
