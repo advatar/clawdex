@@ -9,12 +9,12 @@ use codex_app_server_protocol::AskForApproval;
 use serde_json::json;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 use crate::config::{resolve_heartbeat_enabled, resolve_heartbeat_interval_ms, ClawdConfig, ClawdPaths};
 use crate::cron::{
-    collect_due_jobs, drain_pending_jobs, job_prompt, job_session_key, mark_job_running, record_run,
-    CronJob,
+    build_cron_job, collect_due_jobs, drain_pending_jobs, is_job_due_value, job_prompt,
+    job_session_key, load_job_value, mark_job_running, record_run, CronJob,
 };
 use crate::gateway;
 use crate::heartbeat;
@@ -26,7 +26,28 @@ pub fn run_daemon(
     paths: ClawdPaths,
     codex_path_override: Option<PathBuf>,
 ) -> Result<()> {
-    run_daemon_loop(cfg, paths, codex_path_override, Arc::new(AtomicBool::new(false)))
+    run_daemon_loop(
+        cfg,
+        paths,
+        codex_path_override,
+        Arc::new(AtomicBool::new(false)),
+        None,
+    )
+}
+
+#[derive(Debug, Clone)]
+pub struct DaemonRunResult {
+    pub ok: bool,
+    pub ran: bool,
+    pub reason: Option<String>,
+}
+
+pub enum DaemonCommand {
+    RunCronJob {
+        job_id: String,
+        mode: String,
+        respond_to: mpsc::Sender<DaemonRunResult>,
+    },
 }
 
 pub fn run_daemon_loop(
@@ -34,6 +55,7 @@ pub fn run_daemon_loop(
     paths: ClawdPaths,
     codex_path_override: Option<PathBuf>,
     shutdown: Arc<AtomicBool>,
+    commands: Option<mpsc::Receiver<DaemonCommand>>,
 ) -> Result<()> {
     let codex_path = resolve_codex_path(&cfg, codex_path_override)?;
     let workspace = paths.workspace_dir.clone();
@@ -59,6 +81,17 @@ pub fn run_daemon_loop(
             break;
         }
         let now = now_ms();
+
+        if let Some(receiver) = commands.as_ref() {
+            drain_daemon_commands(
+                &mut runner,
+                &paths,
+                approval_policy,
+                &workspace_policy,
+                &workspace,
+                receiver,
+            );
+        }
 
         // Drain inbound messages from the gateway and run Codex turns.
         let inbound = gateway::drain_inbox(&paths)?;
@@ -100,6 +133,102 @@ pub fn run_daemon_loop(
         thread::sleep(Duration::from_millis(500));
     }
     Ok(())
+}
+
+fn drain_daemon_commands(
+    runner: &mut CodexRunner,
+    paths: &ClawdPaths,
+    base_approval_policy: AskForApproval,
+    base_workspace_policy: &crate::config::WorkspacePolicy,
+    base_workspace: &PathBuf,
+    receiver: &mpsc::Receiver<DaemonCommand>,
+) {
+    while let Ok(cmd) = receiver.try_recv() {
+        match cmd {
+            DaemonCommand::RunCronJob {
+                job_id,
+                mode,
+                respond_to,
+            } => {
+                let result = run_cron_job_now(
+                    runner,
+                    paths,
+                    &job_id,
+                    &mode,
+                    base_approval_policy,
+                    base_workspace_policy,
+                    base_workspace,
+                );
+                let _ = respond_to.send(result);
+            }
+        }
+    }
+}
+
+fn run_cron_job_now(
+    runner: &mut CodexRunner,
+    paths: &ClawdPaths,
+    job_id: &str,
+    mode: &str,
+    base_approval_policy: AskForApproval,
+    base_workspace_policy: &crate::config::WorkspacePolicy,
+    base_workspace: &PathBuf,
+) -> DaemonRunResult {
+    let now = now_ms();
+    let job_value = match load_job_value(paths, job_id) {
+        Ok(Some(job)) => job,
+        Ok(None) => {
+            return DaemonRunResult {
+                ok: false,
+                ran: false,
+                reason: Some("not-found".to_string()),
+            }
+        }
+        Err(err) => {
+            return DaemonRunResult {
+                ok: false,
+                ran: false,
+                reason: Some(err.to_string()),
+            }
+        }
+    };
+
+    let forced = mode.eq_ignore_ascii_case("force");
+    if !is_job_due_value(&job_value, now, forced) {
+        return DaemonRunResult {
+            ok: true,
+            ran: false,
+            reason: Some("not-due".to_string()),
+        };
+    }
+
+    let Some(job) = build_cron_job(&job_value) else {
+        return DaemonRunResult {
+            ok: false,
+            ran: false,
+            reason: Some("invalid-job".to_string()),
+        };
+    };
+
+    match execute_job(
+        runner,
+        paths,
+        &job,
+        base_approval_policy,
+        base_workspace_policy,
+        base_workspace,
+    ) {
+        Ok(()) => DaemonRunResult {
+            ok: true,
+            ran: true,
+            reason: None,
+        },
+        Err(err) => DaemonRunResult {
+            ok: false,
+            ran: false,
+            reason: Some(err.to_string()),
+        },
+    }
 }
 
 fn execute_job(

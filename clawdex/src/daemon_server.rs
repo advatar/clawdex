@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -10,10 +10,40 @@ use tiny_http::{Method, Response, Server, StatusCode};
 use crate::approvals::{ApprovalBroker, ApprovalDecision};
 use crate::config::{ClawdConfig, ClawdPaths};
 use crate::cron;
-use crate::daemon::run_daemon_loop;
+use crate::daemon::{DaemonCommand, DaemonRunResult, run_daemon_loop};
 use crate::task_db::TaskStore;
 use crate::tasks::{TaskEngine, TaskRunOptions};
 use crate::util::now_ms;
+
+struct DaemonControl {
+    sender: mpsc::Sender<DaemonCommand>,
+}
+
+impl DaemonControl {
+    fn run_cron_job(&self, job_id: &str, mode: &str) -> DaemonRunResult {
+        let (respond_to, receiver) = mpsc::channel();
+        let cmd = DaemonCommand::RunCronJob {
+            job_id: job_id.to_string(),
+            mode: mode.to_string(),
+            respond_to,
+        };
+        if self.sender.send(cmd).is_err() {
+            return DaemonRunResult {
+                ok: false,
+                ran: false,
+                reason: Some("daemon unavailable".to_string()),
+            };
+        }
+        match receiver.recv() {
+            Ok(result) => result,
+            Err(err) => DaemonRunResult {
+                ok: false,
+                ran: false,
+                reason: Some(err.to_string()),
+            },
+        }
+    }
+}
 
 pub fn run_daemon_server(
     cfg: ClawdConfig,
@@ -21,6 +51,7 @@ pub fn run_daemon_server(
     codex_path_override: Option<PathBuf>,
     bind: &str,
 ) -> Result<()> {
+    let (command_tx, command_rx) = std::sync::mpsc::channel::<DaemonCommand>();
     let broker = Arc::new(ApprovalBroker::new(paths.clone()));
     let shutdown = Arc::new(AtomicBool::new(false));
     let daemon_shutdown = shutdown.clone();
@@ -29,13 +60,20 @@ pub fn run_daemon_server(
     let codex_path_clone = codex_path_override.clone();
 
     thread::spawn(move || {
-        let _ = run_daemon_loop(cfg_clone, paths_clone, codex_path_clone, daemon_shutdown);
+        let _ = run_daemon_loop(
+            cfg_clone,
+            paths_clone,
+            codex_path_clone,
+            daemon_shutdown,
+            Some(command_rx),
+        );
     });
 
+    let control = DaemonControl { sender: command_tx };
     let server = Server::http(bind)
         .map_err(|err| anyhow::anyhow!("bind daemon server {bind}: {err}"))?;
     for mut request in server.incoming_requests() {
-        let response = match handle_request(&cfg, &paths, broker.clone(), &mut request) {
+        let response = match handle_request(&cfg, &paths, broker.clone(), &control, &mut request) {
             Ok(resp) => resp,
             Err(err) => json_error_response(&err.to_string(), StatusCode(500)),
         };
@@ -49,6 +87,7 @@ fn handle_request(
     cfg: &ClawdConfig,
     paths: &ClawdPaths,
     broker: Arc<ApprovalBroker>,
+    control: &DaemonControl,
     request: &mut tiny_http::Request,
 ) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
     let method = request.method().clone();
@@ -114,7 +153,10 @@ fn handle_request(
             let job = cron::add_job(paths, &payload)?;
             Ok(json_response(json!({ "job": job }))?)
         }
-        _ if method == Method::Post && url.starts_with("/v1/cron/jobs/") => {
+        _ if method == Method::Post
+            && url.starts_with("/v1/cron/jobs/")
+            && !url.ends_with("/run") =>
+        {
             let id = url.trim_start_matches("/v1/cron/jobs/");
             let body = read_body(request)?;
             let payload: Value = serde_json::from_str(&body).context("parse cron job patch")?;
@@ -125,6 +167,17 @@ fn handle_request(
             });
             let job = cron::update_job(paths, &update_args)?;
             Ok(json_response(json!({ "job": job }))?)
+        }
+        _ if method == Method::Post && url.starts_with("/v1/cron/jobs/") && url.ends_with("/run") => {
+            let trimmed = url.trim_start_matches("/v1/cron/jobs/").trim_end_matches("/run");
+            if trimmed.is_empty() {
+                return Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)));
+            }
+            let body = read_body(request)?;
+            let payload: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+            let mode = payload.get("mode").and_then(|v| v.as_str()).unwrap_or("due");
+            let result = control.run_cron_job(trimmed, mode);
+            Ok(json_response(json!({ "ok": result.ok, "ran": result.ran, "reason": result.reason }))?)
         }
         (&Method::Get, "/v1/approvals") => {
             let approvals = broker.list_pending_approvals();

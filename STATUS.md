@@ -33,6 +33,7 @@
 - [x] Implement gateway bridge session mapping + outbound delivery parity
 - [x] Produce OpenClaw parity delta checklist and start closing gaps
 - [x] Align cron storage format + run log responses with OpenClaw (versioned jobs, state.nextRunAtMs, finished runs)
+- [x] Align cron.run semantics with OpenClaw (immediate run + {ok, ran, reason})
 
 Notes:
 - `TEMPLATE_PACK.md` is the parity checklist: use it later to fill tool schemas, routing rules, and tests, then implement remaining gaps using the name `Clawdex`.

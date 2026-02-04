@@ -406,6 +406,21 @@ fn save_jobs(paths: &ClawdPaths, jobs: &[Value]) -> Result<()> {
     )
 }
 
+pub(crate) fn load_job_value(paths: &ClawdPaths, job_id: &str) -> Result<Option<Value>> {
+    let jobs = load_jobs(paths)?;
+    for job in jobs {
+        if job
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|v| v == job_id)
+            .unwrap_or(false)
+        {
+            return Ok(Some(job));
+        }
+    }
+    Ok(None)
+}
+
 fn ensure_job_id(map: &mut Map<String, Value>) -> String {
     if let Some(id) = map.get("id").and_then(|v| v.as_str()) {
         return id.to_string();
@@ -511,6 +526,25 @@ fn compute_next_run(job: &Value, now: i64) -> Option<i64> {
     schedule.next_run_after(job_last_run_at(job), job_created_at(job), now)
 }
 
+pub(crate) fn is_job_due_value(job: &Value, now: i64, forced: bool) -> bool {
+    if forced {
+        return true;
+    }
+    if !job_enabled(job) {
+        return false;
+    }
+    if let Some(next) = job
+        .get("state")
+        .and_then(|v| v.get("nextRunAtMs"))
+        .and_then(|v| v.as_i64())
+    {
+        return now >= next;
+    }
+    compute_next_run(job, now)
+        .map(|next| now >= next)
+        .unwrap_or(false)
+}
+
 fn payload_message(payload: &Value) -> Option<String> {
     if let Some(text) = payload.as_str() {
         return Some(text.to_string());
@@ -524,7 +558,7 @@ fn payload_message(payload: &Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn build_cron_job(job: &Value) -> Option<CronJob> {
+pub(crate) fn build_cron_job(job: &Value) -> Option<CronJob> {
     let id = job
         .get("id")
         .or_else(|| job.get("jobId"))
@@ -1056,14 +1090,22 @@ pub fn run_jobs(paths: &ClawdPaths, args: &Value) -> Result<Value> {
         .get("mode")
         .and_then(|v| v.as_str())
         .unwrap_or("due");
-    let job_id = job_id_from_args(args);
+    let job_id = job_id_from_args(args).context("cron.run requires jobId or id")?;
     let now = now_ms();
-    let (queued_jobs, entries) = collect_due_jobs(paths, now, mode, job_id)?;
-    Ok(json!({
-        "ok": true,
-        "queued": queued_jobs.len(),
-        "entries": entries
-    }))
+    let forced = mode.eq_ignore_ascii_case("force");
+
+    let job_value = load_job_value(paths, &job_id)?;
+    let Some(job_value) = job_value else {
+        return Ok(json!({ "ok": false }));
+    };
+
+    if !is_job_due_value(&job_value, now, forced) {
+        return Ok(json!({ "ok": true, "ran": false, "reason": "not-due" }));
+    }
+
+    let _ = collect_due_jobs(paths, now, mode, Some(job_id))?;
+
+    Ok(json!({ "ok": true, "ran": true }))
 }
 
 pub fn collect_due_jobs(

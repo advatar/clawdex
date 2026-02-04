@@ -3,6 +3,7 @@ pub mod approvals;
 pub mod config;
 pub mod cron;
 pub mod daemon;
+pub mod daemon_client;
 pub mod gateway;
 pub mod heartbeat;
 pub mod mcp;

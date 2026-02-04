@@ -9,6 +9,7 @@ use crate::config::{
     resolve_cron_enabled, resolve_heartbeat_enabled, ClawdConfig, ClawdPaths,
 };
 use crate::cron;
+use crate::daemon_client;
 use crate::gateway;
 use crate::heartbeat;
 use crate::memory;
@@ -378,7 +379,26 @@ fn handle_tool_call(
         "cron.add" => cron::add_job(paths, &arguments)?,
         "cron.update" => cron::update_job(paths, &arguments)?,
         "cron.remove" => cron::remove_job(paths, &arguments)?,
-        "cron.run" => cron::run_jobs(paths, &arguments)?,
+        "cron.run" => {
+            let job_id = arguments
+                .get("jobId")
+                .or_else(|| arguments.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let mode = arguments
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("due");
+            if !job_id.is_empty() {
+                if let Some(result) = daemon_client::cron_run(job_id, mode) {
+                    result
+                } else {
+                    cron::run_jobs(paths, &arguments)?
+                }
+            } else {
+                cron::run_jobs(paths, &arguments)?
+            }
+        }
         "cron.runs" => cron::runs(paths, &arguments)?,
         "memory_search" => memory::memory_search(paths, &arguments)?,
         "memory_get" => memory::memory_get(paths, &arguments)?,

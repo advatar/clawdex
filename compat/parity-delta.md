@@ -19,7 +19,7 @@ Legend:
 - [x] Store format parity (`{ version: 1, jobs: [...] }` vs array).
 - [x] State fields parity (`state.nextRunAtMs`, `runningAtMs`, `lastStatus`, `lastError`, etc.).
 - [x] cron.list sorting by `state.nextRunAtMs`.
-- [ ] cron.run semantics: OpenClaw executes job immediately and returns `{ ok, ran, reason? }`; Clawdex currently queues.
+- [x] cron.run semantics: OpenClaw executes job immediately and returns `{ ok, ran, reason? }`; Clawdex now uses daemon fast-path and returns the same shape.
 - [x] cron.runs log format parity (OpenClaw `action: finished` vs Clawdex run log schema).
 
 ## Memory
