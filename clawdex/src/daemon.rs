@@ -14,12 +14,20 @@ use std::sync::{mpsc, Arc};
 use crate::config::{resolve_heartbeat_enabled, resolve_heartbeat_interval_ms, ClawdConfig, ClawdPaths};
 use crate::cron::{
     build_cron_job, collect_due_jobs, drain_pending_jobs, is_job_due_value, job_prompt,
-    job_session_key, load_job_value, mark_job_running, record_run, CronJob,
+    load_job_value, mark_job_running, record_run, CronJob,
 };
 use crate::gateway;
 use crate::heartbeat;
 use crate::runner::{CodexRunner, CodexRunnerConfig};
 use crate::util::now_ms;
+
+#[derive(Debug, Clone)]
+struct DeliveryPlan {
+    channel: Option<String>,
+    to: Option<String>,
+    best_effort: bool,
+    requested: bool,
+}
 
 pub fn run_daemon(
     cfg: ClawdConfig,
@@ -285,24 +293,48 @@ fn execute_job(
     let mut reason = "executed";
     let mut error: Option<String> = None;
 
-    if should_deliver(job) {
-        let args = json!({
-            "sessionKey": job_session_key(job),
-            "channel": job.channel,
-            "to": job.to,
-            "text": summary,
-            "bestEffortDeliver": job.best_effort,
-            "idempotencyKey": format!("cron:{}:{}", job.id, started_at),
-        });
-        if let Err(err) = gateway::send_message(paths, &args) {
-            let err_text = err.to_string();
-            error = Some(err_text.clone());
-            if job.best_effort {
+    let plan = resolve_delivery_plan(job);
+    if plan.requested {
+        let mut channel = plan.channel.clone();
+        let mut to = plan.to.clone();
+        let mut account_id: Option<String> = None;
+
+        if channel.as_deref() == Some("last") || to.is_none() {
+            if let Some(resolved) = resolve_delivery_target(paths, channel.clone(), to.clone()) {
+                channel = Some(resolved.channel);
+                to = Some(resolved.to);
+                account_id = resolved.account_id;
+            }
+        }
+
+        if channel.is_none() || to.is_none() {
+            if plan.best_effort {
                 status = "skipped";
-                reason = "message.send failed (best effort)";
+                reason = "no delivery target (best effort)";
             } else {
                 status = "delivery_failed";
-                reason = "message.send failed";
+                reason = "no delivery target";
+                error = Some("no delivery target".to_string());
+            }
+        } else {
+            let args = json!({
+                "channel": channel,
+                "to": to,
+                "accountId": account_id,
+                "text": summary,
+                "bestEffort": plan.best_effort,
+                "idempotencyKey": format!("cron:{}:{}", job.id, started_at),
+            });
+            if let Err(err) = gateway::send_message(paths, &args) {
+                let err_text = err.to_string();
+                error = Some(err_text.clone());
+                if plan.best_effort {
+                    status = "skipped";
+                    reason = "message.send failed (best effort)";
+                } else {
+                    status = "delivery_failed";
+                    reason = "message.send failed";
+                }
             }
         }
     }
@@ -336,8 +368,103 @@ fn execute_heartbeat(runner: &mut CodexRunner, paths: &ClawdPaths) -> Result<()>
     Ok(())
 }
 
-fn should_deliver(job: &CronJob) -> bool {
-    job.deliver || job.channel.is_some() || job.to.is_some()
+fn resolve_delivery_plan(job: &CronJob) -> DeliveryPlan {
+    let payload = job.payload.as_object();
+    let payload_channel = payload
+        .and_then(|p| p.get("channel"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty());
+    let payload_to = payload
+        .and_then(|p| p.get("to"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let payload_deliver = payload.and_then(|p| p.get("deliver")).and_then(|v| v.as_bool());
+    let payload_best_effort = payload
+        .and_then(|p| p.get("bestEffortDeliver"))
+        .and_then(|v| v.as_bool());
+
+    if let Some(delivery) = job.delivery.as_ref() {
+        let normalized_mode = match delivery.mode.to_lowercase().as_str() {
+            "announce" => "announce".to_string(),
+            "deliver" => "announce".to_string(),
+            "none" => "none".to_string(),
+            other => other.to_string(),
+        };
+        let channel = delivery
+            .channel
+            .clone()
+            .or(payload_channel)
+            .or_else(|| Some("last".to_string()));
+        let to = delivery.to.clone().or(payload_to);
+        let requested = normalized_mode == "announce";
+        let best_effort = delivery
+            .best_effort
+            .or(payload_best_effort)
+            .unwrap_or(false);
+        return DeliveryPlan {
+            channel,
+            to,
+            best_effort,
+            requested,
+        };
+    }
+
+    let legacy_mode = match payload_deliver {
+        Some(true) => Some("explicit"),
+        Some(false) => Some("off"),
+        None => None,
+    };
+    let requested = match legacy_mode {
+        Some("explicit") => true,
+        Some("off") => false,
+        _ => payload_to.is_some() || job.to.is_some(),
+    };
+    let channel = payload_channel
+        .or(job.channel.clone())
+        .or_else(|| Some("last".to_string()));
+    let to = payload_to.or(job.to.clone());
+    let best_effort = payload_best_effort.unwrap_or(job.best_effort);
+    DeliveryPlan {
+        channel,
+        to,
+        best_effort,
+        requested,
+    }
+}
+
+struct ResolvedTarget {
+    channel: String,
+    to: String,
+    account_id: Option<String>,
+}
+
+fn resolve_delivery_target(
+    paths: &ClawdPaths,
+    channel: Option<String>,
+    to: Option<String>,
+) -> Option<ResolvedTarget> {
+    let channel_arg = match channel.as_deref() {
+        Some("last") => None,
+        _ => channel.clone(),
+    };
+    let args = json!({
+        "channel": channel_arg,
+        "to": to
+    });
+    let resolved = gateway::resolve_target(paths, &args).ok()?;
+    if resolved.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    Some(ResolvedTarget {
+        channel: resolved.get("channel")?.as_str()?.to_string(),
+        to: resolved.get("to")?.as_str()?.to_string(),
+        account_id: resolved
+            .get("accountId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    })
 }
 
 fn deliver_heartbeat_response(paths: &ClawdPaths, response: &str) -> Result<bool> {

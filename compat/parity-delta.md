@@ -14,8 +14,8 @@ Legend:
 - [x] Default `wakeMode` to `next-heartbeat` when missing.
 - [x] Default `sessionTarget` based on payload kind.
 - [x] Default `deleteAfterRun=true` for `at` schedules.
-- [~] Delivery parity: OpenClaw uses `delivery` object + legacy migration; Clawdex still uses `deliver/channel/to/bestEffort` fields.
-- [~] Patch merging: payload patches merge; still missing delivery object merge rules.
+- [x] Delivery parity: OpenClaw uses `delivery` object + legacy migration; Clawdex now normalizes/merges delivery and strips legacy fields.
+- [x] Patch merging: payload patches merge and delivery object patch rules are applied.
 - [x] Store format parity (`{ version: 1, jobs: [...] }` vs array).
 - [x] State fields parity (`state.nextRunAtMs`, `runningAtMs`, `lastStatus`, `lastError`, etc.).
 - [x] cron.list sorting by `state.nextRunAtMs`.

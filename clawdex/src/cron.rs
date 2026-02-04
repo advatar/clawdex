@@ -23,11 +23,26 @@ pub struct CronJob {
     pub wake_mode: String,
     pub payload: Value,
     pub policy: Option<Value>,
+    #[serde(default)]
     pub deliver: bool,
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+    #[serde(default)]
+    pub best_effort: bool,
+    #[serde(default)]
+    pub delivery: Option<CronDelivery>,
+    #[serde(default)]
+    pub delete_after_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronDelivery {
+    pub mode: String,
     pub channel: Option<String>,
     pub to: Option<String>,
-    pub best_effort: bool,
-    pub delete_after_run: bool,
+    pub best_effort: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -223,6 +238,245 @@ fn normalize_schedule(mut schedule: Map<String, Value>) -> Map<String, Value> {
     schedule
 }
 
+fn normalize_payload(mut payload: Map<String, Value>) -> Map<String, Value> {
+    if let Some(Value::String(channel)) = payload.get("channel").cloned() {
+        let trimmed = channel.trim().to_lowercase();
+        if trimmed.is_empty() {
+            payload.remove("channel");
+        } else if trimmed != channel {
+            payload.insert("channel".to_string(), Value::String(trimmed));
+        }
+    }
+
+    if let Some(Value::String(provider)) = payload.get("provider").cloned() {
+        let trimmed = provider.trim().to_lowercase();
+        if !trimmed.is_empty() {
+            payload.insert("channel".to_string(), Value::String(trimmed));
+        }
+        payload.remove("provider");
+    }
+
+    payload
+}
+
+fn normalize_delivery(mut delivery: Map<String, Value>) -> Map<String, Value> {
+    if let Some(Value::String(mode)) = delivery.get("mode").cloned() {
+        let trimmed = mode.trim().to_lowercase();
+        let normalized = if trimmed == "deliver" {
+            "announce".to_string()
+        } else {
+            trimmed
+        };
+        delivery.insert("mode".to_string(), Value::String(normalized));
+    }
+
+    if let Some(Value::String(channel)) = delivery.get("channel").cloned() {
+        let trimmed = channel.trim().to_lowercase();
+        if trimmed.is_empty() {
+            delivery.remove("channel");
+        } else if trimmed != channel {
+            delivery.insert("channel".to_string(), Value::String(trimmed));
+        }
+    }
+
+    if let Some(Value::String(to)) = delivery.get("to").cloned() {
+        let trimmed = to.trim().to_string();
+        if trimmed.is_empty() {
+            delivery.remove("to");
+        } else if trimmed != to {
+            delivery.insert("to".to_string(), Value::String(trimmed));
+        }
+    }
+
+    delivery
+}
+
+fn has_legacy_delivery_hints(payload: &Map<String, Value>, job: Option<&Map<String, Value>>) -> bool {
+    if payload.get("deliver").and_then(|v| v.as_bool()).is_some() {
+        return true;
+    }
+    if payload
+        .get("bestEffortDeliver")
+        .and_then(|v| v.as_bool())
+        .is_some()
+    {
+        return true;
+    }
+    if payload
+        .get("to")
+        .and_then(|v| v.as_str())
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if let Some(job) = job {
+        if job.get("deliver").and_then(|v| v.as_bool()).is_some() {
+            return true;
+        }
+        if job
+            .get("bestEffortDeliver")
+            .or_else(|| job.get("bestEffort"))
+            .and_then(|v| v.as_bool())
+            .is_some()
+        {
+            return true;
+        }
+        if job
+            .get("to")
+            .and_then(|v| v.as_str())
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn build_delivery_from_legacy(
+    payload: &Map<String, Value>,
+    job: Option<&Map<String, Value>>,
+) -> Option<Map<String, Value>> {
+    if !has_legacy_delivery_hints(payload, job) {
+        return None;
+    }
+
+    let deliver = payload
+        .get("deliver")
+        .and_then(|v| v.as_bool())
+        .or_else(|| job.and_then(|j| j.get("deliver").and_then(|v| v.as_bool())));
+    let mode = if deliver == Some(false) { "none" } else { "announce" };
+
+    let channel = payload
+        .get("channel")
+        .or_else(|| job.and_then(|j| j.get("channel")))
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().to_lowercase())
+        .filter(|v| !v.is_empty());
+    let to = payload
+        .get("to")
+        .or_else(|| job.and_then(|j| j.get("to")))
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let best_effort = payload
+        .get("bestEffortDeliver")
+        .or_else(|| job.and_then(|j| j.get("bestEffortDeliver")))
+        .or_else(|| job.and_then(|j| j.get("bestEffort")))
+        .and_then(|v| v.as_bool());
+
+    let mut delivery = Map::new();
+    delivery.insert("mode".to_string(), Value::String(mode.to_string()));
+    if let Some(channel) = channel {
+        delivery.insert("channel".to_string(), Value::String(channel));
+    }
+    if let Some(to) = to {
+        delivery.insert("to".to_string(), Value::String(to));
+    }
+    if let Some(best_effort) = best_effort {
+        delivery.insert("bestEffort".to_string(), Value::Bool(best_effort));
+    }
+    Some(delivery)
+}
+
+fn strip_legacy_delivery_fields(payload: &mut Map<String, Value>) {
+    payload.remove("deliver");
+    payload.remove("channel");
+    payload.remove("to");
+    payload.remove("bestEffortDeliver");
+    payload.remove("provider");
+}
+
+fn strip_legacy_job_delivery_fields(job: &mut Map<String, Value>) {
+    job.remove("deliver");
+    job.remove("channel");
+    job.remove("to");
+    job.remove("bestEffortDeliver");
+    job.remove("bestEffort");
+}
+
+fn merge_delivery(existing: Option<&Value>, patch: &Map<String, Value>) -> Map<String, Value> {
+    let mut next = Map::new();
+    let existing_obj = existing.and_then(|v| v.as_object());
+    if let Some(Value::String(mode)) = existing_obj.and_then(|o| o.get("mode")) {
+        next.insert("mode".to_string(), Value::String(mode.clone()));
+    } else {
+        next.insert("mode".to_string(), Value::String("none".to_string()));
+    }
+    if let Some(Value::String(channel)) = existing_obj.and_then(|o| o.get("channel")) {
+        next.insert("channel".to_string(), Value::String(channel.clone()));
+    }
+    if let Some(Value::String(to)) = existing_obj.and_then(|o| o.get("to")) {
+        next.insert("to".to_string(), Value::String(to.clone()));
+    }
+    if let Some(Value::Bool(best_effort)) = existing_obj.and_then(|o| o.get("bestEffort")) {
+        next.insert("bestEffort".to_string(), Value::Bool(*best_effort));
+    }
+
+    if let Some(Value::String(mode)) = patch.get("mode") {
+        let trimmed = mode.trim().to_lowercase();
+        let normalized = if trimmed == "deliver" {
+            "announce".to_string()
+        } else {
+            trimmed
+        };
+        next.insert("mode".to_string(), Value::String(normalized));
+    }
+    if patch.contains_key("channel") {
+        let channel = patch
+            .get("channel")
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim().to_lowercase())
+            .unwrap_or_default();
+        if channel.is_empty() {
+            next.remove("channel");
+        } else {
+            next.insert("channel".to_string(), Value::String(channel));
+        }
+    }
+    if patch.contains_key("to") {
+        let to = patch
+            .get("to")
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+        if to.is_empty() {
+            next.remove("to");
+        } else {
+            next.insert("to".to_string(), Value::String(to));
+        }
+    }
+    if let Some(Value::Bool(best_effort)) = patch.get("bestEffort") {
+        next.insert("bestEffort".to_string(), Value::Bool(*best_effort));
+    }
+
+    next
+}
+
+fn parse_delivery_map(delivery: &Map<String, Value>) -> CronDelivery {
+    let mode = delivery
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none")
+        .to_string();
+    let channel = delivery
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let to = delivery
+        .get("to")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let best_effort = delivery.get("bestEffort").and_then(|v| v.as_bool());
+    CronDelivery {
+        mode,
+        channel,
+        to,
+        best_effort,
+    }
+}
+
 fn normalize_job_input(raw: &Value, apply_defaults: bool) -> Result<Map<String, Value>> {
     let base = if let Some(obj) = raw.as_object() {
         if let Some(data) = obj.get("data").and_then(|v| v.as_object()) {
@@ -268,6 +522,17 @@ fn normalize_job_input(raw: &Value, apply_defaults: bool) -> Result<Map<String, 
         map.insert("schedule".to_string(), Value::Object(normalize_schedule(schedule)));
     }
 
+    if let Some(Value::Object(payload)) = map.get("payload").cloned() {
+        map.insert("payload".to_string(), Value::Object(normalize_payload(payload)));
+    }
+
+    if let Some(Value::Object(delivery)) = map.get("delivery").cloned() {
+        map.insert(
+            "delivery".to_string(),
+            Value::Object(normalize_delivery(delivery)),
+        );
+    }
+
     if apply_defaults {
         map.entry("enabled".to_string())
             .or_insert_with(|| Value::Bool(true));
@@ -300,23 +565,46 @@ fn normalize_job_input(raw: &Value, apply_defaults: bool) -> Result<Map<String, 
                 map.insert("deleteAfterRun".to_string(), Value::Bool(true));
             }
         }
-        let deliver_missing = map.get("deliver").is_none()
-            && map
+        let session_target = map
+            .get("sessionTarget")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let payload_kind = map
+            .get("payload")
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let is_isolated_agent_turn =
+            session_target == "isolated" || (session_target.is_empty() && payload_kind == "agentTurn");
+        let has_delivery = map.get("delivery").is_some();
+        if is_isolated_agent_turn && payload_kind == "agentTurn" && !has_delivery {
+            let legacy_delivery = map
                 .get("payload")
-                .and_then(|v| v.get("deliver"))
-                .is_none();
-        if deliver_missing {
-            let session_target = map
-                .get("sessionTarget")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let payload_kind = map
-                .get("payload")
-                .and_then(|v| v.get("kind"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if session_target == "isolated" && payload_kind == "agentTurn" {
-                map.insert("deliver".to_string(), Value::Bool(true));
+                .and_then(|v| v.as_object())
+                .and_then(|payload| {
+                    if has_legacy_delivery_hints(payload, Some(&map)) {
+                        build_delivery_from_legacy(payload, Some(&map))
+                    } else {
+                        None
+                    }
+                });
+
+            if let Some(delivery) = legacy_delivery {
+                map.insert("delivery".to_string(), Value::Object(normalize_delivery(delivery)));
+                if let Some(Value::Object(payload_mut)) = map.get_mut("payload") {
+                    strip_legacy_delivery_fields(payload_mut);
+                }
+                strip_legacy_job_delivery_fields(&mut map);
+            } else {
+                map.insert(
+                    "delivery".to_string(),
+                    Value::Object(Map::from_iter([(
+                        "mode".to_string(),
+                        Value::String("announce".to_string()),
+                    )])),
+                );
             }
         }
     }
@@ -358,12 +646,16 @@ fn validate_job_spec(map: &Map<String, Value>) -> Result<()> {
         .and_then(|v| v.get("kind"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let has_delivery = map.get("delivery").is_some();
 
     if session_target == "main" && payload_kind != "systemEvent" {
         anyhow::bail!("main cron jobs require payload.kind=\"systemEvent\"");
     }
     if session_target == "isolated" && payload_kind != "agentTurn" {
         anyhow::bail!("isolated cron jobs require payload.kind=\"agentTurn\"");
+    }
+    if has_delivery && session_target != "isolated" {
+        anyhow::bail!("cron delivery is only supported for sessionTarget=\"isolated\"");
     }
     Ok(())
 }
@@ -385,14 +677,95 @@ fn load_jobs(paths: &ClawdPaths) -> Result<Vec<Value>> {
     let Some(value) = read_json_value(&path)? else {
         return Ok(Vec::new());
     };
-    match value {
-        Value::Array(items) => Ok(items),
+    let mut jobs = match value {
+        Value::Array(items) => items,
         Value::Object(mut obj) => match obj.remove("jobs") {
-            Some(Value::Array(items)) => Ok(items),
+            Some(Value::Array(items)) => items,
             _ => anyhow::bail!("cron jobs file missing jobs array"),
         },
         _ => anyhow::bail!("cron jobs file is not an array or object"),
+    };
+
+    let mut mutated = false;
+    for job in &mut jobs {
+        let Some(map) = job.as_object_mut() else { continue };
+
+        if let Some(Value::Object(payload)) = map.get_mut("payload") {
+            let normalized = normalize_payload(payload.clone());
+            if *payload != normalized {
+                *payload = normalized;
+                mutated = true;
+            }
+        }
+
+        if let Some(Value::Object(delivery)) = map.get_mut("delivery") {
+            let normalized = normalize_delivery(delivery.clone());
+            if *delivery != normalized {
+                *delivery = normalized;
+                mutated = true;
+            }
+        }
+
+        let payload_kind = map
+            .get("payload")
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let session_target = map
+            .get("sessionTarget")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let is_isolated_agent_turn = session_target == "isolated"
+            || (session_target.is_empty() && payload_kind == "agentTurn");
+
+        if is_isolated_agent_turn && payload_kind == "agentTurn" {
+            let legacy_patch = map
+                .get("payload")
+                .and_then(|v| v.as_object())
+                .and_then(|payload| build_delivery_from_legacy(payload, Some(map)));
+
+            let has_delivery = map.get("delivery").is_some();
+            if !has_delivery {
+                if let Some(delivery) = legacy_patch {
+                    map.insert("delivery".to_string(), Value::Object(normalize_delivery(delivery)));
+                    if let Some(Value::Object(payload_mut)) = map.get_mut("payload") {
+                        strip_legacy_delivery_fields(payload_mut);
+                    }
+                    strip_legacy_job_delivery_fields(map);
+                    mutated = true;
+                } else {
+                    map.insert(
+                        "delivery".to_string(),
+                        Value::Object(Map::from_iter([(
+                            "mode".to_string(),
+                            Value::String("announce".to_string()),
+                        )])),
+                    );
+                    mutated = true;
+                }
+            } else if let Some(delivery) = legacy_patch {
+                let merged = merge_delivery(map.get("delivery"), &delivery);
+                map.insert("delivery".to_string(), Value::Object(merged));
+                if let Some(Value::Object(payload_mut)) = map.get_mut("payload") {
+                    strip_legacy_delivery_fields(payload_mut);
+                }
+                strip_legacy_job_delivery_fields(map);
+                mutated = true;
+            }
+        }
+
+        if session_target == "main" && map.remove("delivery").is_some() {
+            mutated = true;
+        }
     }
+
+    if mutated {
+        save_jobs(paths, &jobs)?;
+    }
+
+    Ok(jobs)
 }
 
 fn save_jobs(paths: &ClawdPaths, jobs: &[Value]) -> Result<()> {
@@ -598,8 +971,36 @@ pub(crate) fn build_cron_job(job: &Value) -> Option<CronJob> {
     let best_effort = payload
         .get("bestEffortDeliver")
         .or_else(|| job.get("bestEffortDeliver"))
+        .or_else(|| job.get("bestEffort"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let mut delivery = job
+        .get("delivery")
+        .and_then(|v| v.as_object())
+        .map(|v| normalize_delivery(v.clone()))
+        .map(|v| parse_delivery_map(&v));
+    if delivery.is_none() {
+        if let Some(payload_map) = payload.as_object() {
+            if let Some(map) = build_delivery_from_legacy(payload_map, job.as_object()) {
+                delivery = Some(parse_delivery_map(&normalize_delivery(map)));
+            }
+        }
+    }
+    if delivery.is_none()
+        && session_target == "isolated"
+        && payload
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .map(|v| v == "agentTurn")
+            .unwrap_or(false)
+    {
+        delivery = Some(CronDelivery {
+            mode: "announce".to_string(),
+            channel: None,
+            to: None,
+            best_effort: None,
+        });
+    }
     let delete_after_run = job
         .get("deleteAfterRun")
         .and_then(|v| v.as_bool())
@@ -616,6 +1017,7 @@ pub(crate) fn build_cron_job(job: &Value) -> Option<CronJob> {
         channel,
         to,
         best_effort,
+        delivery,
         delete_after_run,
     })
 }
@@ -784,10 +1186,30 @@ pub fn update_job(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     let now = now_ms();
 
     let job = find_job_mut(&mut jobs, &job_id).context("job not found")?;
+    let mut saw_delivery_patch = false;
+    let mut payload_patch: Option<Map<String, Value>> = None;
     for (key, value) in patch_map {
         if key == "payload" {
+            if let Value::Object(map) = &value {
+                payload_patch = Some(map.clone());
+            }
             let merged = merge_payload(job.get("payload").unwrap_or(&Value::Null), &value);
             job.insert(key, merged);
+        } else if key == "delivery" {
+            saw_delivery_patch = true;
+            match value {
+                Value::Object(delivery_patch) => {
+                    let normalized = normalize_delivery(delivery_patch);
+                    let merged = merge_delivery(job.get("delivery"), &normalized);
+                    job.insert("delivery".to_string(), Value::Object(merged));
+                }
+                Value::Null => {
+                    job.remove("delivery");
+                }
+                _ => {
+                    job.insert("delivery".to_string(), value);
+                }
+            }
         } else if key == "state" {
             if let Value::Object(state_patch) = value {
                 let state = job_state_mut(job);
@@ -801,6 +1223,38 @@ pub fn update_job(paths: &ClawdPaths, args: &Value) -> Result<Value> {
             job.insert(key, value);
         }
     }
+
+    if !saw_delivery_patch {
+        if let Some(payload_patch) = payload_patch.as_ref() {
+            if job
+                .get("sessionTarget")
+                .and_then(|v| v.as_str())
+                .map(|v| v == "isolated")
+                .unwrap_or(false)
+                && job
+                    .get("payload")
+                    .and_then(|v| v.get("kind"))
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == "agentTurn")
+                    .unwrap_or(false)
+            {
+                if let Some(delivery_patch) = build_delivery_from_legacy(payload_patch, None) {
+                    let merged = merge_delivery(job.get("delivery"), &delivery_patch);
+                    job.insert("delivery".to_string(), Value::Object(merged));
+                }
+            }
+        }
+    }
+
+    if job
+        .get("sessionTarget")
+        .and_then(|v| v.as_str())
+        .map(|v| v == "main")
+        .unwrap_or(false)
+    {
+        job.remove("delivery");
+    }
+
     job.insert("updatedAtMs".to_string(), Value::Number(now.into()));
     validate_job_spec(job)?;
     let enabled = job_enabled(&Value::Object(job.clone()));
