@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 
-use crate::util::{ensure_dir, home_dir, read_to_string};
+use crate::util::{ensure_dir, home_dir, read_to_string, write_string};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClawdConfig {
@@ -28,6 +28,13 @@ pub struct WorkspacePolicyConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PermissionsConfig {
     pub internet: Option<bool>,
+    pub mcp: Option<McpPermissionsConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpPermissionsConfig {
+    pub allow: Option<Vec<String>>,
+    pub deny: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -88,6 +95,25 @@ pub struct WorkspacePolicy {
     pub read_only: bool,
     pub network_access: bool,
     deny_set: GlobSet,
+}
+
+#[derive(Debug, Clone)]
+pub struct McpPolicy {
+    allow: std::collections::HashSet<String>,
+    deny: std::collections::HashSet<String>,
+}
+
+impl McpPolicy {
+    pub fn is_allowed(&self, name: &str) -> bool {
+        let key = normalize_mcp_name(name);
+        if self.deny.contains(&key) {
+            return false;
+        }
+        if self.allow.is_empty() {
+            return true;
+        }
+        self.allow.contains(&key)
+    }
 }
 
 impl WorkspacePolicy {
@@ -220,6 +246,30 @@ pub fn resolve_network_access(cfg: &ClawdConfig) -> bool {
         .unwrap_or(true)
 }
 
+pub fn resolve_mcp_policy(cfg: &ClawdConfig) -> McpPolicy {
+    let mut allow = std::collections::HashSet::new();
+    let mut deny = std::collections::HashSet::new();
+    if let Some(mcp) = cfg.permissions.as_ref().and_then(|p| p.mcp.as_ref()) {
+        if let Some(list) = mcp.allow.as_ref() {
+            for entry in list {
+                let key = normalize_mcp_name(entry);
+                if !key.is_empty() {
+                    allow.insert(key);
+                }
+            }
+        }
+        if let Some(list) = mcp.deny.as_ref() {
+            for entry in list {
+                let key = normalize_mcp_name(entry);
+                if !key.is_empty() {
+                    deny.insert(key);
+                }
+            }
+        }
+    }
+    McpPolicy { allow, deny }
+}
+
 pub fn resolve_cron_enabled(cfg: &ClawdConfig) -> bool {
     cfg.cron.as_ref().and_then(|c| c.enabled).unwrap_or(true)
 }
@@ -348,6 +398,45 @@ fn build_deny_set(patterns: &[String]) -> Result<GlobSet> {
     Ok(builder.build().context("compile deny patterns")?)
 }
 
+pub fn read_config_value(state_dir: &Path) -> Result<serde_json::Value> {
+    let json5_path = state_dir.join("config.json5");
+    if json5_path.exists() {
+        let raw = read_to_string(&json5_path)?;
+        let value: serde_json::Value = json5::from_str(&raw).context("parse config.json5")?;
+        return Ok(value);
+    }
+    let json_path = state_dir.join("config.json");
+    if json_path.exists() {
+        let raw = read_to_string(&json_path)?;
+        let value: serde_json::Value = serde_json::from_str(&raw).context("parse config.json")?;
+        return Ok(value);
+    }
+    Ok(serde_json::json!({}))
+}
+
+pub fn write_config_value(state_dir: &Path, value: &serde_json::Value) -> Result<PathBuf> {
+    let path = state_dir.join("config.json5");
+    let data = serde_json::to_string_pretty(value).context("serialize config")?;
+    write_string(&path, &format!("{data}\n"))?;
+    Ok(path)
+}
+
+pub fn merge_config_value(base: &mut serde_json::Value, patch: &serde_json::Value) {
+    match (base, patch) {
+        (serde_json::Value::Object(base_map), serde_json::Value::Object(patch_map)) => {
+            for (key, value) in patch_map {
+                merge_config_value(
+                    base_map.entry(key.clone()).or_insert(serde_json::Value::Null),
+                    value,
+                );
+            }
+        }
+        (base_slot, patch_value) => {
+            *base_slot = patch_value.clone();
+        }
+    }
+}
+
 fn state_dir_from_env() -> Option<PathBuf> {
     if let Ok(env) = std::env::var("CLAWDEX_STATE_DIR") {
         if !env.trim().is_empty() {
@@ -360,6 +449,10 @@ fn state_dir_from_env() -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn normalize_mcp_name(name: &str) -> String {
+    name.trim().to_lowercase()
 }
 
 fn config_path_from_env() -> Option<PathBuf> {

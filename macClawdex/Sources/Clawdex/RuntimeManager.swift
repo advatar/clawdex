@@ -117,6 +117,7 @@ final class RuntimeManager: ObservableObject {
             self.process = p
             self.isRunning = true
             appendLog("[app] Started clawdex (pid \(p.processIdentifier))")
+            requestConfig()
 
         } catch {
             appState.lastError = error.localizedDescription
@@ -144,17 +145,63 @@ final class RuntimeManager: ObservableObject {
             errorPublisher.send("Agent is not running.")
             return
         }
-        guard let stdin = stdinPipe else {
-            errorPublisher.send("No stdin pipe.")
+
+        if let command = parsePluginCommand(text) {
+            let payload: [String: Any] = [
+                "type": "plugin_command",
+                "pluginId": command.pluginId,
+                "command": command.command,
+                "input": command.input
+            ]
+            sendControlMessage(payload)
             return
         }
 
-        // Simple JSONL protocol (implement in clawdex):
-        // {"type":"user_message","text":"..."}
         let payload: [String: Any] = [
             "type": "user_message",
             "text": text
         ]
+        sendControlMessage(payload)
+    }
+
+    func requestConfig() {
+        let payload: [String: Any] = ["type": "get_config"]
+        sendControlMessage(payload)
+    }
+
+    func updatePermissions() {
+        let allow = appState?.mcpAllowlist
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty } ?? []
+        let deny = appState?.mcpDenylist
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty } ?? []
+
+        let payload: [String: Any] = [
+            "type": "update_config",
+            "config": [
+                "permissions": [
+                    "internet": appState?.internetEnabled ?? true,
+                    "mcp": [
+                        "allow": allow,
+                        "deny": deny
+                    ]
+                ],
+                "workspace_policy": [
+                    "read_only": appState?.workspaceReadOnly ?? false
+                ]
+            ]
+        ]
+        sendControlMessage(payload)
+    }
+
+    private func sendControlMessage(_ payload: [String: Any]) {
+        guard let stdin = stdinPipe else {
+            errorPublisher.send("No stdin pipe.")
+            return
+        }
         do {
             let data = try JSONSerialization.data(withJSONObject: payload, options: [])
             if let line = String(data: data, encoding: .utf8) {
@@ -289,6 +336,8 @@ final class RuntimeManager: ObservableObject {
                 assistantMessagePublisher.send(msg)
             } else if let err = parseError(from: text) {
                 errorPublisher.send(err)
+            } else if let config = parseConfig(from: text) {
+                applyConfig(config)
             }
         }
     }
@@ -307,6 +356,47 @@ final class RuntimeManager: ObservableObject {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         guard obj["type"] as? String == "error" else { return nil }
         return (obj["message"] as? String) ?? "Unknown error"
+    }
+
+    private func parseConfig(from line: String) -> [String: Any]? {
+        guard line.first == "{" else { return nil }
+        guard let data = line.data(using: .utf8) else { return nil }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let kind = obj["type"] as? String
+        guard kind == "config" || kind == "config_updated" else { return nil }
+        return obj["config"] as? [String: Any]
+    }
+
+    private func applyConfig(_ config: [String: Any]) {
+        if let permissions = config["permissions"] as? [String: Any] {
+            if let internet = permissions["internet"] as? Bool {
+                appState?.internetEnabled = internet
+            }
+            if let mcp = permissions["mcp"] as? [String: Any] {
+                if let allow = mcp["allow"] as? [String] {
+                    appState?.mcpAllowlist = allow.joined(separator: ", ")
+                }
+                if let deny = mcp["deny"] as? [String] {
+                    appState?.mcpDenylist = deny.joined(separator: ", ")
+                }
+            }
+        }
+        if let workspacePolicy = config["workspace_policy"] as? [String: Any],
+           let readOnly = workspacePolicy["read_only"] as? Bool {
+            appState?.workspaceReadOnly = readOnly
+        }
+    }
+
+    private func parsePluginCommand(_ text: String) -> (pluginId: String, command: String, input: String?)? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/plugin") || trimmed.hasPrefix("/cmd") else { return nil }
+
+        let parts = trimmed.split(separator: " ")
+        guard parts.count >= 3 else { return nil }
+        let pluginId = String(parts[1])
+        let command = String(parts[2])
+        let input = parts.count > 3 ? parts.dropFirst(3).joined(separator: " ") : nil
+        return (pluginId: pluginId, command: command, input: input)
     }
 
     private func appendLog(_ line: String) {

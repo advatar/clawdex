@@ -93,6 +93,23 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Permissions") {
+                Toggle("Allow internet access", isOn: $appState.internetEnabled)
+                Toggle("Read-only workspace", isOn: $appState.workspaceReadOnly)
+
+                TextField("MCP allowlist (comma-separated)", text: $appState.mcpAllowlist)
+                TextField("MCP denylist (comma-separated)", text: $appState.mcpDenylist)
+
+                Button("Apply permissions") {
+                    runtime.updatePermissions()
+                }
+                .disabled(!runtime.isRunning)
+
+                Text("Changes are applied via the running Clawdex runtime.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Embedded runtime") {
                 Text("This app expects `codex` and `clawdex` to be embedded in Resources/bin by the build script.")
                     .font(.caption)
@@ -116,6 +133,9 @@ struct SettingsView: View {
             refreshKeyStatus()
             refreshWorkspaceStatus()
             refreshLaunchAtLoginStatus()
+            if runtime.isRunning {
+                runtime.requestConfig()
+            }
         }
     }
 

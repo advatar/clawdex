@@ -11,6 +11,7 @@ mod gateway;
 mod heartbeat;
 mod mcp;
 mod memory;
+mod permissions;
 mod plugins;
 mod runner;
 mod skills_sync;
@@ -96,6 +97,11 @@ enum Commands {
     Plugins {
         #[command(subcommand)]
         command: PluginsCommand,
+    },
+    /// Permissions and policy controls
+    Permissions {
+        #[command(subcommand)]
+        command: PermissionsCommand,
     },
 }
 
@@ -238,6 +244,67 @@ enum PluginsCommand {
     ExportMcp {
         #[arg(long = "output")]
         output: Option<PathBuf>,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// List or run plugin commands
+    Commands {
+        #[command(subcommand)]
+        command: PluginCommandsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginCommandsCommand {
+    /// List available plugin commands
+    List {
+        #[arg(long = "id")]
+        id: Option<String>,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Run a plugin command
+    Run {
+        #[arg(long = "id")]
+        id: String,
+        #[arg(long)]
+        command: String,
+        #[arg(long)]
+        input: Option<String>,
+        #[arg(long = "codex-path")]
+        codex_path: Option<PathBuf>,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        #[arg(long = "auto-approve")]
+        auto_approve: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum PermissionsCommand {
+    /// Show current permission settings
+    Get {
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Update permission settings
+    Set {
+        #[arg(long)]
+        internet: Option<String>,
+        #[arg(long = "read-only")]
+        read_only: Option<bool>,
+        #[arg(long = "mcp-allow")]
+        mcp_allow: Option<String>,
+        #[arg(long = "mcp-deny")]
+        mcp_deny: Option<String>,
         #[arg(long = "state-dir")]
         state_dir: Option<PathBuf>,
         #[arg(long)]
@@ -412,6 +479,72 @@ fn main() -> Result<()> {
                 workspace,
             } => {
                 let value = plugins::export_mcp_command(output, state_dir, workspace)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
+            PluginsCommand::Commands { command } => match command {
+                PluginCommandsCommand::List {
+                    id,
+                    state_dir,
+                    workspace,
+                } => {
+                    let value = plugins::list_plugin_commands_command(id, state_dir, workspace)?;
+                    println!("{}", serde_json::to_string_pretty(&value)?);
+                    Ok(())
+                }
+                PluginCommandsCommand::Run {
+                    id,
+                    command,
+                    input,
+                    codex_path,
+                    state_dir,
+                    workspace,
+                    auto_approve,
+                } => {
+                    let value = plugins::run_plugin_command_command(
+                        &id,
+                        &command,
+                        input,
+                        codex_path,
+                        state_dir,
+                        workspace,
+                        auto_approve,
+                    )?;
+                    println!("{}", serde_json::to_string_pretty(&value)?);
+                    Ok(())
+                }
+            },
+        },
+        Commands::Permissions { command } => match command {
+            PermissionsCommand::Get { state_dir, workspace } => {
+                let value = permissions::get_permissions_command(state_dir, workspace)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
+            PermissionsCommand::Set {
+                internet,
+                read_only,
+                mcp_allow,
+                mcp_deny,
+                state_dir,
+                workspace,
+            } => {
+                let internet = internet
+                    .as_deref()
+                    .map(permissions::parse_on_off)
+                    .transpose()?;
+                let mcp_allow = mcp_allow.as_deref().map(permissions::parse_csv_list);
+                let mcp_deny = mcp_deny.as_deref().map(permissions::parse_csv_list);
+                let value = permissions::set_permissions_command(
+                    permissions::PermissionsUpdate {
+                        internet,
+                        read_only,
+                        mcp_allow,
+                        mcp_deny,
+                    },
+                    state_dir,
+                    workspace,
+                )?;
                 println!("{}", serde_json::to_string_pretty(&value)?);
                 Ok(())
             }

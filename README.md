@@ -151,7 +151,13 @@ Example `config.json5`:
     deny_patterns: ["**/.git/**", "**/.env", "**/.DS_Store"],
     read_only: false
   },
-  permissions: { internet: true },
+  permissions: {
+    internet: true,
+    mcp: {
+      allow: ["slack", "notion"],
+      deny: ["experimental-server"]
+    }
+  },
   cron: { enabled: true },
   heartbeat: { enabled: true, interval_ms: 1800000 },
   memory: {
@@ -180,6 +186,7 @@ Workspace policy notes:
 - `workspace_policy.deny_patterns` blocks tool access via `resolve_workspace_path`.
 - `workspace_policy.read_only` switches Codex sandbox to read-only.
 - `permissions.internet` toggles sandbox network access.
+- `permissions.mcp.allow` / `permissions.mcp.deny` gate MCP servers when exporting plugin configs.
 
 ---
 
@@ -315,6 +322,40 @@ Workspace policy notes:
    - `--state-dir <path>` overrides state directory.
    - `--workspace <path>` overrides workspace directory.
 
+`clawdex plugins commands list`
+1. Description: List plugin commands (optionally for one plugin).
+2. Options:
+   - `--id <pluginId>` filter to a single plugin.
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
+
+`clawdex plugins commands run`
+1. Description: Run a plugin command via Codex.
+2. Options:
+   - `--id <pluginId>` plugin id.
+   - `--command <name>` command name.
+   - `--input <text>` optional input appended to the command prompt.
+   - `--codex-path <path>` overrides Codex binary.
+   - `--auto-approve` accepts approvals automatically.
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
+
+`clawdex permissions get`
+1. Description: Show current permission settings.
+2. Options:
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
+
+`clawdex permissions set`
+1. Description: Update permission settings and write config.
+2. Options:
+   - `--internet <on|off|true|false>` toggles sandbox network access.
+   - `--read-only <true|false>` toggles read-only workspace sandbox.
+   - `--mcp-allow <a,b,c>` allowlisted MCP server names (comma-separated).
+   - `--mcp-deny <a,b,c>` denylisted MCP server names (comma-separated).
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
+
 ---
 
 **UI Bridge Env Overrides**
@@ -366,6 +407,9 @@ The build script `Scripts/build_and_embed_rust.sh`:
 - Builds **Codex** and **Clawdex** as universal2 Rust binaries (arm64 + x86_64).
 - Embeds them into `Clawdex.app/Contents/Resources/bin/`.
 - Codesigns embedded tools with helper entitlements.
+
+Plugin commands in the mac app:
+- Type `/plugin <id> <command> [input]` in chat to run a plugin command.
 
 Override inputs as needed:
 - `CODEX_CARGO_ROOT` (default `../codex/codex-rs`)

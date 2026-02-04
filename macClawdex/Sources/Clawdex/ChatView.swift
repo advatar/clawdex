@@ -6,7 +6,7 @@ struct ChatView: View {
 
     @State private var input: String = ""
     @State private var messages: [ChatMessage] = [
-        ChatMessage(role: .system, text: "Clawdex (Codex-powered) — macOS app shell. Configure API key + workspace in Settings.")
+        ChatMessage(role: .system, text: "Clawdex (Codex-powered) — macOS app shell. Configure API key + workspace in Settings. Plugin commands: /plugin <id> <command> [input].")
     ]
 
     var body: some View {
