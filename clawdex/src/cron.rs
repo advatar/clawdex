@@ -22,6 +22,7 @@ pub struct CronJob {
     pub session_target: String,
     pub wake_mode: String,
     pub payload: Value,
+    pub policy: Option<Value>,
     pub deliver: bool,
     pub channel: Option<String>,
     pub to: Option<String>,
@@ -277,6 +278,10 @@ fn build_cron_job(job: &Value) -> Option<CronJob> {
         .unwrap_or("now")
         .to_string();
     let payload = job.get("payload").cloned().unwrap_or(Value::Null);
+    let policy = job
+        .get("policy")
+        .cloned()
+        .or_else(|| payload.get("policy").cloned());
     let deliver = payload
         .get("deliver")
         .or_else(|| job.get("deliver"))
@@ -308,6 +313,7 @@ fn build_cron_job(job: &Value) -> Option<CronJob> {
         session_target,
         wake_mode,
         payload,
+        policy,
         deliver,
         channel,
         to,

@@ -69,6 +69,14 @@ The state directory can be overridden via `CLAWDEX_STATE_DIR` (or `CODEX_CLAWD_S
 - `sessionTarget: "main"` requires `payload.kind: "systemEvent"`.
 - `sessionTarget: "isolated"` requires `payload.kind: "agentTurn"`.
 - Isolated runs prepend `[cron:<jobId> <job.name>]` and the current ISO timestamp to the prompt.
+- Optional `policy` object (either at the job root or `payload.policy`) overrides per-run settings.
+Policy fields:
+`approvalPolicy` = `never` | `on-request` | `on-failure` | `unless-trusted`
+`readOnly` = boolean (forces sandbox read-only)
+`networkAccess` = boolean (overrides sandbox network access)
+`allowedRoots` = array of absolute paths (overrides workspace roots)
+`workspace` = path to use as `cwd` (defaults to the configured workspace)
+`sandboxMode` = `read-only` | `workspace-write`
 
 ## Heartbeat Contract
 

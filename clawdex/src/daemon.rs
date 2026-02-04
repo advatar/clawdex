@@ -1,3 +1,5 @@
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -10,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::config::{resolve_heartbeat_enabled, resolve_heartbeat_interval_ms, ClawdConfig, ClawdPaths};
-use crate::cron::{collect_due_jobs, drain_pending_jobs, job_prompt, job_session_key, record_run};
+use crate::cron::{collect_due_jobs, drain_pending_jobs, job_prompt, job_session_key, record_run, CronJob};
 use crate::gateway;
 use crate::heartbeat;
 use crate::runner::{CodexRunner, CodexRunnerConfig};
@@ -38,8 +40,8 @@ pub fn run_daemon_loop(
     let runner_cfg = CodexRunnerConfig {
         codex_path,
         codex_home: paths.state_dir.join("codex"),
-        workspace,
-        workspace_policy,
+        workspace: workspace.clone(),
+        workspace_policy: workspace_policy.clone(),
         approval_policy,
         config_overrides: resolve_codex_overrides(&cfg),
     };
@@ -58,13 +60,27 @@ pub fn run_daemon_loop(
         // Drain pending jobs (wakeMode = next-heartbeat or manual cron.run)
         let pending_jobs = drain_pending_jobs(&paths)?;
         for job in pending_jobs {
-            execute_job(&mut runner, &paths, &job)?;
+            execute_job(
+                &mut runner,
+                &paths,
+                &job,
+                approval_policy,
+                &workspace_policy,
+                &workspace,
+            )?;
         }
 
         // Execute due jobs
         let (due_jobs, _entries) = collect_due_jobs(&paths, now, "due", None)?;
         for job in due_jobs {
-            execute_job(&mut runner, &paths, &job)?;
+            execute_job(
+                &mut runner,
+                &paths,
+                &job,
+                approval_policy,
+                &workspace_policy,
+                &workspace,
+            )?;
         }
 
         if heartbeat_enabled && now >= next_heartbeat {
@@ -77,17 +93,37 @@ pub fn run_daemon_loop(
     Ok(())
 }
 
-fn execute_job(runner: &mut CodexRunner, paths: &ClawdPaths, job: &crate::cron::CronJob) -> Result<()> {
+fn execute_job(
+    runner: &mut CodexRunner,
+    paths: &ClawdPaths,
+    job: &CronJob,
+    base_approval_policy: AskForApproval,
+    base_workspace_policy: &crate::config::WorkspacePolicy,
+    base_workspace: &PathBuf,
+) -> Result<()> {
     let now = now_ms();
     let Some(prompt) = job_prompt(job, now) else {
         record_run(paths, &job.id, "skipped", "missing payload message", None)?;
         return Ok(());
     };
 
+    let _lock = match acquire_job_lock(paths, &job.id)? {
+        Some(lock) => lock,
+        None => {
+            record_run(paths, &job.id, "skipped", "locked", None)?;
+            return Ok(());
+        }
+    };
+
+    let policy = job_policy_overrides(job);
+    let approval_policy = policy.approval_policy.unwrap_or(base_approval_policy);
+    let (workspace_policy, workspace) =
+        apply_workspace_overrides(base_workspace_policy, base_workspace, &policy)?;
+
     let outcome = if job.session_target == "isolated" {
-        runner.run_isolated(&job.id, &prompt)?
+        runner.run_isolated_with_policy(&job.id, &prompt, approval_policy, &workspace_policy, workspace.clone())?
     } else {
-        runner.run_main(&prompt)?
+        runner.run_main_with_policy(&prompt, approval_policy, &workspace_policy, workspace.clone())?
     };
 
     let summary = outcome.message.trim().to_string();
@@ -149,7 +185,7 @@ fn execute_heartbeat(runner: &mut CodexRunner, paths: &ClawdPaths) -> Result<()>
     Ok(())
 }
 
-fn should_deliver(job: &crate::cron::CronJob) -> bool {
+fn should_deliver(job: &CronJob) -> bool {
     job.deliver || job.channel.is_some() || job.to.is_some()
 }
 
@@ -173,14 +209,9 @@ fn resolve_approval_policy(cfg: &ClawdConfig) -> AskForApproval {
         .codex
         .as_ref()
         .and_then(|c| c.approval_policy.as_ref())
-        .map(|s| s.to_lowercase())
+        .cloned()
         .unwrap_or_else(|| "on-request".to_string());
-    match raw.as_str() {
-        "never" => AskForApproval::Never,
-        "on-failure" | "onfailure" => AskForApproval::OnFailure,
-        "unless-trusted" | "unlesstrusted" => AskForApproval::UnlessTrusted,
-        _ => AskForApproval::OnRequest,
-    }
+    parse_approval_policy(&raw)
 }
 
 fn resolve_codex_overrides(cfg: &ClawdConfig) -> Vec<String> {
@@ -188,4 +219,141 @@ fn resolve_codex_overrides(cfg: &ClawdConfig) -> Vec<String> {
         .as_ref()
         .and_then(|c| c.config_overrides.clone())
         .unwrap_or_default()
+}
+
+fn parse_approval_policy(raw: &str) -> AskForApproval {
+    match raw.to_lowercase().as_str() {
+        "never" => AskForApproval::Never,
+        "on-failure" | "onfailure" => AskForApproval::OnFailure,
+        "unless-trusted" | "unlesstrusted" | "untrusted" => AskForApproval::UnlessTrusted,
+        _ => AskForApproval::OnRequest,
+    }
+}
+
+#[derive(Default)]
+struct JobPolicyOverrides {
+    approval_policy: Option<AskForApproval>,
+    read_only: Option<bool>,
+    network_access: Option<bool>,
+    allowed_roots: Option<Vec<PathBuf>>,
+    workspace: Option<PathBuf>,
+}
+
+fn job_policy_overrides(job: &CronJob) -> JobPolicyOverrides {
+    let mut overrides = JobPolicyOverrides::default();
+    let Some(policy) = job.policy.as_ref().and_then(|value| value.as_object()) else {
+        return overrides;
+    };
+
+    if let Some(raw) = policy
+        .get("approvalPolicy")
+        .or_else(|| policy.get("approval_policy"))
+        .and_then(|v| v.as_str())
+    {
+        overrides.approval_policy = Some(parse_approval_policy(raw));
+    }
+
+    if let Some(mode) = policy
+        .get("sandboxMode")
+        .or_else(|| policy.get("sandbox_mode"))
+        .and_then(|v| v.as_str())
+    {
+        if mode.eq_ignore_ascii_case("read-only") || mode.eq_ignore_ascii_case("readonly") {
+            overrides.read_only = Some(true);
+        } else if mode.eq_ignore_ascii_case("workspace-write")
+            || mode.eq_ignore_ascii_case("workspace")
+            || mode.eq_ignore_ascii_case("write")
+        {
+            overrides.read_only = Some(false);
+        }
+    }
+
+    if let Some(read_only) = policy
+        .get("readOnly")
+        .or_else(|| policy.get("read_only"))
+        .and_then(|v| v.as_bool())
+    {
+        overrides.read_only = Some(read_only);
+    }
+
+    if let Some(network) = policy
+        .get("networkAccess")
+        .or_else(|| policy.get("network_access"))
+        .or_else(|| policy.get("internet"))
+        .and_then(|v| v.as_bool())
+    {
+        overrides.network_access = Some(network);
+    }
+
+    if let Some(roots) = policy
+        .get("allowedRoots")
+        .or_else(|| policy.get("allowed_roots"))
+        .and_then(|v| v.as_array())
+    {
+        let parsed: Vec<PathBuf> = roots
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(PathBuf::from)
+            .collect();
+        if !parsed.is_empty() {
+            overrides.allowed_roots = Some(parsed);
+        }
+    }
+
+    if let Some(workspace) = policy.get("workspace").and_then(|v| v.as_str()) {
+        overrides.workspace = Some(PathBuf::from(workspace));
+    }
+
+    overrides
+}
+
+fn apply_workspace_overrides(
+    base_policy: &crate::config::WorkspacePolicy,
+    base_workspace: &PathBuf,
+    overrides: &JobPolicyOverrides,
+) -> Result<(crate::config::WorkspacePolicy, PathBuf)> {
+    let mut policy = base_policy.clone();
+    let mut workspace = base_workspace.clone();
+
+    if let Some(read_only) = overrides.read_only {
+        policy.read_only = read_only;
+    }
+    if let Some(network_access) = overrides.network_access {
+        policy.network_access = network_access;
+    }
+    if let Some(allowed_roots) = overrides.allowed_roots.clone() {
+        policy.allowed_roots = allowed_roots;
+    }
+    if let Some(override_workspace) = overrides.workspace.clone() {
+        workspace = override_workspace;
+        if overrides.allowed_roots.is_none() {
+            policy.allowed_roots = vec![workspace.clone()];
+        }
+    }
+
+    Ok((policy, workspace))
+}
+
+struct JobLock {
+    path: PathBuf,
+}
+
+impl Drop for JobLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_job_lock(paths: &ClawdPaths, job_id: &str) -> Result<Option<JobLock>> {
+    let locks_dir = paths.cron_dir.join("locks");
+    fs::create_dir_all(&locks_dir)?;
+    let path = locks_dir.join(format!("{job_id}.lock"));
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            let _ = writeln!(file, "{}", now_ms());
+            Ok(Some(JobLock { path }))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(err) => Err(err.into()),
+    }
 }

@@ -11,6 +11,10 @@ struct MainView: View {
                 .tabItem {
                     Label("Tasks", systemImage: "checklist")
                 }
+            ApprovalsView()
+                .tabItem {
+                    Label("Approvals", systemImage: "hand.raised")
+                }
         }
     }
 }

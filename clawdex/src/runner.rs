@@ -56,17 +56,38 @@ impl CodexRunner {
     }
 
     pub fn run_main(&mut self, message: &str) -> Result<TurnOutcome> {
-        let sandbox_policy = workspace_sandbox_policy(&self.workspace_policy)?;
-        self.client.run_turn(
-            &self.main_thread,
-            message,
-            Some(self.approval_policy),
-            sandbox_policy,
-            Some(self.workspace.clone()),
-        )
+        let approval_policy = self.approval_policy;
+        let workspace_policy = self.workspace_policy.clone();
+        let cwd = self.workspace.clone();
+        self.run_main_with_policy(message, approval_policy, &workspace_policy, cwd)
     }
 
     pub fn run_isolated(&mut self, key: &str, message: &str) -> Result<TurnOutcome> {
+        let approval_policy = self.approval_policy;
+        let workspace_policy = self.workspace_policy.clone();
+        let cwd = self.workspace.clone();
+        self.run_isolated_with_policy(key, message, approval_policy, &workspace_policy, cwd)
+    }
+
+    pub fn run_main_with_policy(
+        &mut self,
+        message: &str,
+        approval_policy: AskForApproval,
+        workspace_policy: &WorkspacePolicy,
+        cwd: PathBuf,
+    ) -> Result<TurnOutcome> {
+        let thread_id = self.main_thread.clone();
+        self.run_with_policy(&thread_id, message, approval_policy, workspace_policy, cwd)
+    }
+
+    pub fn run_isolated_with_policy(
+        &mut self,
+        key: &str,
+        message: &str,
+        approval_policy: AskForApproval,
+        workspace_policy: &WorkspacePolicy,
+        cwd: PathBuf,
+    ) -> Result<TurnOutcome> {
         let thread_id = if let Some(thread) = self.isolated_threads.get(key) {
             thread.clone()
         } else {
@@ -74,13 +95,24 @@ impl CodexRunner {
             self.isolated_threads.insert(key.to_string(), thread.clone());
             thread
         };
-        let sandbox_policy = workspace_sandbox_policy(&self.workspace_policy)?;
+        self.run_with_policy(&thread_id, message, approval_policy, workspace_policy, cwd)
+    }
+
+    fn run_with_policy(
+        &mut self,
+        thread_id: &str,
+        message: &str,
+        approval_policy: AskForApproval,
+        workspace_policy: &WorkspacePolicy,
+        cwd: PathBuf,
+    ) -> Result<TurnOutcome> {
+        let sandbox_policy = workspace_sandbox_policy(workspace_policy)?;
         self.client.run_turn(
-            &thread_id,
+            thread_id,
             message,
-            Some(self.approval_policy),
+            Some(approval_policy),
             sandbox_policy,
-            Some(self.workspace.clone()),
+            Some(cwd),
         )
     }
 }

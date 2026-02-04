@@ -426,6 +426,9 @@ Plugin commands in the mac app:
 - Type `/plugin <id> <command> [input]` in chat to run a plugin command.
 - Use the **Commands** button to open the command palette.
 
+Approvals in the mac app:
+- Use the **Approvals** tab to review pending approvals and respond to tool input requests.
+
 Override inputs as needed:
 - `CODEX_CARGO_ROOT` (default `../codex/codex-rs`)
 - `CODEX_BIN` (prebuilt Mach‑O codex binary)

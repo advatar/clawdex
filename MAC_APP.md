@@ -6,6 +6,7 @@ This starter is a **menu‑bar macOS app** that:
   - **Launch at login** (user‑controlled via `SMAppService`)
   - **OpenAI API key** stored in **Keychain**
   - **Workspace folder picker** using **security‑scoped bookmarks**
+  - **Tasks + approvals** views (daemon IPC)
 
 ---
 
