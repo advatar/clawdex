@@ -50,7 +50,7 @@ struct EmbeddingData {
 pub fn memory_get(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     let cfg = paths_config(paths)?;
     if !resolve_memory_enabled(&cfg) {
-        return Ok(json!({ "ok": false, "reason": "memory disabled" }));
+        return Ok(json!({ "ok": false, "disabled": true, "error": "memory disabled" }));
     }
 
     let path_str = args
@@ -88,6 +88,7 @@ pub fn memory_get(paths: &ClawdPaths, args: &Value) -> Result<Value> {
         "lines": end_idx.saturating_sub(start_idx),
         "totalLines": total_lines,
         "content": slice,
+        "text": slice,
     }))
 }
 
@@ -178,19 +179,38 @@ pub fn memory_search(paths: &ClawdPaths, args: &Value) -> Result<Value> {
             .to_string();
         output.push(json!({
             "path": rel,
+            "startLine": row.line_no,
+            "endLine": row.line_no,
             "lineStart": row.line_no,
             "lineEnd": row.line_no,
             "snippet": row.text,
             "score": row.final_score,
             "ftsScore": row.fts_score,
             "embeddingScore": row.embed_score,
+            "source": "memory",
         }));
     }
 
-    Ok(json!({
+    let citations = cfg
+        .memory
+        .as_ref()
+        .and_then(|m| m.citations.clone());
+
+    let mut response = json!({
         "results": output,
         "query": query,
-    }))
+    });
+    if let Some(provider) = embeddings_cfg.provider {
+        response["provider"] = Value::String(provider);
+    }
+    if let Some(model) = embeddings_cfg.model {
+        response["model"] = Value::String(model);
+    }
+    if let Some(citations) = citations {
+        response["citations"] = Value::String(citations);
+    }
+
+    Ok(response)
 }
 
 fn ensure_index(paths: &ClawdPaths, embeddings_cfg: &EmbeddingsConfig) -> Result<()> {

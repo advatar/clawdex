@@ -1,5 +1,22 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "additionalProperties": true
+  "properties": {
+    "channel": {"type": "string"},
+    "to": {"type": "string"},
+    "text": {"type": "string"},
+    "message": {"type": "string"},
+    "accountId": {"type": "string"},
+    "sessionKey": {"type": "string"},
+    "bestEffort": {"type": "boolean"},
+    "dryRun": {"type": "boolean"},
+    "idempotencyKey": {"type": "string"},
+    "idempotency_key": {"type": "string"}
+  },
+  "required": ["channel", "to"],
+  "anyOf": [
+    {"required": ["text"]},
+    {"required": ["message"]}
+  ],
+  "additionalProperties": false
 }

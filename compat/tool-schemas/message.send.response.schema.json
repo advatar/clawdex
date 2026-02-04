@@ -1,5 +1,15 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
+  "properties": {
+    "ok": {"type": "boolean"},
+    "dryRun": {"type": "boolean"},
+    "result": {},
+    "error": {"type": "string"},
+    "bestEffort": {"type": "boolean"},
+    "queued": {"type": "boolean"},
+    "message": {}
+  },
+  "required": ["ok"],
   "additionalProperties": true
 }

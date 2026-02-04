@@ -28,6 +28,9 @@
 - [x] Add helper script to build/stage `clawdexd` prebuilt binary and document it in README
 - [x] Create compat parity spec scaffolding (compat/README.md, clawd-compat.yaml, tool schemas, routing schema, test matrix)
 - [x] Add cron schedule unit tests (at/every/cron+tz)
+- [x] Fill compat tool schemas with OpenClaw-aligned JSON definitions
+- [x] Implement P0 scenario tests from compat/tests/matrix.md
+- [x] Implement gateway bridge session mapping + outbound delivery parity
 
 Notes:
 - `TEMPLATE_PACK.md` is the parity checklist: use it later to fill tool schemas, routing rules, and tests, then implement remaining gaps using the name `Clawdex`.

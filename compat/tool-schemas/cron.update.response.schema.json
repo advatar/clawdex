@@ -1,5 +1,58 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
+  "definitions": {
+    "cronSchedule": {
+      "oneOf": [
+        {"type": "object", "properties": {"kind": {"const": "at"}, "atMs": {"type": "number"}}, "required": ["kind", "atMs"], "additionalProperties": true},
+        {"type": "object", "properties": {"kind": {"const": "every"}, "everyMs": {"type": "number"}, "anchorMs": {"type": "number"}}, "required": ["kind", "everyMs"], "additionalProperties": true},
+        {"type": "object", "properties": {"kind": {"const": "cron"}, "expr": {"type": "string"}, "tz": {"type": "string"}}, "required": ["kind", "expr"], "additionalProperties": true}
+      ]
+    },
+    "cronPayload": {
+      "oneOf": [
+        {"type": "object", "properties": {"kind": {"const": "systemEvent"}, "text": {"type": "string"}}, "required": ["kind", "text"], "additionalProperties": true},
+        {"type": "object", "properties": {"kind": {"const": "agentTurn"}, "message": {"type": "string"}, "model": {"type": "string"}, "thinking": {"type": "string"}, "timeoutSeconds": {"type": "number"}, "allowUnsafeExternalContent": {"type": "boolean"}, "deliver": {"type": "boolean"}, "channel": {"type": "string"}, "to": {"type": "string"}, "bestEffortDeliver": {"type": "boolean"}}, "required": ["kind", "message"], "additionalProperties": true}
+      ]
+    },
+    "cronIsolation": {
+      "type": "object",
+      "properties": {
+        "postToMainPrefix": {"type": "string"},
+        "postToMainMode": {"type": "string", "enum": ["summary", "full"]},
+        "postToMainMaxChars": {"type": "number"}
+      },
+      "additionalProperties": true
+    },
+    "cronJobState": {
+      "type": "object",
+      "properties": {
+        "nextRunAtMs": {"type": "number"},
+        "runningAtMs": {"type": "number"},
+        "lastRunAtMs": {"type": "number"},
+        "lastStatus": {"type": "string", "enum": ["ok", "error", "skipped"]},
+        "lastError": {"type": "string"},
+        "lastDurationMs": {"type": "number"}
+      },
+      "additionalProperties": true
+    }
+  },
+  "properties": {
+    "id": {"type": "string"},
+    "agentId": {"type": "string"},
+    "name": {"type": "string"},
+    "description": {"type": "string"},
+    "enabled": {"type": "boolean"},
+    "deleteAfterRun": {"type": "boolean"},
+    "createdAtMs": {"type": "number"},
+    "updatedAtMs": {"type": "number"},
+    "schedule": {"$ref": "#/definitions/cronSchedule"},
+    "sessionTarget": {"type": "string", "enum": ["main", "isolated"]},
+    "wakeMode": {"type": "string", "enum": ["now", "next-heartbeat"]},
+    "payload": {"$ref": "#/definitions/cronPayload"},
+    "isolation": {"$ref": "#/definitions/cronIsolation"},
+    "state": {"$ref": "#/definitions/cronJobState"}
+  },
+  "required": ["id", "name", "enabled", "schedule", "sessionTarget", "wakeMode", "payload"],
   "additionalProperties": true
 }

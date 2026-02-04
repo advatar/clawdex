@@ -1,5 +1,29 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
+  "definitions": {
+    "channelEntry": {
+      "type": "object",
+      "properties": {
+        "channel": {"type": "string"},
+        "to": {"type": "string"},
+        "accountId": {"type": ["string", "null"]},
+        "sessionKey": {"type": "string"},
+        "updatedAtMs": {"type": "number"}
+      },
+      "required": ["channel", "to"],
+      "additionalProperties": true
+    }
+  },
+  "properties": {
+    "channels": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/channelEntry"}
+    },
+    "disabled": {"type": "boolean"},
+    "count": {"type": "number"},
+    "routeTtlMs": {"type": "number"}
+  },
+  "required": ["channels"],
   "additionalProperties": true
 }

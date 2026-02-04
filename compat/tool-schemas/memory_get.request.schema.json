@@ -1,5 +1,11 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "additionalProperties": true
+  "properties": {
+    "path": {"type": "string"},
+    "from": {"type": "number"},
+    "lines": {"type": "number"}
+  },
+  "required": ["path"],
+  "additionalProperties": false
 }

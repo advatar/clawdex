@@ -1,5 +1,36 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
+  "definitions": {
+    "memorySearchResult": {
+      "type": "object",
+      "properties": {
+        "path": {"type": "string"},
+        "startLine": {"type": "number"},
+        "endLine": {"type": "number"},
+        "lineStart": {"type": "number"},
+        "lineEnd": {"type": "number"},
+        "score": {"type": "number"},
+        "snippet": {"type": "string"},
+        "source": {"type": "string"},
+        "citation": {"type": "string"}
+      },
+      "required": ["path", "score", "snippet"],
+      "additionalProperties": true
+    }
+  },
+  "properties": {
+    "results": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/memorySearchResult"}
+    },
+    "provider": {"type": "string"},
+    "model": {"type": "string"},
+    "fallback": {},
+    "citations": {"type": "string", "enum": ["auto", "on", "off"]},
+    "disabled": {"type": "boolean"},
+    "error": {"type": "string"}
+  },
+  "required": ["results"],
   "additionalProperties": true
 }

@@ -1,5 +1,14 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
+  "properties": {
+    "ok": {"type": "boolean"},
+    "channel": {"type": "string"},
+    "to": {"type": "string"},
+    "accountId": {"type": ["string", "null"]},
+    "sessionKey": {"type": "string"},
+    "updatedAtMs": {"type": "number"},
+    "reason": {"type": "string"}
+  },
   "additionalProperties": true
 }

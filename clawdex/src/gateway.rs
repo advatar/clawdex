@@ -8,13 +8,14 @@ use tiny_http::{Method, Response, Server, StatusCode};
 use uuid::Uuid;
 
 use crate::config::{ClawdPaths, GatewayConfig};
-use crate::util::{append_json_line, now_ms, read_json_value, write_json_value};
+use crate::util::{append_json_line, now_ms, read_json_lines, read_json_value, write_json_value};
 
 const GATEWAY_DIR: &str = "gateway";
 const OUTBOX_FILE: &str = "outbox.jsonl";
 const INBOX_FILE: &str = "inbox.jsonl";
 const ROUTES_FILE: &str = "routes.json";
 const IDEMPOTENCY_FILE: &str = "idempotency.json";
+const INBOX_OFFSET_FILE: &str = "inbox_offset.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteEntry {
@@ -113,6 +114,23 @@ fn outbox_path(paths: &ClawdPaths) -> PathBuf {
 
 fn inbox_path(paths: &ClawdPaths) -> PathBuf {
     gateway_dir(paths).join(INBOX_FILE)
+}
+
+fn inbox_offset_path(paths: &ClawdPaths) -> PathBuf {
+    gateway_dir(paths).join(INBOX_OFFSET_FILE)
+}
+
+fn load_inbox_offset(paths: &ClawdPaths) -> Result<usize> {
+    if let Some(value) = read_json_value(&inbox_offset_path(paths))? {
+        if let Some(offset) = value.get("offset").and_then(|v| v.as_u64()) {
+            return Ok(offset as usize);
+        }
+    }
+    Ok(0)
+}
+
+fn save_inbox_offset(paths: &ClawdPaths, offset: usize) -> Result<()> {
+    write_json_value(&inbox_offset_path(paths), &json!({ "offset": offset }))
 }
 
 fn load_gateway_config(paths: &ClawdPaths) -> Result<GatewayConfig> {
@@ -226,7 +244,7 @@ pub fn send_message(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     )?;
     idempotency.insert(&idempotency_key, now_ms())?;
 
-    Ok(json!({ "ok": true, "queued": true, "message": entry }))
+    Ok(json!({ "ok": true, "queued": true, "message": entry, "result": entry }))
 }
 
 pub fn list_channels(paths: &ClawdPaths) -> Result<Value> {
@@ -259,6 +277,7 @@ pub fn list_channels(paths: &ClawdPaths) -> Result<Value> {
         "channels": entries,
         "count": entries.len(),
         "routeTtlMs": cfg.route_ttl_ms,
+        "disabled": false,
     }))
 }
 
@@ -368,6 +387,23 @@ pub fn record_incoming(paths: &ClawdPaths, payload: &Value) -> Result<Value> {
     )?;
 
     Ok(json!({ "ok": true, "message": entry }))
+}
+
+pub fn drain_inbox(paths: &ClawdPaths) -> Result<Vec<Value>> {
+    let path = inbox_path(paths);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let entries = read_json_lines(&path, None)?;
+    let offset = load_inbox_offset(paths)?;
+    let total = entries.len();
+    let new_entries = if offset < total {
+        entries[offset..].to_vec()
+    } else {
+        Vec::new()
+    };
+    save_inbox_offset(paths, total)?;
+    Ok(new_entries)
 }
 
 pub fn run_gateway(bind: &str, paths: &ClawdPaths) -> Result<()> {

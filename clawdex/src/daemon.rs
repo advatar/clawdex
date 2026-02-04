@@ -57,6 +57,12 @@ pub fn run_daemon_loop(
         }
         let now = now_ms();
 
+        // Drain inbound messages from the gateway and run Codex turns.
+        let inbound = gateway::drain_inbox(&paths)?;
+        for entry in inbound {
+            handle_incoming_message(&mut runner, &paths, entry)?;
+        }
+
         // Drain pending jobs (wakeMode = next-heartbeat or manual cron.run)
         let pending_jobs = drain_pending_jobs(&paths)?;
         for job in pending_jobs {
@@ -172,21 +178,66 @@ fn execute_heartbeat(runner: &mut CodexRunner, paths: &ClawdPaths) -> Result<()>
     let prompt = "Heartbeat check. If HEARTBEAT.md exists in the workspace, read it and act. If nothing needs attention, respond with exactly HEARTBEAT_OK.";
     let outcome = runner.run_main(prompt)?;
     let response = outcome.message.trim().to_string();
-    if response == "HEARTBEAT_OK" {
-        return Ok(());
-    }
+    let _ = deliver_heartbeat_response(paths, &response)?;
+    Ok(())
+}
 
+fn should_deliver(job: &CronJob) -> bool {
+    job.deliver || job.channel.is_some() || job.to.is_some()
+}
+
+fn deliver_heartbeat_response(paths: &ClawdPaths, response: &str) -> Result<bool> {
+    if response.trim() == "HEARTBEAT_OK" {
+        return Ok(false);
+    }
     let args = json!({
         "sessionKey": "agent:main:main",
         "text": response,
         "idempotencyKey": format!("heartbeat:{}", now_ms()),
     });
     let _ = gateway::send_message(paths, &args);
+    Ok(true)
+}
+
+/// Test helper for validating heartbeat delivery behavior.
+pub fn deliver_heartbeat_response_for_test(paths: &ClawdPaths, response: &str) -> Result<bool> {
+    deliver_heartbeat_response(paths, response)
+}
+
+fn handle_incoming_message(runner: &mut CodexRunner, paths: &ClawdPaths, entry: serde_json::Value) -> Result<()> {
+    let text = entry.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if text.is_empty() {
+        return Ok(());
+    }
+    let session_key = resolve_inbound_session_key(&entry);
+    let outcome = if session_key == "agent:main:main" {
+        runner.run_main(text)?
+    } else {
+        runner.run_isolated(&session_key, text)?
+    };
+    let response = outcome.message.trim();
+    if response.is_empty() {
+        return Ok(());
+    }
+    let args = json!({
+        "sessionKey": session_key,
+        "text": response,
+        "idempotencyKey": format!("inbox:{}:{}", now_ms(), session_key),
+    });
+    let _ = gateway::send_message(paths, &args);
     Ok(())
 }
 
-fn should_deliver(job: &CronJob) -> bool {
-    job.deliver || job.channel.is_some() || job.to.is_some()
+fn resolve_inbound_session_key(entry: &serde_json::Value) -> String {
+    if let Some(key) = entry.get("sessionKey").and_then(|v| v.as_str()) {
+        return key.to_string();
+    }
+    let channel = entry.get("channel").and_then(|v| v.as_str()).unwrap_or("");
+    let from = entry.get("from").and_then(|v| v.as_str()).unwrap_or("");
+    if !channel.is_empty() && !from.is_empty() {
+        return format!("{channel}:{from}");
+    }
+    "agent:main:main".to_string()
 }
 
 fn resolve_codex_path(cfg: &ClawdConfig, override_path: Option<PathBuf>) -> Result<PathBuf> {

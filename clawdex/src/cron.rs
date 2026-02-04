@@ -35,6 +35,7 @@ struct ScheduleSpec {
     kind: String,
     at_ms: Option<i64>,
     every_ms: Option<i64>,
+    anchor_ms: Option<i64>,
     cron: Option<String>,
     tz: Option<String>,
 }
@@ -55,7 +56,15 @@ impl ScheduleSpec {
             .get("everyMs")
             .or_else(|| obj.get("every_ms"))
             .and_then(|v| v.as_i64());
-        let cron = obj.get("cron").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let anchor_ms = obj
+            .get("anchorMs")
+            .or_else(|| obj.get("anchor_ms"))
+            .and_then(|v| v.as_i64());
+        let cron = obj
+            .get("cron")
+            .or_else(|| obj.get("expr"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let tz = obj
             .get("timezone")
             .or_else(|| obj.get("tz"))
@@ -66,6 +75,7 @@ impl ScheduleSpec {
             kind,
             at_ms,
             every_ms,
+            anchor_ms,
             cron,
             tz,
         })
@@ -83,13 +93,17 @@ impl ScheduleSpec {
             }
             "every" => {
                 let every_ms = self.every_ms?;
-                let base = last_run_at_ms.or(created_at_ms).unwrap_or(now);
-                if base > now {
-                    return Some(base);
+                let anchor = self
+                    .anchor_ms
+                    .or(created_at_ms)
+                    .or(last_run_at_ms)
+                    .unwrap_or(now);
+                if now < anchor {
+                    return Some(anchor);
                 }
-                let elapsed = now.saturating_sub(base);
+                let elapsed = now.saturating_sub(anchor);
                 let intervals = elapsed / every_ms + 1;
-                Some(base + intervals * every_ms)
+                Some(anchor + intervals * every_ms)
             }
             "cron" => {
                 let expr = self.cron.as_ref()?;
@@ -125,8 +139,12 @@ impl ScheduleSpec {
                     Some(value) => value,
                     None => return false,
                 };
-                let base = last_run_at_ms.or(created_at_ms).unwrap_or(now);
-                now.saturating_sub(base) >= every_ms
+                let anchor = self
+                    .anchor_ms
+                    .or(created_at_ms)
+                    .or(last_run_at_ms)
+                    .unwrap_or(now);
+                now.saturating_sub(anchor) >= every_ms
             }
             "cron" => {
                 let expr = match self.cron.as_ref() {

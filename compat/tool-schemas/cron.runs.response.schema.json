@@ -1,5 +1,30 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
+  "definitions": {
+    "cronRunLogEntry": {
+      "type": "object",
+      "properties": {
+        "ts": {"type": "number"},
+        "jobId": {"type": "string"},
+        "action": {"type": "string"},
+        "status": {"type": "string", "enum": ["ok", "error", "skipped"]},
+        "error": {"type": "string"},
+        "summary": {"type": "string"},
+        "runAtMs": {"type": "number"},
+        "durationMs": {"type": "number"},
+        "nextRunAtMs": {"type": "number"}
+      },
+      "required": ["ts", "jobId"],
+      "additionalProperties": true
+    }
+  },
+  "properties": {
+    "entries": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/cronRunLogEntry"}
+    }
+  },
+  "required": ["entries"],
   "additionalProperties": true
 }
