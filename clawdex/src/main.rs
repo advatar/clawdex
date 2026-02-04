@@ -13,6 +13,8 @@ mod mcp;
 mod memory;
 mod runner;
 mod skills_sync;
+mod task_db;
+mod tasks;
 mod ui_bridge;
 mod util;
 
@@ -84,6 +86,11 @@ enum Commands {
         #[arg(long = "state-dir")]
         state_dir: Option<PathBuf>,
     },
+    /// Task runtime CLI (Cowork-style tasks)
+    Tasks {
+        #[command(subcommand)]
+        command: TasksCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -101,6 +108,63 @@ enum SkillsCommand {
         repo_dir: Option<PathBuf>,
         #[arg(long = "source-dir")]
         source_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum TasksCommand {
+    /// List tasks
+    List {
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Create a task
+    Create {
+        #[arg(long)]
+        title: String,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Run a task
+    Run {
+        #[arg(long = "task-id")]
+        task_id: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long = "codex-path")]
+        codex_path: Option<PathBuf>,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        #[arg(long = "auto-approve")]
+        auto_approve: bool,
+    },
+    /// List events for a task run
+    Events {
+        #[arg(long = "run-id")]
+        run_id: String,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Run a simple HTTP task server (for UI integration)
+    Server {
+        #[arg(long, default_value = "127.0.0.1:18790")]
+        bind: String,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
     },
 }
 
@@ -159,5 +223,57 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|| "127.0.0.1:18789".to_string());
             gateway::run_gateway(&resolved_bind, &paths)
         }
+        Commands::Tasks { command } => match command {
+            TasksCommand::List {
+                state_dir,
+                workspace,
+            } => {
+                let value = tasks::list_tasks_command(state_dir, workspace)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
+            TasksCommand::Create {
+                title,
+                state_dir,
+                workspace,
+            } => {
+                let value = tasks::create_task_command(&title, state_dir, workspace)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
+            TasksCommand::Run {
+                task_id,
+                title,
+                prompt,
+                codex_path,
+                state_dir,
+                workspace,
+                auto_approve,
+            } => tasks::run_task_command(tasks::TaskRunOptions {
+                task_id,
+                title,
+                prompt,
+                codex_path,
+                state_dir,
+                workspace,
+                auto_approve,
+                approval_policy: None,
+            }),
+            TasksCommand::Events {
+                run_id,
+                limit,
+                state_dir,
+                workspace,
+            } => {
+                let value = tasks::list_events_command(&run_id, limit, state_dir, workspace)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
+            TasksCommand::Server {
+                bind,
+                state_dir,
+                workspace,
+            } => tasks::run_task_server(&bind, state_dir, workspace),
+        },
     }
 }

@@ -132,9 +132,11 @@ Default state layout:
 7. `~/.codex/clawdex/gateway/inbox.jsonl`
 8. `~/.codex/clawdex/gateway/routes.json`
 9. `~/.codex/clawdex/gateway/idempotency.json`
-10. `WORKSPACE/MEMORY.md`
-11. `WORKSPACE/memory/YYYY-MM-DD.md`
-12. `WORKSPACE/HEARTBEAT.md` (optional)
+10. `~/.codex/clawdex/tasks.sqlite`
+11. `~/.codex/clawdex/task_events/<runId>.jsonl`
+12. `WORKSPACE/MEMORY.md`
+13. `WORKSPACE/memory/YYYY-MM-DD.md`
+14. `WORKSPACE/HEARTBEAT.md` (optional)
 
 Example `config.json5`:
 
@@ -207,6 +209,45 @@ Example `config.json5`:
    - `--codex-path <path>` path to the `codex` binary.
    - `--state-dir <path>` state directory (also seeds CODEX_HOME under `<state>/codex`).
    - `--workspace <path>` workspace directory.
+
+`clawdex tasks list`
+1. Description: List tasks in the local task store.
+2. Options:
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
+
+`clawdex tasks create`
+1. Description: Create a new task.
+2. Options:
+   - `--title <text>` task title.
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
+
+`clawdex tasks run`
+1. Description: Run a task with Codex app-server and stream events into the task store.
+2. Options:
+   - `--task-id <id>` run an existing task.
+   - `--title <text>` create or reuse a task by title.
+   - `--prompt <text>` prompt text (or provide via stdin).
+   - `--codex-path <path>` overrides Codex binary.
+   - `--auto-approve` bypasses interactive approvals (declines by default when unset).
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
+
+`clawdex tasks events`
+1. Description: List events for a task run.
+2. Options:
+   - `--run-id <id>` task run id.
+   - `--limit <n>` limit results.
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
+
+`clawdex tasks server`
+1. Description: Start a minimal HTTP server for task state (`/v1/tasks`, `/v1/runs/<id>/events`).
+2. Options:
+   - `--bind <addr>` bind address (default `127.0.0.1:18790`).
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
 
 ---
 

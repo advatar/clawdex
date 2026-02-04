@@ -11,8 +11,9 @@ use codex_app_server_protocol::{
     FileChangeApprovalDecision, FileChangeRequestApprovalParams,
     FileChangeRequestApprovalResponse, InitializeCapabilities, InitializeParams, JSONRPCMessage,
     JSONRPCNotification, JSONRPCRequest, JSONRPCResponse, RequestId, ServerNotification,
-    SandboxPolicy, ServerRequest, ThreadStartParams, ToolRequestUserInputResponse, TurnStartParams,
-    TurnStatus, UserInput as V2UserInput,
+    SandboxPolicy, ServerRequest, ThreadStartParams, ToolRequestUserInputAnswer,
+    ToolRequestUserInputParams, ToolRequestUserInputResponse, TurnStartParams, TurnStatus,
+    UserInput as V2UserInput,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -51,6 +52,65 @@ impl ApprovalMode {
     }
 }
 
+pub trait ApprovalHandler {
+    fn command_decision(
+        &mut self,
+        params: &CommandExecutionRequestApprovalParams,
+    ) -> CommandExecutionApprovalDecision;
+    fn file_decision(
+        &mut self,
+        params: &FileChangeRequestApprovalParams,
+    ) -> FileChangeApprovalDecision;
+}
+
+pub trait UserInputHandler {
+    fn request_user_input(
+        &mut self,
+        params: &ToolRequestUserInputParams,
+    ) -> HashMap<String, ToolRequestUserInputAnswer>;
+}
+
+pub trait EventSink {
+    fn record_event(&mut self, kind: &str, payload: &serde_json::Value);
+}
+
+pub struct AutoApprovalHandler {
+    mode: ApprovalMode,
+}
+
+impl AutoApprovalHandler {
+    pub fn new(mode: ApprovalMode) -> Self {
+        Self { mode }
+    }
+}
+
+impl ApprovalHandler for AutoApprovalHandler {
+    fn command_decision(
+        &mut self,
+        _params: &CommandExecutionRequestApprovalParams,
+    ) -> CommandExecutionApprovalDecision {
+        self.mode.decision()
+    }
+
+    fn file_decision(
+        &mut self,
+        _params: &FileChangeRequestApprovalParams,
+    ) -> FileChangeApprovalDecision {
+        self.mode.file_decision()
+    }
+}
+
+pub struct AutoUserInputHandler;
+
+impl UserInputHandler for AutoUserInputHandler {
+    fn request_user_input(
+        &mut self,
+        _params: &ToolRequestUserInputParams,
+    ) -> HashMap<String, ToolRequestUserInputAnswer> {
+        HashMap::new()
+    }
+}
+
 #[derive(Debug)]
 pub struct TurnOutcome {
     pub message: String,
@@ -62,7 +122,9 @@ pub struct CodexClient {
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     pending_notifications: VecDeque<JSONRPCNotification>,
-    approval_mode: ApprovalMode,
+    approval_handler: Option<Box<dyn ApprovalHandler>>,
+    user_input_handler: Option<Box<dyn UserInputHandler>>,
+    event_sink: Option<Box<dyn EventSink>>,
     warnings: Vec<String>,
 }
 
@@ -94,9 +156,23 @@ impl CodexClient {
             stdin: Some(stdin),
             stdout: BufReader::new(stdout),
             pending_notifications: VecDeque::new(),
-            approval_mode,
+            approval_handler: Some(Box::new(AutoApprovalHandler::new(approval_mode))),
+            user_input_handler: Some(Box::new(AutoUserInputHandler)),
+            event_sink: None,
             warnings: Vec::new(),
         })
+    }
+
+    pub fn set_event_sink(&mut self, sink: Option<Box<dyn EventSink>>) {
+        self.event_sink = sink;
+    }
+
+    pub fn set_approval_handler(&mut self, handler: Option<Box<dyn ApprovalHandler>>) {
+        self.approval_handler = handler;
+    }
+
+    pub fn set_user_input_handler(&mut self, handler: Option<Box<dyn UserInputHandler>>) {
+        self.user_input_handler = handler;
     }
 
     pub fn initialize(&mut self) -> Result<()> {
@@ -171,6 +247,11 @@ impl CodexClient {
             let Ok(server_notification) = ServerNotification::try_from(notification) else {
                 continue;
             };
+            if let Some(sink) = self.event_sink.as_mut() {
+                if let Ok(payload) = serde_json::to_value(&server_notification) {
+                    sink.record_event(notification_kind(&server_notification), &payload);
+                }
+            }
 
             match server_notification {
                 ServerNotification::AgentMessageDelta(payload) => {
@@ -321,11 +402,15 @@ impl CodexClient {
             ServerRequest::FileChangeRequestApproval { request_id, params } => {
                 self.handle_file_change_request_approval(request_id, params)?;
             }
-            ServerRequest::ToolRequestUserInput { request_id, .. } => {
-                self.warnings.push("tool requested user input; not supported".to_string());
-                let response = ToolRequestUserInputResponse {
-                    answers: HashMap::new(),
+            ServerRequest::ToolRequestUserInput { request_id, params } => {
+                let answers = if let Some(handler) = self.user_input_handler.as_mut() {
+                    handler.request_user_input(&params)
+                } else {
+                    self.warnings
+                        .push("tool requested user input; not supported".to_string());
+                    HashMap::new()
                 };
+                let response = ToolRequestUserInputResponse { answers };
                 self.send_server_request_response(request_id, &response)?;
             }
             _ => {
@@ -341,17 +426,12 @@ impl CodexClient {
         request_id: RequestId,
         params: CommandExecutionRequestApprovalParams,
     ) -> Result<()> {
-        let warning = if let Some(cmd) = params.command.as_deref() {
-            format!("command approval requested for `{cmd}`")
+        let decision = if let Some(handler) = self.approval_handler.as_mut() {
+            handler.command_decision(&params)
         } else {
-            "command approval requested".to_string()
+            CommandExecutionApprovalDecision::Decline
         };
-        if matches!(self.approval_mode, ApprovalMode::AutoDeny) {
-            self.warnings.push(warning);
-        }
-        let response = CommandExecutionRequestApprovalResponse {
-            decision: self.approval_mode.decision(),
-        };
+        let response = CommandExecutionRequestApprovalResponse { decision };
         self.send_server_request_response(request_id, &response)?;
         Ok(())
     }
@@ -359,15 +439,14 @@ impl CodexClient {
     fn handle_file_change_request_approval(
         &mut self,
         request_id: RequestId,
-        _params: FileChangeRequestApprovalParams,
+        params: FileChangeRequestApprovalParams,
     ) -> Result<()> {
-        if matches!(self.approval_mode, ApprovalMode::AutoDeny) {
-            self.warnings
-                .push("file change approval requested".to_string());
-        }
-        let response = FileChangeRequestApprovalResponse {
-            decision: self.approval_mode.file_decision(),
+        let decision = if let Some(handler) = self.approval_handler.as_mut() {
+            handler.file_decision(&params)
+        } else {
+            FileChangeApprovalDecision::Decline
         };
+        let response = FileChangeRequestApprovalResponse { decision };
         self.send_server_request_response(request_id, &response)?;
         Ok(())
     }
@@ -396,6 +475,42 @@ impl CodexClient {
 
     fn request_id(&self) -> RequestId {
         RequestId::String(Uuid::new_v4().to_string())
+    }
+}
+
+fn notification_kind(notification: &ServerNotification) -> &'static str {
+    match notification {
+        ServerNotification::Error(_) => "error",
+        ServerNotification::ThreadStarted(_) => "thread_started",
+        ServerNotification::ThreadNameUpdated(_) => "thread_name_updated",
+        ServerNotification::ThreadTokenUsageUpdated(_) => "thread_token_usage_updated",
+        ServerNotification::TurnStarted(_) => "turn_started",
+        ServerNotification::TurnCompleted(_) => "turn_completed",
+        ServerNotification::TurnDiffUpdated(_) => "turn_diff_updated",
+        ServerNotification::TurnPlanUpdated(_) => "turn_plan_updated",
+        ServerNotification::ItemStarted(_) => "item_started",
+        ServerNotification::ItemCompleted(_) => "item_completed",
+        ServerNotification::RawResponseItemCompleted(_) => "raw_response_item_completed",
+        ServerNotification::AgentMessageDelta(_) => "agent_message_delta",
+        ServerNotification::PlanDelta(_) => "plan_delta",
+        ServerNotification::CommandExecutionOutputDelta(_) => "command_execution_output_delta",
+        ServerNotification::TerminalInteraction(_) => "terminal_interaction",
+        ServerNotification::FileChangeOutputDelta(_) => "file_change_output_delta",
+        ServerNotification::McpToolCallProgress(_) => "mcp_tool_call_progress",
+        ServerNotification::McpServerOauthLoginCompleted(_) => "mcp_server_oauth_login_completed",
+        ServerNotification::AccountUpdated(_) => "account_updated",
+        ServerNotification::AccountRateLimitsUpdated(_) => "account_rate_limits_updated",
+        ServerNotification::ReasoningSummaryTextDelta(_) => "reasoning_summary_text_delta",
+        ServerNotification::ReasoningSummaryPartAdded(_) => "reasoning_summary_part_added",
+        ServerNotification::ReasoningTextDelta(_) => "reasoning_text_delta",
+        ServerNotification::ContextCompacted(_) => "context_compacted",
+        ServerNotification::DeprecationNotice(_) => "deprecation_notice",
+        ServerNotification::ConfigWarning(_) => "config_warning",
+        ServerNotification::WindowsWorldWritableWarning(_) => "windows_world_writable_warning",
+        ServerNotification::AccountLoginCompleted(_) => "account_login_completed",
+        ServerNotification::AuthStatusChange(_) => "auth_status_change",
+        ServerNotification::LoginChatGptComplete(_) => "login_chatgpt_complete",
+        ServerNotification::SessionConfigured(_) => "session_configured",
     }
 }
 
