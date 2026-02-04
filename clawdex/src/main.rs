@@ -305,6 +305,8 @@ enum PermissionsCommand {
         mcp_allow: Option<String>,
         #[arg(long = "mcp-deny")]
         mcp_deny: Option<String>,
+        #[arg(long = "mcp-plugin")]
+        mcp_plugin: Vec<String>,
         #[arg(long = "state-dir")]
         state_dir: Option<PathBuf>,
         #[arg(long)]
@@ -526,6 +528,7 @@ fn main() -> Result<()> {
                 read_only,
                 mcp_allow,
                 mcp_deny,
+                mcp_plugin,
                 state_dir,
                 workspace,
             } => {
@@ -535,12 +538,23 @@ fn main() -> Result<()> {
                     .transpose()?;
                 let mcp_allow = mcp_allow.as_deref().map(permissions::parse_csv_list);
                 let mcp_deny = mcp_deny.as_deref().map(permissions::parse_csv_list);
+                let mcp_plugins = if mcp_plugin.is_empty() {
+                    None
+                } else {
+                    Some(
+                        mcp_plugin
+                            .iter()
+                            .map(|entry| permissions::parse_plugin_toggle(entry))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )
+                };
                 let value = permissions::set_permissions_command(
                     permissions::PermissionsUpdate {
                         internet,
                         read_only,
                         mcp_allow,
                         mcp_deny,
+                        mcp_plugins,
                     },
                     state_dir,
                     workspace,

@@ -135,6 +135,24 @@ pub fn run_ui_bridge(
                     }
                 }
             }
+            Some("list_plugin_commands") => {
+                let plugin_id = payload.get("pluginId").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let result =
+                    plugins::list_plugin_commands_command(plugin_id, Some(paths.state_dir.clone()), Some(paths.workspace_dir.clone()))?;
+                emit_json(&mut stdout, json!({ "type": "plugin_commands", "commands": result.get("commands") }))?;
+            }
+            Some("list_plugins") => {
+                let include_disabled = payload
+                    .get("includeDisabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let result = plugins::list_plugins_command(
+                    Some(paths.state_dir.clone()),
+                    Some(paths.workspace_dir.clone()),
+                    include_disabled,
+                )?;
+                emit_json(&mut stdout, json!({ "type": "plugins_list", "plugins": result.get("plugins") }))?;
+            }
             Some("get_config") => {
                 let value = read_config_value(&paths.state_dir)?;
                 emit_json(&mut stdout, json!({ "type": "config", "config": value }))?;

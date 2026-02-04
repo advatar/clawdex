@@ -17,6 +17,8 @@
 - [x] Implement plugin manager (install/list/enable/disable, skill sync, MCP export)
 - [x] Add plugin command discovery + execution (CLI + macOS app support)
 - [x] Add permissions UI plus MCP allow/deny policies
+- [x] Add command palette UX for plugin commands
+- [x] Add per-plugin MCP toggles in config + UI
 
 Notes:
 - `TEMPLATE_PACK.md` is the parity checklist: use it later to fill tool schemas, routing rules, and tests, then implement remaining gaps using the name `Clawdex`.

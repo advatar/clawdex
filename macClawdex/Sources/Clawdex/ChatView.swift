@@ -5,6 +5,7 @@ struct ChatView: View {
     @EnvironmentObject var runtime: RuntimeManager
 
     @State private var input: String = ""
+    @State private var showCommandPalette: Bool = false
     @State private var messages: [ChatMessage] = [
         ChatMessage(role: .system, text: "Clawdex (Codex-powered) — macOS app shell. Configure API key + workspace in Settings. Plugin commands: /plugin <id> <command> [input].")
     ]
@@ -24,6 +25,10 @@ struct ChatView: View {
         .onReceive(runtime.errorPublisher) { err in
             messages.append(ChatMessage(role: .system, text: "Error: \(err)"))
         }
+        .sheet(isPresented: $showCommandPalette) {
+            CommandPaletteView(isPresented: $showCommandPalette)
+                .environmentObject(runtime)
+        }
     }
 
     private var header: some View {
@@ -38,6 +43,9 @@ struct ChatView: View {
             Spacer()
             Button(runtime.isRunning ? "Stop" : "Start") {
                 if runtime.isRunning { runtime.stop() } else { runtime.start() }
+            }
+            Button("Commands") {
+                showCommandPalette = true
             }
             Button("Settings") {
                 NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)

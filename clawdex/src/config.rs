@@ -35,6 +35,7 @@ pub struct PermissionsConfig {
 pub struct McpPermissionsConfig {
     pub allow: Option<Vec<String>>,
     pub deny: Option<Vec<String>>,
+    pub plugins: Option<std::collections::HashMap<String, bool>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -101,6 +102,7 @@ pub struct WorkspacePolicy {
 pub struct McpPolicy {
     allow: std::collections::HashSet<String>,
     deny: std::collections::HashSet<String>,
+    plugins: std::collections::HashMap<String, bool>,
 }
 
 impl McpPolicy {
@@ -113,6 +115,11 @@ impl McpPolicy {
             return true;
         }
         self.allow.contains(&key)
+    }
+
+    pub fn is_plugin_enabled(&self, plugin_id: &str) -> bool {
+        let key = normalize_mcp_name(plugin_id);
+        self.plugins.get(&key).copied().unwrap_or(true)
     }
 }
 
@@ -249,6 +256,7 @@ pub fn resolve_network_access(cfg: &ClawdConfig) -> bool {
 pub fn resolve_mcp_policy(cfg: &ClawdConfig) -> McpPolicy {
     let mut allow = std::collections::HashSet::new();
     let mut deny = std::collections::HashSet::new();
+    let mut plugins = std::collections::HashMap::new();
     if let Some(mcp) = cfg.permissions.as_ref().and_then(|p| p.mcp.as_ref()) {
         if let Some(list) = mcp.allow.as_ref() {
             for entry in list {
@@ -266,8 +274,20 @@ pub fn resolve_mcp_policy(cfg: &ClawdConfig) -> McpPolicy {
                 }
             }
         }
+        if let Some(map) = mcp.plugins.as_ref() {
+            for (key, value) in map {
+                let normalized = normalize_mcp_name(key);
+                if !normalized.is_empty() {
+                    plugins.insert(normalized, *value);
+                }
+            }
+        }
     }
-    McpPolicy { allow, deny }
+    McpPolicy {
+        allow,
+        deny,
+        plugins,
+    }
 }
 
 pub fn resolve_cron_enabled(cfg: &ClawdConfig) -> bool {

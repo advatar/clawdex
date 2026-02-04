@@ -50,13 +50,15 @@ pub fn list_plugins_command(
     workspace: Option<PathBuf>,
     include_disabled: bool,
 ) -> Result<Value> {
-    let (_cfg, paths) = load_config(state_dir, workspace)?;
+    let (cfg, paths) = load_config(state_dir, workspace)?;
+    let policy = resolve_mcp_policy(&cfg);
     let store = TaskStore::open(&paths)?;
     let plugins = store.list_plugins(include_disabled)?;
     let items: Vec<Value> = plugins
         .into_iter()
         .map(|plugin| {
             let assets = plugin_assets(Path::new(&plugin.path));
+            let mcp_enabled = assets.has_mcp && policy.is_plugin_enabled(&plugin.id);
             json!({
                 "id": plugin.id,
                 "name": plugin.name,
@@ -70,6 +72,7 @@ pub fn list_plugins_command(
                 "skills": assets.skills,
                 "commands": assets.commands,
                 "hasMcp": assets.has_mcp,
+                "mcpEnabled": mcp_enabled,
             })
         })
         .collect();
@@ -499,7 +502,14 @@ fn export_plugin_mcp(paths: &ClawdPaths, plugin: &PluginRecord, policy: &McpPoli
     let Some(value) = read_plugin_mcp(&root)? else { return Ok(()) };
     let dest = paths.state_dir.join("mcp").join(format!("{}.json", plugin.id));
     let mut mcp_servers = Map::new();
-    let _ = merge_mcp_config(&mut mcp_servers, &plugin.id, &value, policy);
+    let count = merge_mcp_config(&mut mcp_servers, &plugin.id, &value, policy);
+    if count == 0 {
+        if dest.exists() {
+            fs::remove_file(&dest)
+                .with_context(|| format!("remove {}", dest.display()))?;
+        }
+        return Ok(());
+    }
     let output = json!({ "mcpServers": mcp_servers });
     write_json_value(&dest, &output)?;
     Ok(())
@@ -511,6 +521,9 @@ fn merge_mcp_config(
     value: &Value,
     policy: &McpPolicy,
 ) -> usize {
+    if !policy.is_plugin_enabled(plugin_id) {
+        return 0;
+    }
     let candidate = value
         .get("mcpServers")
         .and_then(|v| v.as_object())

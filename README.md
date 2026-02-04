@@ -155,7 +155,11 @@ Example `config.json5`:
     internet: true,
     mcp: {
       allow: ["slack", "notion"],
-      deny: ["experimental-server"]
+      deny: ["experimental-server"],
+      plugins: {
+        "sales": true,
+        "finance": false
+      }
     }
   },
   cron: { enabled: true },
@@ -187,6 +191,7 @@ Workspace policy notes:
 - `workspace_policy.read_only` switches Codex sandbox to read-only.
 - `permissions.internet` toggles sandbox network access.
 - `permissions.mcp.allow` / `permissions.mcp.deny` gate MCP servers when exporting plugin configs.
+- `permissions.mcp.plugins` overrides MCP enablement per plugin id (true/false).
 
 ---
 
@@ -353,6 +358,7 @@ Workspace policy notes:
    - `--read-only <true|false>` toggles read-only workspace sandbox.
    - `--mcp-allow <a,b,c>` allowlisted MCP server names (comma-separated).
    - `--mcp-deny <a,b,c>` denylisted MCP server names (comma-separated).
+   - `--mcp-plugin <pluginId=on|off>` override MCP enablement per plugin (repeatable).
    - `--state-dir <path>` overrides state directory.
    - `--workspace <path>` overrides workspace directory.
 

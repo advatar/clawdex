@@ -108,6 +108,30 @@ struct SettingsView: View {
                 Text("Changes are applied via the running Clawdex runtime.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                Divider()
+
+                HStack {
+                    Text("Per-plugin MCP")
+                        .font(.subheadline)
+                    Spacer()
+                    Button("Refresh") {
+                        runtime.requestPlugins()
+                    }
+                }
+
+                if runtime.plugins.isEmpty {
+                    Text("No plugins installed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(runtime.plugins.filter { $0.hasMcp }) { plugin in
+                        Toggle("MCP: \(plugin.name)", isOn: Binding(
+                            get: { plugin.mcpEnabled },
+                            set: { runtime.setPluginMcpEnabled(pluginId: plugin.id, enabled: $0) }
+                        ))
+                    }
+                }
             }
 
             Section("Embedded runtime") {
@@ -135,6 +159,7 @@ struct SettingsView: View {
             refreshLaunchAtLoginStatus()
             if runtime.isRunning {
                 runtime.requestConfig()
+                runtime.requestPlugins()
             }
         }
     }

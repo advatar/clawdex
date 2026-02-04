@@ -5,6 +5,8 @@ import AppKit
 final class RuntimeManager: ObservableObject {
     @Published private(set) var isRunning: Bool = false
     @Published private(set) var logs: [String] = []
+    @Published private(set) var plugins: [PluginInfo] = []
+    @Published private(set) var pluginCommands: [PluginCommand] = []
 
     private var appState: AppState?
     private var process: Process?
@@ -118,6 +120,7 @@ final class RuntimeManager: ObservableObject {
             self.isRunning = true
             appendLog("[app] Started clawdex (pid \(p.processIdentifier))")
             requestConfig()
+            requestPlugins()
 
         } catch {
             appState.lastError = error.localizedDescription
@@ -169,6 +172,21 @@ final class RuntimeManager: ObservableObject {
         sendControlMessage(payload)
     }
 
+    func requestPlugins() {
+        let payload: [String: Any] = [
+            "type": "list_plugins",
+            "includeDisabled": true
+        ]
+        sendControlMessage(payload)
+    }
+
+    func requestPluginCommands() {
+        let payload: [String: Any] = [
+            "type": "list_plugin_commands"
+        ]
+        sendControlMessage(payload)
+    }
+
     func updatePermissions() {
         let allow = appState?.mcpAllowlist
             .split(separator: ",")
@@ -193,6 +211,34 @@ final class RuntimeManager: ObservableObject {
                     "read_only": appState?.workspaceReadOnly ?? false
                 ]
             ]
+        ]
+        sendControlMessage(payload)
+    }
+
+    func setPluginMcpEnabled(pluginId: String, enabled: Bool) {
+        guard isRunning else { return }
+        let payload: [String: Any] = [
+            "type": "update_config",
+            "config": [
+                "permissions": [
+                    "mcp": [
+                        "plugins": [
+                            pluginId: enabled
+                        ]
+                    ]
+                ]
+            ]
+        ]
+        sendControlMessage(payload)
+        updateLocalPluginMcpState(pluginId: pluginId, enabled: enabled)
+    }
+
+    func runPluginCommand(_ command: PluginCommand, input: String?) {
+        let payload: [String: Any] = [
+            "type": "plugin_command",
+            "pluginId": command.pluginId,
+            "command": command.command,
+            "input": input ?? ""
         ]
         sendControlMessage(payload)
     }
@@ -338,6 +384,10 @@ final class RuntimeManager: ObservableObject {
                 errorPublisher.send(err)
             } else if let config = parseConfig(from: text) {
                 applyConfig(config)
+            } else if let list = parsePlugins(from: text) {
+                applyPlugins(list)
+            } else if let commands = parsePluginCommands(from: text) {
+                applyPluginCommands(commands)
             }
         }
     }
@@ -367,6 +417,22 @@ final class RuntimeManager: ObservableObject {
         return obj["config"] as? [String: Any]
     }
 
+    private func parsePlugins(from line: String) -> [[String: Any]]? {
+        guard line.first == "{" else { return nil }
+        guard let data = line.data(using: .utf8) else { return nil }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        guard obj["type"] as? String == "plugins_list" else { return nil }
+        return obj["plugins"] as? [[String: Any]]
+    }
+
+    private func parsePluginCommands(from line: String) -> [[String: Any]]? {
+        guard line.first == "{" else { return nil }
+        guard let data = line.data(using: .utf8) else { return nil }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        guard obj["type"] as? String == "plugin_commands" else { return nil }
+        return obj["commands"] as? [[String: Any]]
+    }
+
     private func applyConfig(_ config: [String: Any]) {
         if let permissions = config["permissions"] as? [String: Any] {
             if let internet = permissions["internet"] as? Bool {
@@ -384,6 +450,48 @@ final class RuntimeManager: ObservableObject {
         if let workspacePolicy = config["workspace_policy"] as? [String: Any],
            let readOnly = workspacePolicy["read_only"] as? Bool {
             appState?.workspaceReadOnly = readOnly
+        }
+        requestPlugins()
+    }
+
+    private func applyPlugins(_ entries: [[String: Any]]) {
+        let mapped = entries.compactMap { entry -> PluginInfo? in
+            guard let id = entry["id"] as? String,
+                  let name = entry["name"] as? String else { return nil }
+            let hasMcp = entry["hasMcp"] as? Bool ?? false
+            let mcpEnabled = entry["mcpEnabled"] as? Bool ?? false
+            return PluginInfo(id: id, name: name, hasMcp: hasMcp, mcpEnabled: mcpEnabled)
+        }
+        plugins = mapped.sorted { $0.name.lowercased() < $1.name.lowercased() }
+    }
+
+    private func applyPluginCommands(_ entries: [[String: Any]]) {
+        let mapped = entries.compactMap { entry -> PluginCommand? in
+            let pluginId = (entry["plugin_id"] as? String) ?? (entry["pluginId"] as? String)
+            let pluginName = (entry["plugin_name"] as? String) ?? (entry["pluginName"] as? String)
+            guard let pluginId, let pluginName,
+                  let command = entry["command"] as? String else { return nil }
+            let description = entry["description"] as? String
+            let id = "\(pluginId):\(command)"
+            return PluginCommand(
+                id: id,
+                pluginId: pluginId,
+                pluginName: pluginName,
+                command: command,
+                description: description
+            )
+        }
+        pluginCommands = mapped.sorted { lhs, rhs in
+            if lhs.pluginName.lowercased() == rhs.pluginName.lowercased() {
+                return lhs.command.lowercased() < rhs.command.lowercased()
+            }
+            return lhs.pluginName.lowercased() < rhs.pluginName.lowercased()
+        }
+    }
+
+    private func updateLocalPluginMcpState(pluginId: String, enabled: Bool) {
+        if let idx = plugins.firstIndex(where: { $0.id == pluginId }) {
+            plugins[idx].mcpEnabled = enabled
         }
     }
 
