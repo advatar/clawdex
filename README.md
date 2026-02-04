@@ -422,6 +422,9 @@ The build script `Scripts/build_and_embed_rust.sh`:
 - Builds **Clawdexd** (daemon) alongside **Clawdex** and embeds all tools into `Clawdex.app/Contents/Resources/bin/`.
 - Codesigns embedded tools with helper entitlements.
 
+If you want a prebuilt `clawdexd` without building the full app, run:
+- `macClawdex/Scripts/build_prebuilt_clawdexd.sh`
+
 Plugin commands in the mac app:
 - Type `/plugin <id> <command> [input]` in chat to run a plugin command.
 - Use the **Commands** button to open the command palette.
@@ -435,7 +438,8 @@ Override inputs as needed:
 - `CODEX_BIN` (prebuilt Mach‑O codex binary)
 - `CLAWDEX_CARGO_ROOT` (default `../clawdex`)
 - `CLAWDEX_BIN` (prebuilt Mach‑O clawdex binary)
-- `PREBUILT_DIR` (default `macClawdex/Resources/prebuilt`, looks for `codex`/`clawdex` if Rust is unavailable)
+- `CLAWDEXD_BIN` (prebuilt Mach‑O clawdexd binary)
+- `PREBUILT_DIR` (default `macClawdex/Resources/prebuilt`, looks for `codex`/`clawdex`/`clawdexd` if Rust is unavailable)
 
 ---
 
