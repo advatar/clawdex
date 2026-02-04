@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::util::{ensure_dir, home_dir, read_to_string};
@@ -8,11 +9,25 @@ use crate::util::{ensure_dir, home_dir, read_to_string};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClawdConfig {
     pub workspace: Option<String>,
+    pub workspace_policy: Option<WorkspacePolicyConfig>,
+    pub permissions: Option<PermissionsConfig>,
     pub cron: Option<CronConfig>,
     pub heartbeat: Option<HeartbeatConfig>,
     pub memory: Option<MemoryConfig>,
     pub codex: Option<CodexConfig>,
     pub gateway: Option<GatewayConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WorkspacePolicyConfig {
+    pub allowed_roots: Option<Vec<String>>,
+    pub deny_patterns: Option<Vec<String>>,
+    pub read_only: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PermissionsConfig {
+    pub internet: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -63,6 +78,38 @@ pub struct ClawdPaths {
     pub memory_dir: PathBuf,
     pub sessions_dir: PathBuf,
     pub workspace_dir: PathBuf,
+    pub workspace_policy: WorkspacePolicy,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspacePolicy {
+    pub allowed_roots: Vec<PathBuf>,
+    pub deny_patterns: Vec<String>,
+    pub read_only: bool,
+    pub network_access: bool,
+    deny_set: GlobSet,
+}
+
+impl WorkspacePolicy {
+    fn new(
+        allowed_roots: Vec<PathBuf>,
+        deny_patterns: Vec<String>,
+        read_only: bool,
+        network_access: bool,
+    ) -> Result<Self> {
+        let deny_set = build_deny_set(&deny_patterns)?;
+        Ok(Self {
+            allowed_roots,
+            deny_patterns,
+            read_only,
+            network_access,
+            deny_set,
+        })
+    }
+
+    pub fn deny_match(&self, rel_path: &str) -> bool {
+        self.deny_set.is_match(rel_path)
+    }
 }
 
 pub fn load_config(
@@ -102,6 +149,7 @@ pub fn load_config(
     };
 
     let workspace_dir = resolve_workspace_dir(workspace_override, &config)?;
+    let workspace_policy = resolve_workspace_policy(&config, &workspace_dir)?;
     let cron_dir = state_dir.join("cron");
     let memory_dir = state_dir.join("memory");
     let sessions_dir = state_dir.join("sessions");
@@ -118,6 +166,7 @@ pub fn load_config(
             memory_dir,
             sessions_dir,
             workspace_dir,
+            workspace_policy,
         },
     ))
 }
@@ -164,6 +213,13 @@ pub fn resolve_memory_enabled(cfg: &ClawdConfig) -> bool {
         .unwrap_or(true)
 }
 
+pub fn resolve_network_access(cfg: &ClawdConfig) -> bool {
+    cfg.permissions
+        .as_ref()
+        .and_then(|p| p.internet)
+        .unwrap_or(true)
+}
+
 pub fn resolve_cron_enabled(cfg: &ClawdConfig) -> bool {
     cfg.cron.as_ref().and_then(|c| c.enabled).unwrap_or(true)
 }
@@ -206,14 +262,90 @@ pub fn resolve_workspace_path(paths: &ClawdPaths, rel: &str) -> Result<PathBuf> 
     let abs = abs
         .canonicalize()
         .unwrap_or_else(|_| abs.clone());
-    let root = paths
-        .workspace_dir
-        .canonicalize()
-        .unwrap_or_else(|_| paths.workspace_dir.clone());
-    if !abs.starts_with(&root) {
-        anyhow::bail!("path outside workspace");
+    let root = select_allowed_root(&abs, &paths.workspace_policy.allowed_roots)
+        .context("path outside allowed workspace roots")?;
+    let rel = abs
+        .strip_prefix(root)
+        .unwrap_or(&abs)
+        .to_string_lossy()
+        .replace('\\', "/");
+    if paths.workspace_policy.deny_match(&rel) {
+        anyhow::bail!("path denied by workspace policy");
     }
     Ok(abs)
+}
+
+fn resolve_workspace_policy(cfg: &ClawdConfig, workspace_dir: &Path) -> Result<WorkspacePolicy> {
+    let mut allowed_roots = Vec::new();
+    if let Some(policy) = cfg.workspace_policy.as_ref() {
+        if let Some(roots) = policy.allowed_roots.as_ref() {
+            for root in roots {
+                let path = PathBuf::from(root);
+                let abs = if path.is_absolute() {
+                    path
+                } else {
+                    workspace_dir.join(path)
+                };
+                allowed_roots.push(normalize_root(&abs));
+            }
+        }
+    }
+    if allowed_roots.is_empty() {
+        allowed_roots.push(normalize_root(workspace_dir));
+    }
+    allowed_roots.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
+    allowed_roots.dedup();
+
+    let deny_patterns = cfg
+        .workspace_policy
+        .as_ref()
+        .and_then(|p| p.deny_patterns.clone())
+        .unwrap_or_else(default_deny_patterns);
+    let read_only = cfg
+        .workspace_policy
+        .as_ref()
+        .and_then(|p| p.read_only)
+        .unwrap_or(false);
+    let network_access = resolve_network_access(cfg);
+
+    WorkspacePolicy::new(allowed_roots, deny_patterns, read_only, network_access)
+}
+
+fn normalize_root(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn select_allowed_root<'a>(path: &Path, roots: &'a [PathBuf]) -> Option<&'a PathBuf> {
+    let mut best: Option<&PathBuf> = None;
+    let mut best_len = 0usize;
+    for root in roots {
+        if path.starts_with(root) {
+            let len = root.components().count();
+            if len >= best_len {
+                best_len = len;
+                best = Some(root);
+            }
+        }
+    }
+    best
+}
+
+fn default_deny_patterns() -> Vec<String> {
+    vec![
+        "**/.git/**".to_string(),
+        "**/.env".to_string(),
+        "**/.DS_Store".to_string(),
+    ]
+}
+
+fn build_deny_set(patterns: &[String]) -> Result<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        let glob = Glob::new(pattern)
+            .with_context(|| format!("invalid deny pattern {pattern}"))?;
+        builder.add(glob);
+    }
+    Ok(builder.build().context("compile deny patterns")?)
 }
 
 fn state_dir_from_env() -> Option<PathBuf> {

@@ -137,12 +137,21 @@ Default state layout:
 12. `WORKSPACE/MEMORY.md`
 13. `WORKSPACE/memory/YYYY-MM-DD.md`
 14. `WORKSPACE/HEARTBEAT.md` (optional)
+15. `~/.codex/clawdex/plugins/<pluginId>/...`
+16. `~/.codex/clawdex/mcp/plugins.json`
+17. `~/.codex/skills/clawdex/plugins/<pluginId>/<skill>/SKILL.md`
 
 Example `config.json5`:
 
 ```json5
 {
   workspace: "/path/to/workspace",
+  workspace_policy: {
+    allowed_roots: ["/path/to/workspace"],
+    deny_patterns: ["**/.git/**", "**/.env", "**/.DS_Store"],
+    read_only: false
+  },
+  permissions: { internet: true },
   cron: { enabled: true },
   heartbeat: { enabled: true, interval_ms: 1800000 },
   memory: {
@@ -165,6 +174,12 @@ Example `config.json5`:
   gateway: { bind: "127.0.0.1:18789", route_ttl_ms: 86400000 }
 }
 ```
+
+Workspace policy notes:
+- `workspace_policy.allowed_roots` expands writable roots for Codex sandbox.
+- `workspace_policy.deny_patterns` blocks tool access via `resolve_workspace_path`.
+- `workspace_policy.read_only` switches Codex sandbox to read-only.
+- `permissions.internet` toggles sandbox network access.
 
 ---
 
@@ -246,6 +261,57 @@ Example `config.json5`:
 1. Description: Start a minimal HTTP server for task state (`/v1/tasks`, `/v1/runs/<id>/events`).
 2. Options:
    - `--bind <addr>` bind address (default `127.0.0.1:18790`).
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
+
+`clawdex plugins list`
+1. Description: List installed plugins and their assets.
+2. Options:
+   - `--include-disabled` include disabled plugins.
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
+
+`clawdex plugins add`
+1. Description: Install a Cowork-style plugin from a local folder.
+2. Options:
+   - `--path <dir>` plugin root folder.
+   - `--link` create a symlink instead of copying.
+   - `--source <text>` optional source label.
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
+
+`clawdex plugins enable`
+1. Description: Enable a plugin and sync its skills.
+2. Options:
+   - `--id <pluginId>` plugin id.
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
+
+`clawdex plugins disable`
+1. Description: Disable a plugin and remove its skills.
+2. Options:
+   - `--id <pluginId>` plugin id.
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
+
+`clawdex plugins remove`
+1. Description: Remove a plugin and its stored files.
+2. Options:
+   - `--id <pluginId>` plugin id.
+   - `--keep-files` remove registry entry but keep stored files.
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
+
+`clawdex plugins sync`
+1. Description: Re-sync skills for all installed plugins.
+2. Options:
+   - `--state-dir <path>` overrides state directory.
+   - `--workspace <path>` overrides workspace directory.
+
+`clawdex plugins export-mcp`
+1. Description: Export merged `.mcp.json` entries to `~/.codex/clawdex/mcp/plugins.json` (or `--output`).
+2. Options:
+   - `--output <path>` output file.
    - `--state-dir <path>` overrides state directory.
    - `--workspace <path>` overrides workspace directory.
 

@@ -19,6 +19,7 @@ serde_yaml = "0.9"
 tiny_http = "0.12"
 rusqlite = { version = "0.31", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+globset = "0.4"
 codex-app-server-protocol = { path = "../codex/codex-rs/app-server-protocol" }
 codex-protocol = { path = "../codex/codex-rs/protocol" }
 codex-utils-absolute-path = { path = "../codex/codex-rs/utils/absolute-path" }

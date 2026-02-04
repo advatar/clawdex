@@ -6,10 +6,7 @@ use anyhow::Result;
 use codex_app_server_protocol::AskForApproval;
 use serde_json::json;
 
-use crate::config::{
-    resolve_heartbeat_enabled, resolve_heartbeat_interval_ms, resolve_workspace_dir, ClawdConfig,
-    ClawdPaths,
-};
+use crate::config::{resolve_heartbeat_enabled, resolve_heartbeat_interval_ms, ClawdConfig, ClawdPaths};
 use crate::cron::{collect_due_jobs, drain_pending_jobs, job_prompt, job_session_key, record_run};
 use crate::gateway;
 use crate::heartbeat;
@@ -18,18 +15,19 @@ use crate::util::now_ms;
 
 pub fn run_daemon(
     cfg: ClawdConfig,
-    mut paths: ClawdPaths,
+    paths: ClawdPaths,
     codex_path_override: Option<PathBuf>,
 ) -> Result<()> {
     let codex_path = resolve_codex_path(&cfg, codex_path_override)?;
-    let workspace = resolve_workspace_dir(None, &cfg)?;
-    paths.workspace_dir = workspace.clone();
+    let workspace = paths.workspace_dir.clone();
+    let workspace_policy = paths.workspace_policy.clone();
 
     let approval_policy = resolve_approval_policy(&cfg);
     let runner_cfg = CodexRunnerConfig {
         codex_path,
         codex_home: paths.state_dir.join("codex"),
         workspace,
+        workspace_policy,
         approval_policy,
         config_overrides: resolve_codex_overrides(&cfg),
     };

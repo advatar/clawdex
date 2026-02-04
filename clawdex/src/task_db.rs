@@ -43,6 +43,19 @@ pub struct TaskEvent {
     pub payload: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginRecord {
+    pub id: String,
+    pub name: String,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub source: Option<String>,
+    pub path: String,
+    pub enabled: bool,
+    pub installed_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
 pub struct TaskStore {
     conn: Connection,
     events_dir: PathBuf,
@@ -122,10 +135,23 @@ impl TaskStore {
                 FOREIGN KEY(task_run_id) REFERENCES task_runs(id)
             );
 
+            CREATE TABLE IF NOT EXISTS plugins (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT,
+                description TEXT,
+                source TEXT,
+                path TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                installed_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_task_runs_task_id ON task_runs(task_id);
             CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(task_run_id, ts_ms);
             CREATE INDEX IF NOT EXISTS idx_approvals_run_id ON approvals(task_run_id, ts_ms);
             CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(task_run_id, created_at_ms);
+            CREATE INDEX IF NOT EXISTS idx_plugins_enabled ON plugins(enabled, updated_at_ms);
             "#,
         )?;
         Ok(())
@@ -329,6 +355,101 @@ impl TaskStore {
             events.push(row?);
         }
         Ok(events)
+    }
+
+    pub fn upsert_plugin(&self, plugin: &PluginRecord) -> Result<PluginRecord> {
+        self.conn.execute(
+            r#"
+            INSERT INTO plugins(
+                id, name, version, description, source, path, enabled, installed_at_ms, updated_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                version = excluded.version,
+                description = excluded.description,
+                source = excluded.source,
+                path = excluded.path,
+                enabled = excluded.enabled,
+                updated_at_ms = excluded.updated_at_ms
+            "#,
+            params![
+                plugin.id,
+                plugin.name,
+                plugin.version,
+                plugin.description,
+                plugin.source,
+                plugin.path,
+                if plugin.enabled { 1 } else { 0 },
+                plugin.installed_at_ms,
+                plugin.updated_at_ms
+            ],
+        )?;
+        Ok(plugin.clone())
+    }
+
+    pub fn list_plugins(&self, include_disabled: bool) -> Result<Vec<PluginRecord>> {
+        let sql = if include_disabled {
+            "SELECT id, name, version, description, source, path, enabled, installed_at_ms, updated_at_ms FROM plugins ORDER BY updated_at_ms DESC"
+        } else {
+            "SELECT id, name, version, description, source, path, enabled, installed_at_ms, updated_at_ms FROM plugins WHERE enabled = 1 ORDER BY updated_at_ms DESC"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(PluginRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                version: row.get(2)?,
+                description: row.get(3)?,
+                source: row.get(4)?,
+                path: row.get(5)?,
+                enabled: row.get::<_, i64>(6)? != 0,
+                installed_at_ms: row.get(7)?,
+                updated_at_ms: row.get(8)?,
+            })
+        })?;
+        let mut plugins = Vec::new();
+        for row in rows {
+            plugins.push(row?);
+        }
+        Ok(plugins)
+    }
+
+    pub fn get_plugin(&self, plugin_id: &str) -> Result<Option<PluginRecord>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, version, description, source, path, enabled, installed_at_ms, updated_at_ms FROM plugins WHERE id = ?1",
+                [plugin_id],
+                |row| {
+                    Ok(PluginRecord {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        version: row.get(2)?,
+                        description: row.get(3)?,
+                        source: row.get(4)?,
+                        path: row.get(5)?,
+                        enabled: row.get::<_, i64>(6)? != 0,
+                        installed_at_ms: row.get(7)?,
+                        updated_at_ms: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .context("query plugin by id")
+    }
+
+    pub fn set_plugin_enabled(&self, plugin_id: &str, enabled: bool) -> Result<Option<PluginRecord>> {
+        let now = now_ms();
+        self.conn.execute(
+            "UPDATE plugins SET enabled = ?1, updated_at_ms = ?2 WHERE id = ?3",
+            params![if enabled { 1 } else { 0 }, now, plugin_id],
+        )?;
+        self.get_plugin(plugin_id)
+    }
+
+    pub fn remove_plugin(&self, plugin_id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM plugins WHERE id = ?1", [plugin_id])?;
+        Ok(())
     }
 
     fn append_event_log(&self, run_id: &str, event: &TaskEvent) -> Result<()> {

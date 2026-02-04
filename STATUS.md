@@ -13,6 +13,8 @@
 - [x] Implement WORK.md Phase 0-2 foundations (task DB + task engine + streaming events)
 - [x] Implement interactive approvals + tool user input broker for task runs
 - [x] Add task CLI (`tasks.*`) and daemon IPC stub for future UI
+- [x] Add workspace policy controls (allow roots, deny patterns, read-only, network access toggle)
+- [x] Implement plugin manager (install/list/enable/disable, skill sync, MCP export)
 
 Notes:
 - `TEMPLATE_PACK.md` is the parity checklist: use it later to fill tool schemas, routing rules, and tests, then implement remaining gaps using the name `Clawdex`.

@@ -1,17 +1,19 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use codex_app_server_protocol::{AskForApproval, SandboxPolicy};
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 use crate::app_server::{ApprovalMode, CodexClient, TurnOutcome};
+use crate::config::WorkspacePolicy;
 
 #[derive(Debug, Clone)]
 pub struct CodexRunnerConfig {
     pub codex_path: PathBuf,
     pub codex_home: PathBuf,
     pub workspace: PathBuf,
+    pub workspace_policy: WorkspacePolicy,
     pub approval_policy: AskForApproval,
     pub config_overrides: Vec<String>,
 }
@@ -21,6 +23,7 @@ pub struct CodexRunner {
     main_thread: String,
     isolated_threads: HashMap<String, String>,
     workspace: PathBuf,
+    workspace_policy: WorkspacePolicy,
     approval_policy: AskForApproval,
 }
 
@@ -47,12 +50,13 @@ impl CodexRunner {
             main_thread,
             isolated_threads: HashMap::new(),
             workspace: cfg.workspace,
+            workspace_policy: cfg.workspace_policy,
             approval_policy: cfg.approval_policy,
         })
     }
 
     pub fn run_main(&mut self, message: &str) -> Result<TurnOutcome> {
-        let sandbox_policy = workspace_sandbox_policy(&self.workspace)?;
+        let sandbox_policy = workspace_sandbox_policy(&self.workspace_policy)?;
         self.client.run_turn(
             &self.main_thread,
             message,
@@ -70,7 +74,7 @@ impl CodexRunner {
             self.isolated_threads.insert(key.to_string(), thread.clone());
             thread
         };
-        let sandbox_policy = workspace_sandbox_policy(&self.workspace)?;
+        let sandbox_policy = workspace_sandbox_policy(&self.workspace_policy)?;
         self.client.run_turn(
             &thread_id,
             message,
@@ -81,12 +85,19 @@ impl CodexRunner {
     }
 }
 
-fn workspace_sandbox_policy(workspace: &Path) -> Result<Option<SandboxPolicy>> {
-    let abs = AbsolutePathBuf::try_from(workspace.to_path_buf())
-        .context("workspace path must be absolute")?;
+pub fn workspace_sandbox_policy(policy: &WorkspacePolicy) -> Result<Option<SandboxPolicy>> {
+    if policy.read_only {
+        return Ok(Some(SandboxPolicy::ReadOnly));
+    }
+    let mut roots = Vec::new();
+    for root in &policy.allowed_roots {
+        let abs = AbsolutePathBuf::try_from(root.to_path_buf())
+            .context("workspace root must be absolute")?;
+        roots.push(abs);
+    }
     Ok(Some(SandboxPolicy::WorkspaceWrite {
-        writable_roots: vec![abs],
-        network_access: true,
+        writable_roots: roots,
+        network_access: policy.network_access,
         exclude_tmpdir_env_var: false,
         exclude_slash_tmp: false,
     }))

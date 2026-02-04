@@ -6,6 +6,8 @@ use codex_app_server_protocol::AskForApproval;
 use serde_json::{json, Value};
 
 use crate::app_server::{ApprovalMode, CodexClient};
+use crate::config::load_config;
+use crate::runner::workspace_sandbox_policy;
 
 pub fn run_ui_bridge(
     codex_path: PathBuf,
@@ -14,6 +16,8 @@ pub fn run_ui_bridge(
 ) -> Result<()> {
     let approval_mode = ApprovalMode::from_env();
     let approval_policy = approval_policy_from_env();
+    let (_cfg, paths) = load_config(Some(state_dir.clone()), workspace.clone())?;
+    let sandbox_policy = workspace_sandbox_policy(&paths.workspace_policy)?;
 
     let codex_home = state_dir.join("codex");
     std::fs::create_dir_all(&codex_home)
@@ -24,12 +28,14 @@ pub fn run_ui_bridge(
         "CODEX_HOME".to_string(),
         codex_home.to_string_lossy().to_string(),
     ));
-    if let Some(ref workspace) = workspace {
-        env.push((
-            "CLAWDEX_WORKSPACE".to_string(),
-            workspace.to_string_lossy().to_string(),
-        ));
-    }
+    env.push((
+        "CLAWDEX_WORKSPACE".to_string(),
+        paths.workspace_dir.to_string_lossy().to_string(),
+    ));
+    env.push((
+        "CODEX_WORKSPACE_DIR".to_string(),
+        paths.workspace_dir.to_string_lossy().to_string(),
+    ));
 
     let config_overrides = config_overrides_from_env();
     let mut client = CodexClient::spawn(&codex_path, &config_overrides, &env, approval_mode)?;
@@ -64,8 +70,8 @@ pub fn run_ui_bridge(
                     &thread_id,
                     text,
                     approval_policy,
-                    None,
-                    workspace.as_ref().map(|p| p.to_path_buf()),
+                    sandbox_policy.clone(),
+                    Some(paths.workspace_dir.clone()),
                 ) {
                     Ok(outcome) => {
                         if !outcome.message.is_empty() {

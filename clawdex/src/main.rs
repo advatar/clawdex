@@ -11,6 +11,7 @@ mod gateway;
 mod heartbeat;
 mod mcp;
 mod memory;
+mod plugins;
 mod runner;
 mod skills_sync;
 mod task_db;
@@ -91,6 +92,11 @@ enum Commands {
         #[command(subcommand)]
         command: TasksCommand,
     },
+    /// Plugin manager (Cowork-style plugins)
+    Plugins {
+        #[command(subcommand)]
+        command: PluginsCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -161,6 +167,77 @@ enum TasksCommand {
     Server {
         #[arg(long, default_value = "127.0.0.1:18790")]
         bind: String,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginsCommand {
+    /// List installed plugins
+    List {
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        #[arg(long = "include-disabled")]
+        include_disabled: bool,
+    },
+    /// Install a plugin from a local path
+    Add {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        link: bool,
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Enable an installed plugin
+    Enable {
+        #[arg(long = "id")]
+        id: String,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Disable an installed plugin
+    Disable {
+        #[arg(long = "id")]
+        id: String,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Remove an installed plugin
+    Remove {
+        #[arg(long = "id")]
+        id: String,
+        #[arg(long = "keep-files")]
+        keep_files: bool,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Re-sync plugin skills into Codex skills directory
+    Sync {
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Export merged MCP config from enabled plugins
+    ExportMcp {
+        #[arg(long = "output")]
+        output: Option<PathBuf>,
         #[arg(long = "state-dir")]
         state_dir: Option<PathBuf>,
         #[arg(long)]
@@ -274,6 +351,70 @@ fn main() -> Result<()> {
                 state_dir,
                 workspace,
             } => tasks::run_task_server(&bind, state_dir, workspace),
+        },
+        Commands::Plugins { command } => match command {
+            PluginsCommand::List {
+                state_dir,
+                workspace,
+                include_disabled,
+            } => {
+                let value = plugins::list_plugins_command(state_dir, workspace, include_disabled)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
+            PluginsCommand::Add {
+                path,
+                link,
+                source,
+                state_dir,
+                workspace,
+            } => {
+                let value = plugins::add_plugin_command(path, link, source, state_dir, workspace)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
+            PluginsCommand::Enable {
+                id,
+                state_dir,
+                workspace,
+            } => {
+                let value = plugins::enable_plugin_command(&id, state_dir, workspace)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
+            PluginsCommand::Disable {
+                id,
+                state_dir,
+                workspace,
+            } => {
+                let value = plugins::disable_plugin_command(&id, state_dir, workspace)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
+            PluginsCommand::Remove {
+                id,
+                keep_files,
+                state_dir,
+                workspace,
+            } => {
+                let value = plugins::remove_plugin_command(&id, keep_files, state_dir, workspace)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
+            PluginsCommand::Sync { state_dir, workspace } => {
+                let value = plugins::sync_plugins_command(state_dir, workspace)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
+            PluginsCommand::ExportMcp {
+                output,
+                state_dir,
+                workspace,
+            } => {
+                let value = plugins::export_mcp_command(output, state_dir, workspace)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
         },
     }
 }

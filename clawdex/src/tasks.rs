@@ -15,6 +15,7 @@ use tiny_http::{Method, Response, Server, StatusCode};
 
 use crate::app_server::{ApprovalHandler, ApprovalMode, CodexClient, EventSink, UserInputHandler};
 use crate::config::{load_config, ClawdConfig, ClawdPaths};
+use crate::runner::workspace_sandbox_policy;
 use crate::task_db::{Task, TaskStore};
 
 pub struct TaskEngine {
@@ -92,11 +93,16 @@ impl TaskEngine {
             .approval_policy
             .or_else(|| resolve_approval_policy(&self.cfg));
 
+        let sandbox_label = if self.paths.workspace_policy.read_only {
+            "read-only"
+        } else {
+            "workspace-write"
+        };
         let run = store.create_run(
             &task.id,
             "running",
             None,
-            Some("workspace-write".to_string()),
+            Some(sandbox_label.to_string()),
             approval_policy.map(|p| format!("{p:?}")),
         )?;
 
@@ -152,11 +158,12 @@ impl TaskEngine {
             );
         }
 
+        let sandbox_policy = workspace_sandbox_policy(&self.paths.workspace_policy)?;
         let outcome = client.run_turn(
             &thread_id,
             &prompt,
             approval_policy,
-            None,
+            sandbox_policy,
             Some(self.paths.workspace_dir.clone()),
         );
 
