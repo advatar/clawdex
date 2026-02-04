@@ -23,6 +23,7 @@
 - [x] Add cron schedule UI for creating/editing jobs (mac app)
 - [x] Add approvals + user-input UI (macOS) backed by daemon IPC
 - [x] Implement cron runner loop + per-job policy execution
+- [x] Stop Xcode signing team resets by moving Development Team config to a local override
 
 Notes:
 - `TEMPLATE_PACK.md` is the parity checklist: use it later to fill tool schemas, routing rules, and tests, then implement remaining gaps using the name `Clawdex`.

@@ -19,9 +19,9 @@ This is a starter macOS (SwiftUI) app shell that bundles and runs:
    - `xcodegen generate`
 
 3) Open `Clawdex.xcodeproj` in Xcode
-4) In `project.yml`:
-   - set `DEVELOPMENT_TEAM`
-   - set bundle identifiers under `PRODUCT_BUNDLE_IDENTIFIER`
+4) Signing + bundle IDs:
+   - create `Configs/Signing.local.xcconfig` and set `DEVELOPMENT_TEAM = YOURTEAMID`
+   - set bundle identifiers under `PRODUCT_BUNDLE_IDENTIFIER` in `project.yml`
 5) Build & Run
 
 ## Runtime contract

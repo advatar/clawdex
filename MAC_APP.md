@@ -88,8 +88,10 @@ This starter uses XcodeGen for reproducibility:
 - Open `Clawdex.xcodeproj`
 
 ### Step 2 — Set signing + bundle IDs
-Edit `project.yml`:
-- `DEVELOPMENT_TEAM: JS498PMF4Z` (replace if needed)
+Create `macClawdex/Configs/Signing.local.xcconfig` (ignored by git) and set:
+- `DEVELOPMENT_TEAM = YOURTEAMID`
+
+Edit `project.yml` if you need a different bundle ID:
 - `PRODUCT_BUNDLE_IDENTIFIER: com.yourcompany.Clawdex`
 
 ### Step 3 — Make sure Rust can build universal2

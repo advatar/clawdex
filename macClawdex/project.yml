@@ -4,10 +4,9 @@ options:
   deploymentTarget:
     macOS: "13.0"
 settings:
-  base:
-    DEVELOPMENT_TEAM: JS498PMF4Z
-    CODE_SIGN_STYLE: Automatic
-    CODE_SIGN_IDENTITY: "Apple Development"
+  configFiles:
+    Debug: Configs/Signing.xcconfig
+    Release: Configs/Signing.xcconfig
 targets:
   Clawdex:
     type: application

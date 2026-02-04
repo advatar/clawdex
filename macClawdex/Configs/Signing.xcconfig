@@ -1,0 +1,8 @@
+// Shared signing defaults for generated Xcode projects.
+// Create Configs/Signing.local.xcconfig to set your team:
+// DEVELOPMENT_TEAM = YOURTEAMID
+
+CODE_SIGN_STYLE = Automatic
+CODE_SIGN_IDENTITY = Apple Development
+
+#include? "Signing.local.xcconfig"
