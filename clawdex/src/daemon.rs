@@ -12,7 +12,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::config::{resolve_heartbeat_enabled, resolve_heartbeat_interval_ms, ClawdConfig, ClawdPaths};
-use crate::cron::{collect_due_jobs, drain_pending_jobs, job_prompt, job_session_key, record_run, CronJob};
+use crate::cron::{
+    collect_due_jobs, drain_pending_jobs, job_prompt, job_session_key, mark_job_running, record_run,
+    CronJob,
+};
 use crate::gateway;
 use crate::heartbeat;
 use crate::runner::{CodexRunner, CodexRunnerConfig};
@@ -107,19 +110,33 @@ fn execute_job(
     base_workspace_policy: &crate::config::WorkspacePolicy,
     base_workspace: &PathBuf,
 ) -> Result<()> {
-    let now = now_ms();
-    let Some(prompt) = job_prompt(job, now) else {
-        record_run(paths, &job.id, "skipped", "missing payload message", None)?;
+    let started_at = now_ms();
+    let Some(prompt) = job_prompt(job, started_at) else {
+        record_run(
+            paths,
+            &job.id,
+            "skipped",
+            "missing payload message",
+            Some(json!({ "applyState": false })),
+        )?;
         return Ok(());
     };
 
     let _lock = match acquire_job_lock(paths, &job.id)? {
         Some(lock) => lock,
         None => {
-            record_run(paths, &job.id, "skipped", "locked", None)?;
+            record_run(
+                paths,
+                &job.id,
+                "skipped",
+                "locked",
+                Some(json!({ "applyState": false })),
+            )?;
             return Ok(());
         }
     };
+
+    mark_job_running(paths, &job.id, started_at)?;
 
     let policy = job_policy_overrides(job);
     let approval_policy = policy.approval_policy.unwrap_or(base_approval_policy);
@@ -132,14 +149,12 @@ fn execute_job(
         runner.run_main_with_policy(&prompt, approval_policy, &workspace_policy, workspace.clone())?
     };
 
+    let ended_at = now_ms();
+    let duration_ms = ended_at.saturating_sub(started_at);
     let summary = outcome.message.trim().to_string();
-    record_run(
-        paths,
-        &job.id,
-        "completed",
-        "executed",
-        Some(json!({ "summary": summary })),
-    )?;
+    let mut status = "completed";
+    let mut reason = "executed";
+    let mut error: Option<String> = None;
 
     if should_deliver(job) {
         let args = json!({
@@ -148,18 +163,28 @@ fn execute_job(
             "to": job.to,
             "text": summary,
             "bestEffortDeliver": job.best_effort,
-            "idempotencyKey": format!("cron:{}:{}", job.id, now),
+            "idempotencyKey": format!("cron:{}:{}", job.id, started_at),
         });
         if let Err(err) = gateway::send_message(paths, &args) {
-            record_run(
-                paths,
-                &job.id,
-                "delivery_failed",
-                "message.send failed",
-                Some(json!({ "error": err.to_string() })),
-            )?;
+            let err_text = err.to_string();
+            error = Some(err_text.clone());
+            if job.best_effort {
+                status = "skipped";
+                reason = "message.send failed (best effort)";
+            } else {
+                status = "delivery_failed";
+                reason = "message.send failed";
+            }
         }
     }
+
+    let details = json!({
+        "summary": summary,
+        "error": error,
+        "runAtMs": started_at,
+        "durationMs": duration_ms
+    });
+    record_run(paths, &job.id, status, reason, Some(details))?;
 
     Ok(())
 }

@@ -49,8 +49,7 @@ fn cron_main_session_job_generates_system_event_prompt() -> Result<()> {
     let job = json!({
         "name": "main-job",
         "enabled": true,
-        "createdAtMs": now - 120000,
-        "schedule": { "kind": "every", "everyMs": 60000 },
+        "schedule": { "kind": "at", "atMs": now - 60000 },
         "sessionTarget": "main",
         "wakeMode": "now",
         "payload": { "kind": "systemEvent", "text": "ping" }
@@ -73,8 +72,7 @@ fn cron_isolated_job_uses_isolated_session_key() -> Result<()> {
     let job = json!({
         "name": "isolated-job",
         "enabled": true,
-        "createdAtMs": now - 120000,
-        "schedule": { "kind": "every", "everyMs": 60000 },
+        "schedule": { "kind": "at", "atMs": now - 60000 },
         "sessionTarget": "isolated",
         "wakeMode": "now",
         "payload": { "kind": "agentTurn", "message": "hello" }

@@ -16,11 +16,11 @@ Legend:
 - [x] Default `deleteAfterRun=true` for `at` schedules.
 - [~] Delivery parity: OpenClaw uses `delivery` object + legacy migration; Clawdex still uses `deliver/channel/to/bestEffort` fields.
 - [~] Patch merging: payload patches merge; still missing delivery object merge rules.
-- [ ] Store format parity (`{ version: 1, jobs: [...] }` vs array).
-- [ ] State fields parity (`state.nextRunAtMs`, `runningAtMs`, `lastStatus`, `lastError`, etc.).
-- [ ] cron.list sorting by `state.nextRunAtMs`.
+- [x] Store format parity (`{ version: 1, jobs: [...] }` vs array).
+- [x] State fields parity (`state.nextRunAtMs`, `runningAtMs`, `lastStatus`, `lastError`, etc.).
+- [x] cron.list sorting by `state.nextRunAtMs`.
 - [ ] cron.run semantics: OpenClaw executes job immediately and returns `{ ok, ran, reason? }`; Clawdex currently queues.
-- [ ] cron.runs log format parity (OpenClaw `action: finished` vs Clawdex run log schema).
+- [x] cron.runs log format parity (OpenClaw `action: finished` vs Clawdex run log schema).
 
 ## Memory
 - [~] Response shape parity: `startLine/endLine`, `snippet`, `provider/model`, `citations` now included. Chunking rules still differ.

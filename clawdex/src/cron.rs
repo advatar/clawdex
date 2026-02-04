@@ -81,28 +81,25 @@ impl ScheduleSpec {
         })
     }
 
-    fn next_run_after(&self, last_run_at_ms: Option<i64>, created_at_ms: Option<i64>, now: i64) -> Option<i64> {
+    fn next_run_after(
+        &self,
+        _last_run_at_ms: Option<i64>,
+        _created_at_ms: Option<i64>,
+        now: i64,
+    ) -> Option<i64> {
         match self.kind.as_str() {
             "at" => {
                 let at_ms = self.at_ms?;
-                if now < at_ms {
-                    Some(at_ms)
-                } else {
-                    None
-                }
+                Some(at_ms)
             }
             "every" => {
                 let every_ms = self.every_ms?;
-                let anchor = self
-                    .anchor_ms
-                    .or(created_at_ms)
-                    .or(last_run_at_ms)
-                    .unwrap_or(now);
+                let anchor = self.anchor_ms.unwrap_or(now);
                 if now < anchor {
                     return Some(anchor);
                 }
                 let elapsed = now.saturating_sub(anchor);
-                let intervals = elapsed / every_ms + 1;
+                let intervals = ((elapsed + every_ms - 1) / every_ms).max(1);
                 Some(anchor + intervals * every_ms)
             }
             "cron" => {
@@ -122,7 +119,8 @@ impl ScheduleSpec {
         }
     }
 
-    fn is_due(&self, last_run_at_ms: Option<i64>, created_at_ms: Option<i64>, now: i64) -> bool {
+    #[allow(dead_code)]
+    fn is_due(&self, last_run_at_ms: Option<i64>, _created_at_ms: Option<i64>, now: i64) -> bool {
         match self.kind.as_str() {
             "at" => {
                 let at_ms = match self.at_ms {
@@ -139,11 +137,7 @@ impl ScheduleSpec {
                     Some(value) => value,
                     None => return false,
                 };
-                let anchor = self
-                    .anchor_ms
-                    .or(created_at_ms)
-                    .or(last_run_at_ms)
-                    .unwrap_or(now);
+                let anchor = self.anchor_ms.or(last_run_at_ms).unwrap_or(now);
                 now.saturating_sub(anchor) >= every_ms
             }
             "cron" => {
@@ -393,13 +387,23 @@ fn load_jobs(paths: &ClawdPaths) -> Result<Vec<Value>> {
     };
     match value {
         Value::Array(items) => Ok(items),
-        _ => anyhow::bail!("cron jobs file is not an array"),
+        Value::Object(mut obj) => match obj.remove("jobs") {
+            Some(Value::Array(items)) => Ok(items),
+            _ => anyhow::bail!("cron jobs file missing jobs array"),
+        },
+        _ => anyhow::bail!("cron jobs file is not an array or object"),
     }
 }
 
 fn save_jobs(paths: &ClawdPaths, jobs: &[Value]) -> Result<()> {
     let path = jobs_path(paths);
-    write_json_value(&path, &Value::Array(jobs.to_vec()))
+    write_json_value(
+        &path,
+        &json!({
+            "version": 1,
+            "jobs": jobs
+        }),
+    )
 }
 
 fn ensure_job_id(map: &mut Map<String, Value>) -> String {
@@ -428,15 +432,24 @@ fn job_enabled(job: &Value) -> bool {
     job.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true)
 }
 
+fn job_running(job: &Value) -> bool {
+    job.get("state")
+        .and_then(|v| v.get("runningAtMs"))
+        .and_then(|v| v.as_i64())
+        .is_some()
+}
+
 fn job_created_at(job: &Value) -> Option<i64> {
     job.get("createdAtMs")
         .or_else(|| job.get("created_at_ms"))
+        .or_else(|| job.get("state").and_then(|v| v.get("createdAtMs")))
         .and_then(|v| v.as_i64())
 }
 
 fn job_last_run_at(job: &Value) -> Option<i64> {
     job.get("lastRunAtMs")
         .or_else(|| job.get("last_run_at_ms"))
+        .or_else(|| job.get("state").and_then(|v| v.get("lastRunAtMs")))
         .and_then(|v| v.as_i64())
 }
 
@@ -461,6 +474,41 @@ fn find_job_mut<'a>(jobs: &'a mut [Value], job_id: &str) -> Option<&'a mut Map<S
         }
     }
     None
+}
+
+fn job_state_mut(job: &mut Map<String, Value>) -> &mut Map<String, Value> {
+    let needs_init = match job.get("state") {
+        Some(Value::Object(_)) => false,
+        _ => true,
+    };
+    if needs_init {
+        job.insert("state".to_string(), Value::Object(Map::new()));
+    }
+    match job.get_mut("state") {
+        Some(Value::Object(map)) => map,
+        _ => unreachable!("state should be object"),
+    }
+}
+
+fn set_state_field(job: &mut Map<String, Value>, key: &str, value: Value) {
+    let state = job_state_mut(job);
+    state.insert(key.to_string(), value);
+}
+
+fn compute_next_run(job: &Value, now: i64) -> Option<i64> {
+    let schedule = job_schedule(job)?;
+    if schedule.kind == "at" {
+        let last_status = job
+            .get("state")
+            .and_then(|v| v.get("lastStatus"))
+            .and_then(|v| v.as_str());
+        let last_run = job_last_run_at(job);
+        if last_status == Some("ok") && last_run.is_some() {
+            return None;
+        }
+        return schedule.at_ms;
+    }
+    schedule.next_run_after(job_last_run_at(job), job_created_at(job), now)
 }
 
 fn payload_message(payload: &Value) -> Option<String> {
@@ -593,11 +641,46 @@ fn enqueue_pending_job(paths: &ClawdPaths, job: &CronJob) -> Result<()> {
 
 pub fn list_jobs(paths: &ClawdPaths, include_disabled: bool) -> Result<Value> {
     let jobs = load_jobs(paths)?;
-    let filtered: Vec<Value> = if include_disabled {
+    let now = now_ms();
+    let mut filtered: Vec<Value> = if include_disabled {
         jobs
     } else {
         jobs.into_iter().filter(job_enabled).collect()
     };
+
+    for job in &mut filtered {
+        let enabled = job_enabled(job);
+        let next_run = if enabled {
+            compute_next_run(job, now)
+        } else {
+            None
+        };
+        if let Value::Object(map) = job {
+            if enabled {
+                if let Some(next) = next_run {
+                    set_state_field(map, "nextRunAtMs", Value::Number(next.into()));
+                }
+            } else if let Some(Value::Object(state)) = map.get_mut("state") {
+                state.remove("nextRunAtMs");
+                state.remove("runningAtMs");
+            }
+        }
+    }
+
+    filtered.sort_by(|a, b| {
+        let a_next = a
+            .get("state")
+            .and_then(|v| v.get("nextRunAtMs"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(i64::MAX);
+        let b_next = b
+            .get("state")
+            .and_then(|v| v.get("nextRunAtMs"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(i64::MAX);
+        a_next.cmp(&b_next)
+    });
+
     Ok(json!({ "jobs": filtered }))
 }
 
@@ -612,7 +695,11 @@ pub fn status(paths: &ClawdPaths, enabled: bool) -> Result<Value> {
             continue;
         }
         if let Some(schedule) = job_schedule(job) {
-            let next = schedule.next_run_after(job_last_run_at(job), job_created_at(job), now);
+            let next = job
+                .get("state")
+                .and_then(|v| v.get("nextRunAtMs"))
+                .and_then(|v| v.as_i64())
+                .or_else(|| schedule.next_run_after(job_last_run_at(job), job_created_at(job), now));
             if let Some(next) = next {
                 next_wake = Some(next_wake.map_or(next, |current| current.min(next)));
             }
@@ -639,7 +726,14 @@ pub fn add_job(paths: &ClawdPaths, args: &Value) -> Result<Value> {
         .or_insert_with(|| Value::Bool(true));
     validate_job_spec(&map)?;
 
-    let value = Value::Object(map);
+    let mut value = Value::Object(map);
+    if job_enabled(&value) {
+        if let Some(next) = compute_next_run(&value, now) {
+            if let Value::Object(map) = &mut value {
+                set_state_field(map, "nextRunAtMs", Value::Number(next.into()));
+            }
+        }
+    }
     jobs.push(value.clone());
     save_jobs(paths, &jobs)?;
     Ok(value)
@@ -660,12 +754,32 @@ pub fn update_job(paths: &ClawdPaths, args: &Value) -> Result<Value> {
         if key == "payload" {
             let merged = merge_payload(job.get("payload").unwrap_or(&Value::Null), &value);
             job.insert(key, merged);
+        } else if key == "state" {
+            if let Value::Object(state_patch) = value {
+                let state = job_state_mut(job);
+                for (field, field_value) in state_patch {
+                    state.insert(field, field_value);
+                }
+            } else {
+                job.insert(key, value);
+            }
         } else {
             job.insert(key, value);
         }
     }
     job.insert("updatedAtMs".to_string(), Value::Number(now.into()));
     validate_job_spec(job)?;
+    let enabled = job_enabled(&Value::Object(job.clone()));
+    if enabled {
+        let value = Value::Object(job.clone());
+        if let Some(next) = compute_next_run(&value, now) {
+            set_state_field(job, "nextRunAtMs", Value::Number(next.into()));
+        }
+    } else {
+        let state = job_state_mut(job);
+        state.remove("nextRunAtMs");
+        state.remove("runningAtMs");
+    }
     let updated = Value::Object(job.clone());
     save_jobs(paths, &jobs)?;
     Ok(updated)
@@ -689,8 +803,134 @@ pub fn remove_job(paths: &ClawdPaths, args: &Value) -> Result<Value> {
 pub fn runs(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     let job_id = job_id_from_args(args).context("cron.runs requires jobId or id")?;
     let limit = args.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
-    let entries = read_json_lines(&runs_path(paths, &job_id), limit)?;
-    Ok(json!({ "entries": entries }))
+    let entries = read_json_lines(&runs_path(paths, &job_id), None)?;
+    let mut finished = Vec::new();
+    for entry in entries {
+        let action = entry.get("action").and_then(|v| v.as_str());
+        if action == Some("finished") {
+            finished.push(entry);
+            continue;
+        }
+        // Back-compat: map legacy statuses into finished entries.
+        if let Some(status) = entry.get("status").and_then(|v| v.as_str()) {
+            let mapped = match status {
+                "completed" => Some("ok"),
+                "delivery_failed" => Some("error"),
+                "skipped" => Some("skipped"),
+                _ => None,
+            };
+            if let Some(mapped_status) = mapped {
+                let mut updated = entry.clone();
+                updated["action"] = Value::String("finished".to_string());
+                updated["status"] = Value::String(mapped_status.to_string());
+                finished.push(updated);
+            }
+        }
+    }
+    if let Some(limit) = limit {
+        if finished.len() > limit {
+            finished = finished.split_off(finished.len() - limit);
+        }
+    }
+    Ok(json!({ "entries": finished }))
+}
+
+pub fn mark_job_running(paths: &ClawdPaths, job_id: &str, started_at: i64) -> Result<()> {
+    let mut jobs = load_jobs(paths)?;
+    let Some(job) = find_job_mut(&mut jobs, job_id) else {
+        return Ok(());
+    };
+    let state = job_state_mut(job);
+    state.insert("runningAtMs".to_string(), Value::Number(started_at.into()));
+    state.remove("lastError");
+    job.insert("updatedAtMs".to_string(), Value::Number(started_at.into()));
+    save_jobs(paths, &jobs)?;
+    Ok(())
+}
+
+fn update_job_state_from_run(
+    paths: &ClawdPaths,
+    job_id: &str,
+    status: &str,
+    run_at_ms: i64,
+    duration_ms: i64,
+    error: Option<String>,
+) -> Result<Option<i64>> {
+    let mut jobs = load_jobs(paths)?;
+    let Some(job) = find_job_mut(&mut jobs, job_id) else {
+        return Ok(None);
+    };
+    let schedule = job.get("schedule").and_then(ScheduleSpec::from_value);
+    let created_at = job.get("createdAtMs").and_then(|v| v.as_i64());
+    let duration_ms = duration_ms.max(0);
+    let ended_at = run_at_ms.saturating_add(duration_ms);
+
+    let state = job_state_mut(job);
+    state.remove("runningAtMs");
+    state.insert("lastRunAtMs".to_string(), Value::Number(run_at_ms.into()));
+    state.insert("lastStatus".to_string(), Value::String(status.to_string()));
+    state.insert(
+        "lastDurationMs".to_string(),
+        Value::Number(duration_ms.into()),
+    );
+    if let Some(err) = error.clone() {
+        state.insert("lastError".to_string(), Value::String(err));
+    } else {
+        state.remove("lastError");
+    }
+
+    job.insert("lastRunAtMs".to_string(), Value::Number(run_at_ms.into()));
+    job.insert("updatedAtMs".to_string(), Value::Number(ended_at.into()));
+
+    let mut delete_job = false;
+    let mut enabled = job.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let mut next_run: Option<i64> = None;
+
+    if let Some(schedule) = schedule {
+        if schedule.kind == "at" && status == "ok" {
+            if job
+                .get("deleteAfterRun")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                delete_job = true;
+            } else {
+                enabled = false;
+                job.insert("enabled".to_string(), Value::Bool(false));
+            }
+        }
+
+        if enabled {
+            next_run = schedule.next_run_after(Some(run_at_ms), created_at, ended_at);
+        }
+    }
+
+    if delete_job {
+        jobs.retain(|job| {
+            job.get("id")
+                .and_then(|v| v.as_str())
+                .map(|v| v != job_id)
+                .unwrap_or(true)
+        });
+        save_jobs(paths, &jobs)?;
+        return Ok(None);
+    }
+
+    if let Some(next) = next_run {
+        set_state_field(job, "nextRunAtMs", Value::Number(next.into()));
+    } else {
+        let state = job_state_mut(job);
+        state.remove("nextRunAtMs");
+    }
+
+    if !enabled {
+        let state = job_state_mut(job);
+        state.remove("nextRunAtMs");
+        state.remove("runningAtMs");
+    }
+
+    save_jobs(paths, &jobs)?;
+    Ok(next_run)
 }
 
 pub fn record_run(
@@ -701,15 +941,112 @@ pub fn record_run(
     details: Option<Value>,
 ) -> Result<Value> {
     let now = now_ms();
-    let entry = json!({
-        "runId": Uuid::new_v4().to_string(),
-        "jobId": job_id,
-        "startedAtMs": now,
-        "endedAtMs": now,
-        "status": status,
-        "reason": reason,
-        "details": details,
-    });
+    let (action, run_status) = match status {
+        "completed" => ("finished", Some("ok")),
+        "delivery_failed" => ("finished", Some("error")),
+        "skipped" => ("finished", Some("skipped")),
+        _ => ("queued", None),
+    };
+    let summary = details
+        .as_ref()
+        .and_then(|d| d.get("summary"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| {
+            if s.trim().is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
+        .or_else(|| {
+            if reason.trim().is_empty() {
+                None
+            } else {
+                Some(reason.to_string())
+            }
+        });
+    let mut error = if run_status == Some("error") {
+        details
+            .as_ref()
+            .and_then(|d| d.get("error"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+    if run_status == Some("error") && error.is_none() && !reason.trim().is_empty() {
+        error = Some(reason.to_string());
+    }
+
+    let mut run_at_ms = details
+        .as_ref()
+        .and_then(|d| d.get("runAtMs"))
+        .and_then(|v| v.as_i64());
+    let mut duration_ms = details
+        .as_ref()
+        .and_then(|d| d.get("durationMs"))
+        .and_then(|v| v.as_i64());
+    if run_status.is_some() {
+        if run_at_ms.is_none() {
+            run_at_ms = Some(now);
+        }
+        if duration_ms.is_none() {
+            duration_ms = Some(0);
+        }
+    }
+
+    let apply_state = details
+        .as_ref()
+        .and_then(|d| d.get("applyState"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let mut next_run_at_ms = details
+        .as_ref()
+        .and_then(|d| d.get("nextRunAtMs"))
+        .and_then(|v| v.as_i64());
+
+    if let (Some(status), true) = (run_status, apply_state) {
+        let run_at = run_at_ms.unwrap_or(now);
+        let duration = duration_ms.unwrap_or(0).max(0);
+        if let Some(next) =
+            update_job_state_from_run(paths, job_id, status, run_at, duration, error.clone())?
+        {
+            if next_run_at_ms.is_none() {
+                next_run_at_ms = Some(next);
+            }
+        }
+    }
+
+    let mut entry = Map::new();
+    entry.insert("ts".to_string(), Value::Number(now.into()));
+    entry.insert("jobId".to_string(), Value::String(job_id.to_string()));
+    entry.insert("action".to_string(), Value::String(action.to_string()));
+    if let Some(status) = run_status {
+        entry.insert("status".to_string(), Value::String(status.to_string()));
+    }
+    if let Some(summary) = summary {
+        if !summary.trim().is_empty() {
+            entry.insert("summary".to_string(), Value::String(summary));
+        }
+    }
+    if let Some(error) = error {
+        entry.insert("error".to_string(), Value::String(error));
+    }
+    if let Some(run_at_ms) = run_at_ms {
+        entry.insert("runAtMs".to_string(), Value::Number(run_at_ms.into()));
+    }
+    if let Some(duration_ms) = duration_ms {
+        entry.insert(
+            "durationMs".to_string(),
+            Value::Number(duration_ms.max(0).into()),
+        );
+    }
+    if let Some(next) = next_run_at_ms {
+        entry.insert("nextRunAtMs".to_string(), Value::Number(next.into()));
+    }
+
+    let entry = Value::Object(entry);
     append_json_line(&runs_path(paths, job_id), &entry)?;
     Ok(entry)
 }
@@ -738,22 +1075,45 @@ pub fn collect_due_jobs(
     let mut jobs = load_jobs(paths)?;
     let mut queued = Vec::new();
     let mut entries = Vec::new();
+    let mut dirty = false;
 
     for job in &mut jobs {
-        let Some(map) = job.as_object_mut() else { continue };
-        let enabled = map.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-        if !enabled {
+        if !job_enabled(job) {
             continue;
         }
+        if job_running(job) {
+            continue;
+        }
+        let Some(map) = job.as_object_mut() else { continue };
         let schedule = map
             .get("schedule")
             .and_then(ScheduleSpec::from_value);
         let last_run = map.get("lastRunAtMs").and_then(|v| v.as_i64());
         let created_at = map.get("createdAtMs").and_then(|v| v.as_i64());
-        let due = schedule
-            .as_ref()
-            .map(|s| s.is_due(last_run, created_at, now))
-            .unwrap_or(false);
+        let mut state_next = map
+            .get("state")
+            .and_then(|v| v.get("nextRunAtMs"))
+            .and_then(|v| v.as_i64());
+        if state_next.is_none() {
+            if let Some(schedule) = schedule.as_ref() {
+                let last_status = map
+                    .get("state")
+                    .and_then(|v| v.get("lastStatus"))
+                    .and_then(|v| v.as_str());
+                if !(schedule.kind == "at" && last_status == Some("ok")) {
+                    state_next = schedule.next_run_after(last_run, created_at, now);
+                    if let Some(next) = state_next {
+                        set_state_field(map, "nextRunAtMs", Value::Number(next.into()));
+                        dirty = true;
+                    }
+                }
+            }
+        }
+        let due = if mode == "force" {
+            true
+        } else {
+            state_next.map(|next| now >= next).unwrap_or(false)
+        };
 
         let job_id = map
             .get("id")
@@ -771,9 +1131,6 @@ pub fn collect_due_jobs(
             continue;
         }
 
-        map.insert("lastRunAtMs".to_string(), Value::Number(now.into()));
-        map.insert("updatedAtMs".to_string(), Value::Number(now.into()));
-
         let job_value = Value::Object(map.clone());
         if let Some(cron_job) = build_cron_job(&job_value) {
             let wake_mode = cron_job.wake_mode.clone();
@@ -786,17 +1143,21 @@ pub fn collect_due_jobs(
                 entries.push(entry);
                 queued.push(cron_job.clone());
             }
-            if cron_job.delete_after_run {
-                map.clear();
-            }
         } else {
-            let entry = record_run(paths, &job_id, "skipped", "invalid job", None)?;
+            let entry = record_run(
+                paths,
+                &job_id,
+                "skipped",
+                "invalid job",
+                Some(json!({ "applyState": false })),
+            )?;
             entries.push(entry);
         }
     }
 
-    jobs.retain(|job| !job.as_object().map(|m| m.is_empty()).unwrap_or(false));
-    save_jobs(paths, &jobs)?;
+    if dirty {
+        save_jobs(paths, &jobs)?;
+    }
     Ok((queued, entries))
 }
 
@@ -826,23 +1187,37 @@ mod tests {
         assert!(!spec.is_due(None, None, now));
         assert_eq!(spec.next_run_after(None, None, now), Some(at_ms));
         assert!(spec.is_due(None, None, at_ms));
-        assert_eq!(spec.next_run_after(None, None, at_ms), None);
+        assert_eq!(spec.next_run_after(None, None, at_ms), Some(at_ms));
     }
 
     #[test]
     fn every_schedule_due_and_next_run() {
-        let created_at = ms(2026, 2, 4, 12, 0, 0);
+        let anchor = ms(2026, 2, 4, 12, 0, 0);
+        let now = anchor + 10_000;
         let spec = ScheduleSpec::from_value(&json!({
+            "kind": "every",
+            "everyMs": 60_000,
+            "anchorMs": anchor
+        }))
+        .expect("schedule spec");
+
+        assert!(!spec.is_due(None, None, now));
+        assert!(spec.is_due(None, None, anchor + 60_000));
+        assert_eq!(
+            spec.next_run_after(None, None, now),
+            Some(anchor + 60_000)
+        );
+
+        let now = ms(2026, 2, 4, 12, 10, 0);
+        let spec_no_anchor = ScheduleSpec::from_value(&json!({
             "kind": "every",
             "everyMs": 60_000
         }))
         .expect("schedule spec");
-
-        assert!(!spec.is_due(None, Some(created_at), created_at + 30_000));
-        assert!(spec.is_due(None, Some(created_at), created_at + 60_000));
+        assert!(!spec_no_anchor.is_due(None, None, now));
         assert_eq!(
-            spec.next_run_after(None, Some(created_at), created_at + 30_000),
-            Some(created_at + 60_000)
+            spec_no_anchor.next_run_after(None, None, now),
+            Some(now + 60_000)
         );
     }
 
