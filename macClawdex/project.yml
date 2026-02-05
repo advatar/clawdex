@@ -3,10 +3,9 @@ options:
   bundleIdPrefix: se.advatar
   deploymentTarget:
     macOS: "13.0"
-settings:
-  configFiles:
-    Debug: Configs/Signing.xcconfig
-    Release: Configs/Signing.xcconfig
+configFiles:
+  Debug: Configs/Signing.xcconfig
+  Release: Configs/Signing.xcconfig
 targets:
   Clawdex:
     type: application
