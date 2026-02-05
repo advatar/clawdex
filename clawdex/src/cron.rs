@@ -1550,7 +1550,7 @@ pub fn run_jobs(paths: &ClawdPaths, args: &Value) -> Result<Value> {
 
     let job_value = load_job_value(paths, &job_id)?;
     let Some(job_value) = job_value else {
-        return Ok(json!({ "ok": false }));
+        return Ok(json!({ "ok": false, "ran": false, "reason": "not-found" }));
     };
 
     if !is_job_due_value(&job_value, now, forced) {

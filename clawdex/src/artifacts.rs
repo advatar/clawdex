@@ -337,7 +337,7 @@ fn finalize_artifact(
         recorded = true;
     }
 
-    Ok(json!({
+    let mut response = json!({
         "ok": true,
         "path": relative_path,
         "absolutePath": absolute_path,
@@ -345,8 +345,11 @@ fn finalize_artifact(
         "sha256": sha256,
         "sizeBytes": size_bytes,
         "recorded": recorded,
-        "taskRunId": run_id,
-    }))
+    });
+    if let Some(run_id) = run_id {
+        response["taskRunId"] = Value::String(run_id);
+    }
+    Ok(response)
 }
 
 fn resolve_task_run_id(explicit: Option<String>) -> Option<String> {

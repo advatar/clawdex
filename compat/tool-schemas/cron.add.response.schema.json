@@ -24,6 +24,16 @@
       },
       "additionalProperties": true
     },
+    "cronDelivery": {
+      "type": "object",
+      "properties": {
+        "mode": {"type": "string", "enum": ["none", "announce"]},
+        "channel": {"type": "string"},
+        "to": {"type": "string"},
+        "bestEffort": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
     "cronJobState": {
       "type": "object",
       "properties": {
@@ -51,6 +61,8 @@
     "wakeMode": {"type": "string", "enum": ["now", "next-heartbeat"]},
     "payload": {"$ref": "#/definitions/cronPayload"},
     "isolation": {"$ref": "#/definitions/cronIsolation"},
+    "delivery": {"$ref": "#/definitions/cronDelivery"},
+    "policy": {"type": "object"},
     "state": {"$ref": "#/definitions/cronJobState"}
   },
   "required": ["id", "name", "enabled", "schedule", "sessionTarget", "wakeMode", "payload"],

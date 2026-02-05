@@ -44,6 +44,7 @@ Legend:
 ## MCP Tool Shapes
 - [x] Tool request schemas aligned and validated against OpenClaw JSON schemas.
 - [x] Enforce OpenClaw validation errors (invalid request codes/messages).
+- [x] Enforce MCP response strictness (sanitize + validate tool outputs against response schemas).
 
 ## Tests
 - [x] P0 scenario tests (cron persistence, isolated session key, heartbeat suppression, memory line ranges, last-route delivery).

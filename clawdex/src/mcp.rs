@@ -545,7 +545,9 @@ fn handle_tool_call(
         _ => return Err(JsonRpcError::invalid_params(format!("unknown tool: {name}"))),
     };
 
-    Ok(success_result(result))
+    let sanitized = sanitize_tool_response(name, result);
+    validate_tool_response(name, &sanitized)?;
+    Ok(success_result(sanitized))
 }
 
 fn success_result(value: Value) -> Value {
@@ -557,6 +559,328 @@ fn success_result(value: Value) -> Value {
         meta: None,
     };
     serde_json::to_value(result).unwrap_or_else(|_| json!({}))
+}
+
+fn sanitize_tool_response(name: &str, value: Value) -> Value {
+    match name {
+        "cron.list" => sanitize_cron_list_response(value),
+        "cron.status" => sanitize_object_fields(
+            value,
+            &["enabled", "storePath", "jobs", "nextWakeAtMs"],
+        ),
+        "cron.add" | "cron.update" => sanitize_cron_job(value),
+        "cron.remove" => sanitize_object_fields(value, &["ok", "removed"]),
+        "cron.run" => sanitize_object_fields(value, &["ok", "ran", "reason"]),
+        "cron.runs" => sanitize_cron_runs_response(value),
+        "memory_search" => sanitize_memory_search_response(value),
+        "memory_get" => sanitize_object_fields(
+            value,
+            &[
+                "path",
+                "text",
+                "content",
+                "from",
+                "lines",
+                "totalLines",
+                "disabled",
+                "error",
+            ],
+        ),
+        "message.send" => sanitize_object_fields(
+            value,
+            &["ok", "dryRun", "result", "error", "bestEffort", "queued", "message"],
+        ),
+        "channels.list" => sanitize_channels_list_response(value),
+        "channels.resolve_target" => sanitize_object_fields(
+            value,
+            &[
+                "ok",
+                "channel",
+                "to",
+                "accountId",
+                "sessionKey",
+                "updatedAtMs",
+                "reason",
+            ],
+        ),
+        "heartbeat.wake" => sanitize_object_fields(value, &["ok", "reason"]),
+        "artifact.create_xlsx"
+        | "artifact.create_pptx"
+        | "artifact.create_docx"
+        | "artifact.create_pdf" => sanitize_object_fields(
+            value,
+            &[
+                "ok",
+                "path",
+                "absolutePath",
+                "mime",
+                "sha256",
+                "sizeBytes",
+                "recorded",
+                "taskRunId",
+            ],
+        ),
+        _ => value,
+    }
+}
+
+fn sanitize_cron_list_response(value: Value) -> Value {
+    let mut out = Map::new();
+    if let Value::Object(map) = value {
+        if let Some(Value::Array(jobs)) = map.get("jobs") {
+            let sanitized = jobs.iter().map(sanitize_cron_job_ref).collect::<Vec<_>>();
+            out.insert("jobs".to_string(), Value::Array(sanitized));
+        }
+    }
+    Value::Object(out)
+}
+
+fn sanitize_cron_runs_response(value: Value) -> Value {
+    let mut out = Map::new();
+    if let Value::Object(map) = value {
+        if let Some(Value::Array(entries)) = map.get("entries") {
+            let sanitized = entries
+                .iter()
+                .map(|entry| sanitize_object_fields_ref(
+                    entry,
+                    &[
+                        "ts",
+                        "jobId",
+                        "action",
+                        "status",
+                        "error",
+                        "summary",
+                        "runAtMs",
+                        "durationMs",
+                        "nextRunAtMs",
+                    ],
+                ))
+                .collect::<Vec<_>>();
+            out.insert("entries".to_string(), Value::Array(sanitized));
+        }
+    }
+    Value::Object(out)
+}
+
+fn sanitize_cron_job(value: Value) -> Value {
+    if let Value::Object(map) = value {
+        Value::Object(sanitize_cron_job_map(&map))
+    } else {
+        value
+    }
+}
+
+fn sanitize_cron_job_ref(value: &Value) -> Value {
+    if let Value::Object(map) = value {
+        Value::Object(sanitize_cron_job_map(map))
+    } else {
+        value.clone()
+    }
+}
+
+fn sanitize_cron_job_map(map: &Map<String, Value>) -> Map<String, Value> {
+    let mut out = Map::new();
+    insert_field(&mut out, map, "id");
+    insert_non_null_field(&mut out, map, "agentId");
+    insert_field(&mut out, map, "name");
+    insert_field(&mut out, map, "description");
+    insert_field(&mut out, map, "enabled");
+    insert_field(&mut out, map, "deleteAfterRun");
+    insert_field(&mut out, map, "createdAtMs");
+    insert_field(&mut out, map, "updatedAtMs");
+    if let Some(schedule) = map.get("schedule") {
+        out.insert("schedule".to_string(), sanitize_cron_schedule(schedule));
+    }
+    insert_field(&mut out, map, "sessionTarget");
+    insert_field(&mut out, map, "wakeMode");
+    if let Some(payload) = map.get("payload") {
+        out.insert("payload".to_string(), sanitize_cron_payload(payload));
+    }
+    if let Some(isolation) = map.get("isolation") {
+        out.insert("isolation".to_string(), sanitize_cron_isolation(isolation));
+    }
+    if let Some(state) = map.get("state") {
+        out.insert("state".to_string(), sanitize_cron_state(state));
+    }
+    if let Some(delivery) = map.get("delivery") {
+        out.insert("delivery".to_string(), sanitize_cron_delivery(delivery));
+    }
+    if let Some(policy) = map.get("policy") {
+        out.insert("policy".to_string(), policy.clone());
+    }
+    out
+}
+
+fn sanitize_cron_schedule(value: &Value) -> Value {
+    if let Value::Object(map) = value {
+        let mut out = Map::new();
+        if let Some(kind) = map.get("kind").and_then(|v| v.as_str()) {
+            out.insert("kind".to_string(), Value::String(kind.to_string()));
+            match kind {
+                "at" => {
+                    insert_field(&mut out, map, "atMs");
+                }
+                "every" => {
+                    insert_field(&mut out, map, "everyMs");
+                    insert_field(&mut out, map, "anchorMs");
+                }
+                "cron" => {
+                    insert_field(&mut out, map, "expr");
+                    insert_field(&mut out, map, "tz");
+                }
+                _ => {}
+            }
+        }
+        return Value::Object(out);
+    }
+    value.clone()
+}
+
+fn sanitize_cron_payload(value: &Value) -> Value {
+    if let Value::Object(map) = value {
+        let mut out = Map::new();
+        if let Some(kind) = map.get("kind").and_then(|v| v.as_str()) {
+            out.insert("kind".to_string(), Value::String(kind.to_string()));
+            match kind {
+                "systemEvent" => {
+                    insert_field(&mut out, map, "text");
+                }
+                "agentTurn" => {
+                    insert_field(&mut out, map, "message");
+                    insert_field(&mut out, map, "model");
+                    insert_field(&mut out, map, "thinking");
+                    insert_field(&mut out, map, "timeoutSeconds");
+                    insert_field(&mut out, map, "allowUnsafeExternalContent");
+                    insert_field(&mut out, map, "deliver");
+                    insert_field(&mut out, map, "channel");
+                    insert_field(&mut out, map, "to");
+                    insert_field(&mut out, map, "bestEffortDeliver");
+                    insert_field(&mut out, map, "policy");
+                }
+                _ => {}
+            }
+        }
+        return Value::Object(out);
+    }
+    value.clone()
+}
+
+fn sanitize_cron_isolation(value: &Value) -> Value {
+    sanitize_object_fields_ref(value, &["postToMainPrefix", "postToMainMode", "postToMainMaxChars"])
+}
+
+fn sanitize_cron_state(value: &Value) -> Value {
+    sanitize_object_fields_ref(
+        value,
+        &[
+            "nextRunAtMs",
+            "runningAtMs",
+            "lastRunAtMs",
+            "lastStatus",
+            "lastError",
+            "lastDurationMs",
+        ],
+    )
+}
+
+fn sanitize_cron_delivery(value: &Value) -> Value {
+    sanitize_object_fields_ref(value, &["mode", "channel", "to", "bestEffort"])
+}
+
+fn sanitize_memory_search_response(value: Value) -> Value {
+    let mut out = Map::new();
+    if let Value::Object(map) = value {
+        if let Some(Value::Array(results)) = map.get("results") {
+            let sanitized = results
+                .iter()
+                .map(|entry| {
+                    sanitize_object_fields_ref(
+                        entry,
+                        &[
+                            "path",
+                            "startLine",
+                            "endLine",
+                            "lineStart",
+                            "lineEnd",
+                            "score",
+                            "snippet",
+                            "source",
+                            "citation",
+                        ],
+                    )
+                })
+                .collect::<Vec<_>>();
+            out.insert("results".to_string(), Value::Array(sanitized));
+        }
+        for key in ["provider", "model", "fallback", "citations", "disabled", "error"] {
+            if let Some(value) = map.get(key) {
+                out.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+fn sanitize_channels_list_response(value: Value) -> Value {
+    let mut out = Map::new();
+    if let Value::Object(map) = value {
+        if let Some(Value::Array(channels)) = map.get("channels") {
+            let sanitized = channels
+                .iter()
+                .map(|entry| {
+                    sanitize_object_fields_ref(
+                        entry,
+                        &["channel", "to", "accountId", "sessionKey", "updatedAtMs"],
+                    )
+                })
+                .collect::<Vec<_>>();
+            out.insert("channels".to_string(), Value::Array(sanitized));
+        }
+        insert_field(&mut out, &map, "disabled");
+        insert_field(&mut out, &map, "count");
+        insert_field(&mut out, &map, "routeTtlMs");
+    }
+    Value::Object(out)
+}
+
+fn sanitize_object_fields(value: Value, keys: &[&str]) -> Value {
+    if let Value::Object(map) = value {
+        Value::Object(sanitize_object_fields_map(&map, keys))
+    } else {
+        value
+    }
+}
+
+fn sanitize_object_fields_ref(value: &Value, keys: &[&str]) -> Value {
+    if let Value::Object(map) = value {
+        Value::Object(sanitize_object_fields_map(map, keys))
+    } else {
+        value.clone()
+    }
+}
+
+fn sanitize_object_fields_map(map: &Map<String, Value>, keys: &[&str]) -> Map<String, Value> {
+    let mut out = Map::new();
+    for key in keys {
+        if let Some(value) = map.get(*key) {
+            out.insert((*key).to_string(), value.clone());
+        }
+    }
+    out
+}
+
+fn insert_field(target: &mut Map<String, Value>, source: &Map<String, Value>, key: &str) {
+    if let Some(value) = source.get(key) {
+        target.insert(key.to_string(), value.clone());
+    }
+}
+
+fn insert_non_null_field(target: &mut Map<String, Value>, source: &Map<String, Value>, key: &str) {
+    if let Some(value) = source.get(key) {
+        if !value.is_null() {
+            target.insert(key.to_string(), value.clone());
+        }
+    }
 }
 
 fn validate_tool_arguments(name: &str, arguments: &Value) -> std::result::Result<(), JsonRpcError> {
@@ -595,6 +919,47 @@ fn validate_tool_arguments(name: &str, arguments: &Value) -> std::result::Result
             .map(|err| err.to_string())
             .unwrap_or_else(|| "invalid params".to_string());
         return Err(JsonRpcError::invalid_params(message));
+    }
+    Ok(())
+}
+
+fn validate_tool_response(name: &str, result: &Value) -> std::result::Result<(), JsonRpcError> {
+    let schema = match name {
+        "cron.add" => Some(CRON_ADD_RESPONSE_SCHEMA),
+        "cron.update" => Some(CRON_UPDATE_RESPONSE_SCHEMA),
+        "cron.list" => Some(CRON_LIST_RESPONSE_SCHEMA),
+        "cron.remove" => Some(CRON_REMOVE_RESPONSE_SCHEMA),
+        "cron.run" => Some(CRON_RUN_RESPONSE_SCHEMA),
+        "cron.runs" => Some(CRON_RUNS_RESPONSE_SCHEMA),
+        "cron.status" => Some(CRON_STATUS_RESPONSE_SCHEMA),
+        "memory_search" => Some(MEMORY_SEARCH_RESPONSE_SCHEMA),
+        "memory_get" => Some(MEMORY_GET_RESPONSE_SCHEMA),
+        "message.send" => Some(MESSAGE_SEND_RESPONSE_SCHEMA),
+        "channels.list" => Some(CHANNELS_LIST_RESPONSE_SCHEMA),
+        "channels.resolve_target" => Some(CHANNELS_RESOLVE_RESPONSE_SCHEMA),
+        "heartbeat.wake" => Some(HEARTBEAT_WAKE_RESPONSE_SCHEMA),
+        "artifact.create_xlsx" => Some(ARTIFACT_CREATE_XLSX_RESPONSE_SCHEMA),
+        "artifact.create_pptx" => Some(ARTIFACT_CREATE_PPTX_RESPONSE_SCHEMA),
+        "artifact.create_docx" => Some(ARTIFACT_CREATE_DOCX_RESPONSE_SCHEMA),
+        "artifact.create_pdf" => Some(ARTIFACT_CREATE_PDF_RESPONSE_SCHEMA),
+        _ => None,
+    };
+    let Some(schema) = schema else {
+        return Ok(());
+    };
+    let schema_value = schema_value(schema);
+    let compiled = JSONSchema::options()
+        .with_draft(Draft::Draft7)
+        .compile(&schema_value)
+        .map_err(|err| JsonRpcError::internal(format!("response schema compile failed: {err}")))?;
+    if let Err(mut errors) = compiled.validate(result) {
+        let message = errors
+            .next()
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "invalid response".to_string());
+        return Err(JsonRpcError::internal(format!(
+            "tool response invalid for {name}: {message}"
+        )));
     }
     Ok(())
 }
@@ -786,7 +1151,7 @@ fn parse_at_ms_value(value: &Value) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     #[test]
     fn validates_memory_search_aliases() {
@@ -821,6 +1186,125 @@ mod tests {
             ]
         });
         assert!(validate_tool_arguments("artifact.create_xlsx", &args).is_ok());
+    }
+
+    fn sample_cron_job() -> Value {
+        json!({
+            "id": "job-1",
+            "name": "job",
+            "enabled": true,
+            "schedule": { "kind": "at", "atMs": 123 },
+            "sessionTarget": "main",
+            "wakeMode": "next-heartbeat",
+            "payload": { "kind": "systemEvent", "text": "hi" },
+            "state": { "nextRunAtMs": 123 }
+        })
+    }
+
+    fn assert_response_ok(name: &str, value: Value) {
+        let sanitized = sanitize_tool_response(name, value);
+        if let Err(err) = validate_tool_response(name, &sanitized) {
+            panic!("response validation failed for {name}: {}", err.message);
+        }
+    }
+
+    #[test]
+    fn validates_sample_tool_responses() {
+        assert_response_ok("cron.list", json!({ "jobs": [sample_cron_job()] }));
+        assert_response_ok(
+            "cron.status",
+            json!({ "enabled": true, "storePath": "/tmp/jobs.json", "jobs": 1, "nextWakeAtMs": 123 }),
+        );
+        assert_response_ok("cron.add", sample_cron_job());
+        assert_response_ok("cron.update", sample_cron_job());
+        assert_response_ok("cron.remove", json!({ "ok": true, "removed": true }));
+        assert_response_ok("cron.run", json!({ "ok": true, "ran": true }));
+        assert_response_ok(
+            "cron.runs",
+            json!({
+                "entries": [
+                    { "ts": 1, "jobId": "job-1", "action": "finished", "status": "ok" }
+                ]
+            }),
+        );
+        assert_response_ok(
+            "memory_search",
+            json!({
+                "results": [
+                    {
+                        "path": "memory/2026-02-04.md",
+                        "startLine": 1,
+                        "endLine": 2,
+                        "lineStart": 1,
+                        "lineEnd": 2,
+                        "score": 0.5,
+                        "snippet": "hi",
+                        "source": "memory"
+                    }
+                ],
+                "citations": "auto"
+            }),
+        );
+        assert_response_ok(
+            "memory_get",
+            json!({ "path": "MEMORY.md", "text": "hi", "content": "hi", "from": 1, "lines": 1 }),
+        );
+        assert_response_ok("message.send", json!({ "ok": true, "result": { "id": "msg" } }));
+        assert_response_ok(
+            "channels.list",
+            json!({
+                "channels": [
+                    {
+                        "channel": "slack",
+                        "to": "U1",
+                        "accountId": null,
+                        "sessionKey": "slack:U1",
+                        "updatedAtMs": 1
+                    }
+                ],
+                "disabled": false,
+                "count": 1,
+                "routeTtlMs": 1000
+            }),
+        );
+        assert_response_ok(
+            "channels.resolve_target",
+            json!({
+                "ok": true,
+                "channel": "slack",
+                "to": "U1",
+                "accountId": null,
+                "sessionKey": "slack:U1",
+                "updatedAtMs": 1
+            }),
+        );
+        assert_response_ok("heartbeat.wake", json!({ "ok": true }));
+        assert_response_ok(
+            "artifact.create_xlsx",
+            json!({
+                "ok": true,
+                "path": "reports/demo.xlsx",
+                "absolutePath": "/tmp/reports/demo.xlsx",
+                "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "sha256": "abc",
+                "sizeBytes": 123,
+                "recorded": false,
+                "taskRunId": "run-1"
+            }),
+        );
+    }
+
+    #[test]
+    fn sanitizes_message_send_extras() {
+        let sanitized = sanitize_tool_response(
+            "message.send",
+            json!({ "ok": true, "deduped": true, "extra": "nope" }),
+        );
+        let Value::Object(map) = sanitized else {
+            panic!("expected object");
+        };
+        assert!(map.get("deduped").is_none());
+        assert!(map.get("extra").is_none());
     }
 }
 

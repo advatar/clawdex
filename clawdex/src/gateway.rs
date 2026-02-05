@@ -468,12 +468,15 @@ pub fn list_channels(paths: &ClawdPaths) -> Result<Value> {
     let store = RouteStore::load(paths)?;
     let cfg = load_gateway_config(paths)?;
     if !gateway_configured(&cfg) {
-        return Ok(json!({
+        let mut response = json!({
             "channels": [],
             "count": 0,
-            "routeTtlMs": cfg.route_ttl_ms,
             "disabled": true,
-        }));
+        });
+        if let Some(ttl) = cfg.route_ttl_ms {
+            response["routeTtlMs"] = Value::Number(ttl.into());
+        }
+        return Ok(response);
     }
     let cutoff = route_cutoff_ms(&cfg);
 
@@ -498,12 +501,15 @@ pub fn list_channels(paths: &ClawdPaths) -> Result<Value> {
         b_ts.cmp(&a_ts)
     });
 
-    Ok(json!({
+    let mut response = json!({
         "channels": entries,
         "count": entries.len(),
-        "routeTtlMs": cfg.route_ttl_ms,
         "disabled": false,
-    }))
+    });
+    if let Some(ttl) = cfg.route_ttl_ms {
+        response["routeTtlMs"] = Value::Number(ttl.into());
+    }
+    Ok(response)
 }
 
 pub fn resolve_target(paths: &ClawdPaths, args: &Value) -> Result<Value> {
