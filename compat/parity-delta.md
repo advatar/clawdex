@@ -42,7 +42,7 @@ Legend:
 - [x] Gateway protocol parity (WebSocket framing / server-methods behavior).
 
 ## MCP Tool Shapes
-- [~] Tool request schemas aligned; response shapes include required fields but may include extra fields.
+- [x] Tool request schemas aligned and validated against OpenClaw JSON schemas.
 - [x] Enforce OpenClaw validation errors (invalid request codes/messages).
 
 ## Tests

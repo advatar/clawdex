@@ -1,9 +1,10 @@
 use std::io::{self, BufRead, Write};
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use codex_protocol::mcp::{CallToolResult, Tool};
+use jsonschema::{Draft, JSONSchema};
 
 use crate::config::{
     resolve_cron_enabled, resolve_heartbeat_enabled, ClawdConfig, ClawdPaths,
@@ -369,6 +370,7 @@ fn handle_tool_call(
     if !arguments.is_object() {
         return Err(JsonRpcError::invalid_params("arguments must be an object"));
     }
+    validate_tool_arguments(name, &arguments)?;
 
     let result = match name {
         "cron.list" => cron::list_jobs(
@@ -490,6 +492,247 @@ fn success_result(value: Value) -> Value {
         meta: None,
     };
     serde_json::to_value(result).unwrap_or_else(|_| json!({}))
+}
+
+fn validate_tool_arguments(name: &str, arguments: &Value) -> std::result::Result<(), JsonRpcError> {
+    let schema = match name {
+        "cron.add" => Some(CRON_ADD_REQUEST_SCHEMA),
+        "cron.update" => Some(CRON_UPDATE_REQUEST_SCHEMA),
+        "cron.list" => Some(CRON_LIST_REQUEST_SCHEMA),
+        "cron.remove" => Some(CRON_REMOVE_REQUEST_SCHEMA),
+        "cron.run" => Some(CRON_RUN_REQUEST_SCHEMA),
+        "cron.runs" => Some(CRON_RUNS_REQUEST_SCHEMA),
+        "cron.status" => Some(CRON_STATUS_REQUEST_SCHEMA),
+        "memory_search" => Some(MEMORY_SEARCH_REQUEST_SCHEMA),
+        "memory_get" => Some(MEMORY_GET_REQUEST_SCHEMA),
+        "message.send" => Some(MESSAGE_SEND_REQUEST_SCHEMA),
+        "channels.list" => Some(CHANNELS_LIST_REQUEST_SCHEMA),
+        "channels.resolve_target" => Some(CHANNELS_RESOLVE_REQUEST_SCHEMA),
+        "heartbeat.wake" => Some(HEARTBEAT_WAKE_REQUEST_SCHEMA),
+        _ => None,
+    };
+    let Some(schema) = schema else {
+        return Ok(());
+    };
+    let normalized = normalize_args_for_validation(name, arguments);
+    let schema_value = schema_value(schema);
+    let compiled = JSONSchema::options()
+        .with_draft(Draft::Draft7)
+        .compile(&schema_value)
+        .map_err(|err| JsonRpcError::internal(format!("schema compile failed: {err}")))?;
+    if let Err(mut errors) = compiled.validate(&normalized) {
+        let message = errors
+            .next()
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "invalid params".to_string());
+        return Err(JsonRpcError::invalid_params(message));
+    }
+    Ok(())
+}
+
+fn normalize_args_for_validation(name: &str, arguments: &Value) -> Value {
+    let mut value = unwrap_job_wrapper(arguments).unwrap_or(arguments.clone());
+    let Some(map) = value.as_object_mut() else {
+        return value;
+    };
+
+    match name {
+        "cron.add" => {
+            normalize_cron_job_for_validation(map, true);
+        }
+        "cron.update" => {
+            normalize_cron_job_for_validation(map, false);
+        }
+        "memory_search" => {
+            normalize_aliases(
+                map,
+                &[
+                    ("max_results", "maxResults"),
+                    ("min_score", "minScore"),
+                    ("session_key", "sessionKey"),
+                ],
+            );
+        }
+        "message.send" => {
+            normalize_aliases(
+                map,
+                &[
+                    ("best_effort", "bestEffort"),
+                    ("dry_run", "dryRun"),
+                    ("account_id", "accountId"),
+                    ("session_key", "sessionKey"),
+                    ("idempotency_key", "idempotencyKey"),
+                ],
+            );
+        }
+        "channels.resolve_target" => {
+            normalize_aliases(map, &[("account_id", "accountId")]);
+        }
+        _ => {}
+    }
+
+    value
+}
+
+fn unwrap_job_wrapper(arguments: &Value) -> Option<Value> {
+    let Some(map) = arguments.as_object() else {
+        return None;
+    };
+    if let Some(value) = map.get("data").and_then(|v| v.as_object()) {
+        return Some(Value::Object(value.clone()));
+    }
+    if let Some(value) = map.get("job").and_then(|v| v.as_object()) {
+        return Some(Value::Object(value.clone()));
+    }
+    None
+}
+
+fn normalize_aliases(map: &mut Map<String, Value>, pairs: &[(&str, &str)]) {
+    for (from, to) in pairs {
+        if map.contains_key(*to) {
+            continue;
+        }
+        if let Some(value) = map.remove(*from) {
+            map.insert((*to).to_string(), value);
+        }
+    }
+}
+
+fn normalize_cron_job_for_validation(map: &mut Map<String, Value>, apply_defaults: bool) {
+    if let Some(Value::Object(schedule)) = map.get_mut("schedule") {
+        normalize_cron_schedule_for_validation(schedule);
+    }
+    let has_session_target = map.contains_key("sessionTarget");
+    if let Some(Value::Object(payload)) = map.get_mut("payload") {
+        normalize_cron_payload_for_validation(payload);
+        if apply_defaults && !has_session_target {
+            if let Some(kind) = payload.get("kind").and_then(|v| v.as_str()) {
+                let target = match kind {
+                    "systemEvent" => Some("main"),
+                    "agentTurn" => Some("isolated"),
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    map.insert("sessionTarget".to_string(), Value::String(target.to_string()));
+                }
+            }
+        }
+    }
+
+    if apply_defaults {
+        map.entry("enabled".to_string())
+            .or_insert_with(|| Value::Bool(true));
+        map.entry("wakeMode".to_string())
+            .or_insert_with(|| Value::String("next-heartbeat".to_string()));
+    }
+
+    if let Some(Value::Object(patch)) = map.get_mut("patch") {
+        if let Some(Value::Object(schedule)) = patch.get_mut("schedule") {
+            normalize_cron_schedule_for_validation(schedule);
+        }
+        if let Some(Value::Object(payload)) = patch.get_mut("payload") {
+            normalize_cron_payload_for_validation(payload);
+        }
+    }
+}
+
+fn normalize_cron_payload_for_validation(payload: &mut Map<String, Value>) {
+    if !payload.contains_key("channel") {
+        if let Some(Value::String(provider)) = payload.get("provider") {
+            if !provider.trim().is_empty() {
+                payload.insert("channel".to_string(), Value::String(provider.clone()));
+            }
+        }
+    }
+}
+
+fn normalize_cron_schedule_for_validation(schedule: &mut Map<String, Value>) {
+    normalize_aliases(
+        schedule,
+        &[
+            ("every_ms", "everyMs"),
+            ("anchor_ms", "anchorMs"),
+            ("cron", "expr"),
+            ("timezone", "tz"),
+            ("timeZone", "tz"),
+        ],
+    );
+
+    if schedule.get("kind").and_then(|v| v.as_str()).is_none() {
+        let kind = if schedule.contains_key("atMs") || schedule.contains_key("at") {
+            Some("at")
+        } else if schedule.contains_key("everyMs") {
+            Some("every")
+        } else if schedule.contains_key("expr") {
+            Some("cron")
+        } else {
+            None
+        };
+        if let Some(kind) = kind {
+            schedule.insert("kind".to_string(), Value::String(kind.to_string()));
+        }
+    }
+
+    if !schedule.contains_key("atMs") {
+        if let Some(at) = schedule.get("at") {
+            if let Some(ms) = parse_at_ms_value(at) {
+                schedule.insert("atMs".to_string(), Value::Number(ms.into()));
+            }
+        }
+    } else if let Some(Value::String(raw)) = schedule.get("atMs").cloned() {
+        if let Some(ms) = parse_at_ms_value(&Value::String(raw)) {
+            schedule.insert("atMs".to_string(), Value::Number(ms.into()));
+        }
+    }
+}
+
+fn parse_at_ms_value(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(num) => num.as_i64(),
+        Value::String(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            if let Ok(ms) = trimmed.parse::<i64>() {
+                return Some(ms);
+            }
+            chrono::DateTime::parse_from_rfc3339(trimmed)
+                .ok()
+                .map(|dt| dt.timestamp_millis())
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn validates_memory_search_aliases() {
+        let args = json!({ "query": "hi", "max_results": 5 });
+        assert!(validate_tool_arguments("memory_search", &args).is_ok());
+    }
+
+    #[test]
+    fn validates_cron_add_wrapped_defaults() {
+        let args = json!({
+            "job": {
+                "name": "job",
+                "schedule": { "at": "2026-02-04T12:00:00Z" },
+                "payload": { "kind": "agentTurn", "message": "hi" }
+            }
+        });
+        assert!(validate_tool_arguments("cron.add", &args).is_ok());
+    }
+
+    #[test]
+    fn validates_message_send_requires_channel_and_to() {
+        let args = json!({ "text": "hi" });
+        assert!(validate_tool_arguments("message.send", &args).is_err());
+    }
 }
 
 fn write_jsonrpc_result(stdout: &mut impl Write, id: Value, result: Value) -> Result<()> {

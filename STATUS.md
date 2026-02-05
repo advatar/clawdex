@@ -1,5 +1,6 @@
 # Status
 
+- [x] Validate MCP tool arguments against OpenClaw JSON schemas
 - [x] Expose OpenClaw JSON Schemas in MCP tool definitions
 - [x] Default memory embeddings provider/model from Codex config overrides
 - [x] Add parity tests for cron normalization edge cases + delivery rules
