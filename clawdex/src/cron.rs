@@ -1771,4 +1771,78 @@ mod tests {
         let schedule = normalized.get("schedule").and_then(|v| v.as_object()).unwrap();
         assert_eq!(schedule.get("kind").and_then(|v| v.as_str()), Some("every"));
     }
+
+    #[test]
+    fn normalize_schedule_at_string_coerces_at_ms() {
+        let input = json!({
+            "name": "job",
+            "schedule": { "at": "2026-02-04T12:00:00Z" },
+            "payload": { "kind": "agentTurn", "message": "hi" }
+        });
+        let normalized = super::normalize_job_input(&input, true).expect("normalize");
+        let schedule = normalized.get("schedule").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(schedule.get("kind").and_then(|v| v.as_str()), Some("at"));
+        assert!(schedule.get("atMs").is_some());
+        assert!(schedule.get("at").is_none());
+    }
+
+    #[test]
+    fn normalize_schedule_expr_and_tz() {
+        let input = json!({
+            "name": "job",
+            "schedule": { "expr": "0 * * * * * *", "tz": "America/Los_Angeles" },
+            "payload": { "kind": "systemEvent", "text": "ping" }
+        });
+        let normalized = super::normalize_job_input(&input, true).expect("normalize");
+        let schedule = normalized.get("schedule").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(schedule.get("kind").and_then(|v| v.as_str()), Some("cron"));
+        assert_eq!(schedule.get("cron").and_then(|v| v.as_str()), Some("0 * * * * * *"));
+        assert_eq!(
+            schedule.get("timezone").and_then(|v| v.as_str()),
+            Some("America/Los_Angeles")
+        );
+    }
+
+    #[test]
+    fn normalize_delivery_from_legacy_payload() {
+        let input = json!({
+            "name": "job",
+            "schedule": { "everyMs": 60000 },
+            "payload": {
+                "kind": "agentTurn",
+                "message": "hi",
+                "deliver": true,
+                "channel": "Slack",
+                "to": "U123",
+                "bestEffortDeliver": true
+            }
+        });
+        let normalized = super::normalize_job_input(&input, true).expect("normalize");
+        let delivery = normalized.get("delivery").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(delivery.get("mode").and_then(|v| v.as_str()), Some("announce"));
+        assert_eq!(delivery.get("channel").and_then(|v| v.as_str()), Some("slack"));
+        assert_eq!(delivery.get("to").and_then(|v| v.as_str()), Some("U123"));
+        assert_eq!(delivery.get("bestEffort").and_then(|v| v.as_bool()), Some(true));
+
+        let payload = normalized.get("payload").and_then(|v| v.as_object()).unwrap();
+        assert!(payload.get("deliver").is_none());
+        assert!(payload.get("channel").is_none());
+        assert!(payload.get("to").is_none());
+        assert!(payload.get("bestEffortDeliver").is_none());
+    }
+
+    #[test]
+    fn normalize_delivery_mode_deliver_to_announce() {
+        let input = json!({
+            "name": "job",
+            "schedule": { "everyMs": 60000 },
+            "delivery": { "mode": "deliver", "channel": "Slack", "to": "U123" },
+            "payload": { "kind": "agentTurn", "message": "hi" }
+        });
+        let normalized = super::normalize_job_input(&input, true).expect("normalize");
+        let delivery = normalized.get("delivery").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(delivery.get("mode").and_then(|v| v.as_str()), Some("announce"));
+        assert_eq!(delivery.get("channel").and_then(|v| v.as_str()), Some("slack"));
+        assert_eq!(delivery.get("to").and_then(|v| v.as_str()), Some("U123"));
+    }
 }

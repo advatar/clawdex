@@ -1,8 +1,11 @@
 use std::fs;
+use std::net::TcpListener;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::json;
+use tungstenite::{connect, Message};
 use uuid::Uuid;
 
 use clawdex::config::load_config;
@@ -19,6 +22,41 @@ fn temp_paths() -> Result<(PathBuf, clawdex::config::ClawdPaths)> {
     fs::create_dir_all(&workspace_dir)?;
     let (_cfg, paths) = load_config(Some(state_dir), Some(workspace_dir))?;
     Ok((base, paths))
+}
+
+fn start_gateway(paths: &clawdex::config::ClawdPaths) -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    drop(listener);
+    let bind = format!("{}", addr);
+    let thread_bind = bind.clone();
+    let paths_clone = paths.clone();
+    std::thread::spawn(move || {
+        let _ = gateway::run_gateway(&thread_bind, &paths_clone);
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    Ok(format!("http://{bind}"))
+}
+
+fn start_gateway_ws(paths: &clawdex::config::ClawdPaths) -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    drop(listener);
+    let bind = format!("{}", addr);
+    let thread_bind = bind.clone();
+    let paths_clone = paths.clone();
+    std::thread::spawn(move || {
+        let _ = gateway::run_gateway_ws(&thread_bind, &paths_clone);
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    Ok(format!("ws://{bind}"))
+}
+
+fn write_gateway_config(paths: &clawdex::config::ClawdPaths, url: &str) -> Result<()> {
+    let config_path = paths.state_dir.join("config.json5");
+    let value = json!({ "gateway": { "url": url } });
+    fs::write(config_path, serde_json::to_string_pretty(&value)?)?;
+    Ok(())
 }
 
 #[test]
@@ -89,7 +127,10 @@ fn cron_isolated_job_uses_isolated_session_key() -> Result<()> {
 #[test]
 fn heartbeat_ok_suppresses_delivery() -> Result<()> {
     let (_base, paths) = temp_paths()?;
-    let delivered = deliver_heartbeat_response_for_test(&paths, "HEARTBEAT_OK")?;
+    let url = start_gateway(&paths)?;
+    write_gateway_config(&paths, &url)?;
+    let (cfg, _) = load_config(Some(paths.state_dir.clone()), Some(paths.workspace_dir.clone()))?;
+    let delivered = deliver_heartbeat_response_for_test(&cfg, &paths, "HEARTBEAT_OK")?;
     assert!(!delivered);
 
     let outbox = paths.state_dir.join("gateway").join("outbox.jsonl");
@@ -101,7 +142,7 @@ fn heartbeat_ok_suppresses_delivery() -> Result<()> {
         "text": "seed route"
     }))?;
 
-    let delivered = deliver_heartbeat_response_for_test(&paths, "Needs attention")?;
+    let delivered = deliver_heartbeat_response_for_test(&cfg, &paths, "Needs attention")?;
     assert!(delivered);
     let entries = read_json_lines(&outbox, Some(10))?;
     assert!(!entries.is_empty());
@@ -127,6 +168,8 @@ fn memory_search_returns_line_ranges() -> Result<()> {
 #[test]
 fn last_route_delivery_falls_back_when_channel_missing() -> Result<()> {
     let (_base, paths) = temp_paths()?;
+    let url = start_gateway(&paths)?;
+    write_gateway_config(&paths, &url)?;
     let _ = gateway::record_incoming(&paths, &json!({
         "channel": "slack",
         "from": "U123",
@@ -137,6 +180,140 @@ fn last_route_delivery_falls_back_when_channel_missing() -> Result<()> {
         "sessionKey": "slack:U123",
         "text": "follow up"
     }))?;
+
+    let outbox = paths.state_dir.join("gateway").join("outbox.jsonl");
+    let entries = read_json_lines(&outbox, Some(10))?;
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["channel"].as_str().unwrap_or(""), "slack");
+    assert_eq!(entry["to"].as_str().unwrap_or(""), "U123");
+    Ok(())
+}
+
+#[test]
+fn last_route_delivery_respects_channel_filter() -> Result<()> {
+    let (_base, paths) = temp_paths()?;
+    let url = start_gateway(&paths)?;
+    write_gateway_config(&paths, &url)?;
+    let _ = gateway::record_incoming(&paths, &json!({
+        "channel": "slack",
+        "from": "U123",
+        "text": "hi"
+    }))?;
+    let _ = gateway::record_incoming(&paths, &json!({
+        "channel": "telegram",
+        "from": "U999",
+        "text": "yo"
+    }))?;
+
+    let _ = gateway::send_message(&paths, &json!({
+        "channel": "slack",
+        "text": "follow up"
+    }))?;
+
+    let outbox = paths.state_dir.join("gateway").join("outbox.jsonl");
+    let entries = read_json_lines(&outbox, Some(10))?;
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["channel"].as_str().unwrap_or(""), "slack");
+    assert_eq!(entry["to"].as_str().unwrap_or(""), "U123");
+    Ok(())
+}
+
+#[test]
+fn last_route_delivery_respects_to_filter() -> Result<()> {
+    let (_base, paths) = temp_paths()?;
+    let url = start_gateway(&paths)?;
+    write_gateway_config(&paths, &url)?;
+    let _ = gateway::record_incoming(&paths, &json!({
+        "channel": "slack",
+        "from": "U123",
+        "text": "hi"
+    }))?;
+    let _ = gateway::record_incoming(&paths, &json!({
+        "channel": "telegram",
+        "from": "U999",
+        "text": "yo"
+    }))?;
+
+    let _ = gateway::send_message(&paths, &json!({
+        "to": "U999",
+        "text": "follow up"
+    }))?;
+
+    let outbox = paths.state_dir.join("gateway").join("outbox.jsonl");
+    let entries = read_json_lines(&outbox, Some(10))?;
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["channel"].as_str().unwrap_or(""), "telegram");
+    assert_eq!(entry["to"].as_str().unwrap_or(""), "U999");
+    Ok(())
+}
+
+#[test]
+fn last_route_delivery_uses_session_key_route() -> Result<()> {
+    let (_base, paths) = temp_paths()?;
+    let url = start_gateway(&paths)?;
+    write_gateway_config(&paths, &url)?;
+    let _ = gateway::record_incoming(&paths, &json!({
+        "channel": "slack",
+        "from": "U123",
+        "text": "hi"
+    }))?;
+    let _ = gateway::record_incoming(&paths, &json!({
+        "channel": "telegram",
+        "from": "U999",
+        "text": "yo"
+    }))?;
+
+    let _ = gateway::send_message(&paths, &json!({
+        "sessionKey": "slack:U123",
+        "text": "follow up"
+    }))?;
+
+    let outbox = paths.state_dir.join("gateway").join("outbox.jsonl");
+    let entries = read_json_lines(&outbox, Some(10))?;
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["channel"].as_str().unwrap_or(""), "slack");
+    assert_eq!(entry["to"].as_str().unwrap_or(""), "U123");
+    Ok(())
+}
+
+#[test]
+fn gateway_ws_send_enqueues_outbox() -> Result<()> {
+    let (_base, paths) = temp_paths()?;
+    let ws_url = start_gateway_ws(&paths)?;
+    let (mut socket, _) = connect(ws_url.as_str())?;
+
+    let hello = json!({
+        "type": "req",
+        "id": "1",
+        "method": "hello",
+        "params": {}
+    });
+    socket.send(Message::Text(hello.to_string()))?;
+    let msg = socket.read()?;
+    let resp: serde_json::Value = serde_json::from_str(msg.to_text()?)?;
+    assert_eq!(resp["ok"].as_bool(), Some(true));
+    assert_eq!(resp["payload"]["type"].as_str(), Some("hello-ok"));
+
+    let send = json!({
+        "type": "req",
+        "id": "2",
+        "method": "send",
+        "params": {
+            "channel": "slack",
+            "to": "U123",
+            "text": "hi",
+            "sessionKey": "slack:U123"
+        }
+    });
+    socket.send(Message::Text(send.to_string()))?;
+    let msg = socket.read()?;
+    let resp: serde_json::Value = serde_json::from_str(msg.to_text()?)?;
+    assert_eq!(resp["ok"].as_bool(), Some(true));
+    assert_eq!(resp["payload"]["queued"].as_bool(), Some(true));
 
     let outbox = paths.state_dir.join("gateway").join("outbox.jsonl");
     let entries = read_json_lines(&outbox, Some(10))?;

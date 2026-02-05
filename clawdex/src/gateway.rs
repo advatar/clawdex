@@ -1,10 +1,14 @@
 use std::collections::HashMap;
+use std::net::TcpListener;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tiny_http::{Method, Response, Server, StatusCode};
+use tungstenite::{accept, Message};
 use uuid::Uuid;
 
 use crate::config::{ClawdPaths, GatewayConfig};
@@ -16,6 +20,12 @@ const INBOX_FILE: &str = "inbox.jsonl";
 const ROUTES_FILE: &str = "routes.json";
 const IDEMPOTENCY_FILE: &str = "idempotency.json";
 const INBOX_OFFSET_FILE: &str = "inbox_offset.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendMode {
+    Direct,
+    Queue,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteEntry {
@@ -141,6 +151,63 @@ fn load_gateway_config(paths: &ClawdPaths) -> Result<GatewayConfig> {
     Ok(cfg.gateway.unwrap_or_default())
 }
 
+fn resolve_gateway_url(cfg: &GatewayConfig) -> Option<String> {
+    if let Ok(env) = std::env::var("CLAWDEX_GATEWAY_URL") {
+        let trimmed = env.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Some(url) = cfg.url.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        return Some(url);
+    }
+    cfg.bind
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|bind| format!("http://{bind}"))
+}
+
+fn gateway_configured(cfg: &GatewayConfig) -> bool {
+    resolve_gateway_url(cfg).is_some()
+        || cfg
+            .bind
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+}
+
+fn resolve_send_url(base: &str) -> String {
+    let trimmed = base.trim_end_matches('/');
+    if trimmed.ends_with("/v1/send") || trimmed.ends_with("/send") {
+        return trimmed.to_string();
+    }
+    if trimmed.ends_with("/v1") {
+        return format!("{trimmed}/send");
+    }
+    format!("{trimmed}/v1/send")
+}
+
+fn send_via_http(url: &str, payload: &Value) -> Result<Value> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("build gateway http client")?;
+    let resp = client.post(url).json(payload).send();
+    let resp = match resp {
+        Ok(resp) => resp,
+        Err(err) => return Err(anyhow::anyhow!("gateway send failed: {err}")),
+    };
+    let status = resp.status();
+    let json_value = resp.json::<Value>().unwrap_or_else(|_| {
+        json!({
+            "ok": status.is_success(),
+            "status": status.as_u16(),
+        })
+    });
+    Ok(json_value)
+}
+
 fn route_cutoff_ms(cfg: &GatewayConfig) -> Option<i64> {
     cfg.route_ttl_ms
         .map(|ttl| now_ms().saturating_sub(ttl as i64))
@@ -150,7 +217,25 @@ fn route_is_fresh(route: &RouteEntry, cutoff: Option<i64>) -> bool {
     cutoff.map(|cutoff| route.updated_at_ms >= cutoff).unwrap_or(true)
 }
 
+fn route_matches(route: &RouteEntry, channel: Option<&str>, to: Option<&str>) -> bool {
+    if let Some(channel) = channel {
+        if route.channel != channel {
+            return false;
+        }
+    }
+    if let Some(to) = to {
+        if route.to != to {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn send_message(paths: &ClawdPaths, args: &Value) -> Result<Value> {
+    send_message_with_mode(paths, args, SendMode::Direct)
+}
+
+fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> Result<Value> {
     let text = args
         .get("text")
         .or_else(|| args.get("message"))
@@ -168,17 +253,29 @@ pub fn send_message(paths: &ClawdPaths, args: &Value) -> Result<Value> {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let channel = args.get("channel").and_then(|v| v.as_str());
-    let to = args.get("to").and_then(|v| v.as_str());
+    let mut channel = args
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty());
+    if channel.as_deref() == Some("last") {
+        channel = None;
+    }
+    let to = args
+        .get("to")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut account_id = args
+        .get("accountId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let session_key = args
         .get("sessionKey")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .or_else(|| match (channel, to) {
-            (Some(c), Some(t)) => Some(format!("{c}:{t}")),
-            _ => None,
-        })
-        .unwrap_or_else(|| "agent:main:main".to_string());
+        .filter(|s| !s.trim().is_empty());
 
     let idempotency_key = args
         .get("idempotency_key")
@@ -194,62 +291,190 @@ pub fn send_message(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     let mut route_store = RouteStore::load(paths)?;
     let cfg = load_gateway_config(paths)?;
     let cutoff = route_cutoff_ms(&cfg);
-    let route = match (channel, to) {
-        (Some(c), Some(t)) => RouteEntry {
-            channel: c.to_string(),
-            to: t.to_string(),
-            account_id: args.get("accountId").and_then(|v| v.as_str()).map(|s| s.to_string()),
+
+    let mut resolved_session_key = session_key.clone();
+    let mut route = None;
+
+    if let (Some(channel), Some(to)) = (channel.clone(), to.clone()) {
+        route = Some(RouteEntry {
+            channel: channel.clone(),
+            to: to.clone(),
+            account_id: account_id.clone(),
             updated_at_ms: now_ms(),
-        },
-        _ => match route_store.get_route(&session_key) {
-            Some(route) if route_is_fresh(&route, cutoff) => route,
-            _ => {
-                if best_effort {
-                    return Ok(json!({
-                        "ok": false,
-                        "bestEffort": true,
-                        "error": "no route available"
-                    }));
+        });
+        if resolved_session_key.is_none() {
+            resolved_session_key = Some(format!("{channel}:{to}"));
+        }
+    } else if let Some(ref session_key) = resolved_session_key {
+        if let Some(found) = route_store.get_route(session_key) {
+            if route_is_fresh(&found, cutoff)
+                && route_matches(&found, channel.as_deref(), to.as_deref())
+            {
+                if account_id.is_none() {
+                    account_id = found.account_id.clone();
                 }
-                return Err(anyhow::anyhow!(
-                    "message.send missing channel/to and no last route"
-                ));
+                route = Some(found);
             }
-        },
-    };
+        }
+
+        if route.is_none() {
+            if best_effort {
+                return Ok(json!({
+                    "ok": false,
+                    "bestEffort": true,
+                    "error": "no route available"
+                }));
+            }
+            return Err(anyhow::anyhow!(
+                "message.send missing channel/to and no last route"
+            ));
+        }
+    } else {
+        let resolved = resolve_target(
+            paths,
+            &json!({
+                "channel": channel,
+                "to": to,
+                "accountId": account_id
+            }),
+        )?;
+        if resolved.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            if best_effort {
+                return Ok(json!({
+                    "ok": false,
+                    "bestEffort": true,
+                    "error": "no route available"
+                }));
+            }
+            return Err(anyhow::anyhow!(
+                "message.send missing channel/to and no last route"
+            ));
+        }
+        let channel = resolved
+            .get("channel")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .context("message.send missing channel/to and no last route")?;
+        let to = resolved
+            .get("to")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .context("message.send missing channel/to and no last route")?;
+        if account_id.is_none() {
+            account_id = resolved
+                .get("accountId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+        }
+        if resolved_session_key.is_none() {
+            resolved_session_key = resolved
+                .get("sessionKey")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| Some(format!("{channel}:{to}")));
+        }
+        route = Some(RouteEntry {
+            channel,
+            to,
+            account_id: account_id.clone(),
+            updated_at_ms: now_ms(),
+        });
+    }
+
+    let session_key = resolved_session_key.unwrap_or_else(|| "agent:main:main".to_string());
+    let route = route.expect("route resolution");
 
     let mut idempotency = IdempotencyStore::load(paths)?;
     if idempotency.seen(&idempotency_key) {
         return Ok(json!({ "ok": true, "deduped": true }));
     }
 
+    let entry_account_id = account_id.clone().or(route.account_id.clone());
     let entry = json!({
         "id": Uuid::new_v4().to_string(),
         "sessionKey": session_key,
         "channel": route.channel,
         "to": route.to,
-        "accountId": route.account_id,
+        "accountId": entry_account_id,
         "text": text,
+        "message": text,
         "idempotencyKey": idempotency_key,
         "createdAtMs": now_ms(),
     });
 
-    append_json_line(&outbox_path(paths), &entry)?;
-    route_store.update_route(
-        &session_key,
-        RouteEntry {
-            updated_at_ms: now_ms(),
-            ..route.clone()
-        },
-    )?;
-    idempotency.insert(&idempotency_key, now_ms())?;
+    if mode == SendMode::Queue {
+        append_json_line(&outbox_path(paths), &entry)?;
+        route_store.update_route(
+            &session_key,
+            RouteEntry {
+                account_id: account_id.clone().or(route.account_id.clone()),
+                updated_at_ms: now_ms(),
+                ..route.clone()
+            },
+        )?;
+        idempotency.insert(&idempotency_key, now_ms())?;
+        return Ok(json!({ "ok": true, "queued": true, "message": entry, "result": entry }));
+    }
 
-    Ok(json!({ "ok": true, "queued": true, "message": entry, "result": entry }))
+    let gateway_url = resolve_gateway_url(&cfg);
+    if let Some(base_url) = gateway_url {
+        let send_url = resolve_send_url(&base_url);
+        let response = send_via_http(&send_url, &entry);
+        let response = match response {
+            Ok(value) => value,
+            Err(err) => {
+                if best_effort {
+                    return Ok(json!({ "ok": false, "bestEffort": true, "error": err.to_string() }));
+                }
+                return Err(err);
+            }
+        };
+        let ok = response.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
+        if !ok {
+            let err = response
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("message send failed")
+                .to_string();
+            if best_effort {
+                return Ok(json!({ "ok": false, "bestEffort": true, "error": err }));
+            }
+            return Err(anyhow::anyhow!(err));
+        }
+        route_store.update_route(
+            &session_key,
+            RouteEntry {
+                account_id: account_id.clone().or(route.account_id.clone()),
+                updated_at_ms: now_ms(),
+                ..route.clone()
+            },
+        )?;
+        idempotency.insert(&idempotency_key, now_ms())?;
+        let result = response.get("result").cloned().unwrap_or(response);
+        return Ok(json!({ "ok": true, "result": result }));
+    }
+
+    if best_effort {
+        return Ok(json!({
+            "ok": false,
+            "bestEffort": true,
+            "error": "gateway disabled"
+        }));
+    }
+    Err(anyhow::anyhow!("gateway disabled"))
 }
 
 pub fn list_channels(paths: &ClawdPaths) -> Result<Value> {
     let store = RouteStore::load(paths)?;
     let cfg = load_gateway_config(paths)?;
+    if !gateway_configured(&cfg) {
+        return Ok(json!({
+            "channels": [],
+            "count": 0,
+            "routeTtlMs": cfg.route_ttl_ms,
+            "disabled": true,
+        }));
+    }
     let cutoff = route_cutoff_ms(&cfg);
 
     let mut entries = store
@@ -282,18 +507,24 @@ pub fn list_channels(paths: &ClawdPaths) -> Result<Value> {
 }
 
 pub fn resolve_target(paths: &ClawdPaths, args: &Value) -> Result<Value> {
-    let channel = args
+    let mut channel = args
         .get("channel")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if channel.as_deref() == Some("last") {
+        channel = None;
+    }
     let to = args
         .get("to")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let account_id = args
         .get("accountId")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     if let (Some(channel), Some(to)) = (channel.clone(), to.clone()) {
         let session_key = format!("{channel}:{to}");
@@ -422,6 +653,129 @@ pub fn run_gateway(bind: &str, paths: &ClawdPaths) -> Result<()> {
     Ok(())
 }
 
+pub fn run_gateway_ws(bind: &str, paths: &ClawdPaths) -> Result<()> {
+    let listener =
+        TcpListener::bind(bind).map_err(|err| anyhow::anyhow!("bind gateway ws {bind}: {err}"))?;
+    for stream in listener.incoming() {
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!("[clawdex][gateway-ws] accept failed: {err}");
+                continue;
+            }
+        };
+        let paths = paths.clone();
+        std::thread::spawn(move || {
+            let mut websocket = match accept(stream) {
+                Ok(ws) => ws,
+                Err(err) => {
+                    eprintln!("[clawdex][gateway-ws] handshake failed: {err}");
+                    return;
+                }
+            };
+            let conn_id = Uuid::new_v4().to_string();
+            loop {
+                let msg = match websocket.read() {
+                    Ok(msg) => msg,
+                    Err(_) => break,
+                };
+                if msg.is_close() {
+                    break;
+                }
+                let text = match msg {
+                    Message::Text(text) => text,
+                    Message::Binary(bin) => String::from_utf8(bin).unwrap_or_default(),
+                    _ => continue,
+                };
+                let frame: Value = match serde_json::from_str(&text) {
+                    Ok(frame) => frame,
+                    Err(_) => continue,
+                };
+                let response = handle_ws_frame(&frame, &paths, &conn_id);
+                if let Some(response) = response {
+                    let _ = websocket.send(Message::Text(response.to_string()));
+                }
+            }
+        });
+    }
+    Ok(())
+}
+
+fn handle_ws_frame(frame: &Value, paths: &ClawdPaths, conn_id: &str) -> Option<Value> {
+    if frame.get("type").and_then(|v| v.as_str()) != Some("req") {
+        return None;
+    }
+    let id = frame.get("id")?.as_str()?.to_string();
+    let method = frame.get("method").and_then(|v| v.as_str()).unwrap_or("");
+    let params = frame.get("params").cloned().unwrap_or_else(|| json!({}));
+
+    match method {
+        "connect" | "hello" => Some(ws_response_ok(&id, hello_ok_payload(conn_id))),
+        "send" => {
+            let result = send_message_with_mode(paths, &params, SendMode::Queue);
+            match result {
+                Ok(payload) => Some(ws_response_ok(&id, payload)),
+                Err(err) => Some(ws_response_err(&id, "invalid_request", &err.to_string())),
+            }
+        }
+        "health" => Some(ws_response_ok(&id, json!({ "ok": true }))),
+        _ => Some(ws_response_err(
+            &id,
+            "method_not_found",
+            &format!("unsupported method: {method}"),
+        )),
+    }
+}
+
+fn hello_ok_payload(conn_id: &str) -> Value {
+    let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
+    json!({
+        "type": "hello-ok",
+        "protocol": 1,
+        "server": {
+            "version": env!("CARGO_PKG_VERSION"),
+            "host": host,
+            "connId": conn_id,
+        },
+        "features": {
+            "methods": ["send", "health"],
+            "events": [],
+        },
+        "snapshot": {
+            "presence": [],
+            "health": {},
+            "stateVersion": { "presence": 0, "health": 0 },
+            "uptimeMs": 0,
+        },
+        "policy": {
+            "maxPayload": 1048576,
+            "maxBufferedBytes": 1048576,
+            "tickIntervalMs": 30000,
+        },
+    })
+}
+
+fn ws_response_ok(id: &str, payload: Value) -> Value {
+    json!({
+        "type": "res",
+        "id": id,
+        "ok": true,
+        "payload": payload,
+    })
+}
+
+fn ws_response_err(id: &str, code: &str, message: &str) -> Value {
+    json!({
+        "type": "res",
+        "id": id,
+        "ok": false,
+        "error": {
+            "code": code,
+            "message": message,
+        }
+    })
+}
+
 fn handle_request(
     paths: &ClawdPaths,
     request: &mut tiny_http::Request,
@@ -433,7 +787,7 @@ fn handle_request(
         (&Method::Post, "/v1/send") => {
             let body = read_body(request)?;
             let payload: Value = serde_json::from_slice(&body).context("invalid json")?;
-            let result = send_message(paths, &payload)?;
+            let result = send_message_with_mode(paths, &payload, SendMode::Queue)?;
             Ok(json_response(result)?)
         }
         (&Method::Post, "/v1/incoming") => {

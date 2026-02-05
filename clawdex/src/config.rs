@@ -46,7 +46,29 @@ pub struct CronConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HeartbeatConfig {
     pub enabled: Option<bool>,
+    #[serde(alias = "intervalMs")]
     pub interval_ms: Option<u64>,
+    pub prompt: Option<String>,
+    #[serde(alias = "ackMaxChars")]
+    pub ack_max_chars: Option<usize>,
+    #[serde(alias = "activeHours")]
+    pub active_hours: Option<HeartbeatActiveHoursConfig>,
+    pub delivery: Option<HeartbeatDeliveryConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HeartbeatActiveHoursConfig {
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub timezone: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HeartbeatDeliveryConfig {
+    pub channel: Option<String>,
+    pub to: Option<String>,
+    #[serde(alias = "accountId")]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -54,6 +76,18 @@ pub struct MemoryConfig {
     pub enabled: Option<bool>,
     pub citations: Option<String>,
     pub embeddings: Option<EmbeddingsConfig>,
+    #[serde(alias = "extraPaths")]
+    #[serde(alias = "extra_paths")]
+    pub extra_paths: Option<Vec<String>>,
+    #[serde(alias = "chunkTokens")]
+    #[serde(alias = "chunk_tokens")]
+    pub chunk_tokens: Option<usize>,
+    #[serde(alias = "chunkOverlap")]
+    #[serde(alias = "chunk_overlap")]
+    pub chunk_overlap: Option<usize>,
+    #[serde(alias = "sessionMemory")]
+    #[serde(alias = "session_memory")]
+    pub session_memory: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -76,7 +110,14 @@ pub struct CodexConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GatewayConfig {
     pub bind: Option<String>,
+    #[serde(alias = "wsBind")]
+    pub ws_bind: Option<String>,
     pub route_ttl_ms: Option<u64>,
+    pub url: Option<String>,
+    pub token: Option<String>,
+    pub password: Option<String>,
+    #[serde(alias = "tlsFingerprint")]
+    pub tls_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -302,10 +343,12 @@ pub fn resolve_heartbeat_enabled(cfg: &ClawdConfig) -> bool {
 }
 
 pub fn resolve_heartbeat_interval_ms(cfg: &ClawdConfig) -> u64 {
-    cfg.heartbeat
+    let interval = cfg
+        .heartbeat
         .as_ref()
         .and_then(|h| h.interval_ms)
-        .unwrap_or(30 * 60 * 1000)
+        .unwrap_or(30 * 60 * 1000);
+    interval.max(30_000)
 }
 
 pub fn resolve_citations_mode(cfg: &ClawdConfig) -> String {

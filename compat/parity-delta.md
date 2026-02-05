@@ -23,29 +23,29 @@ Legend:
 - [x] cron.runs log format parity (OpenClaw `action: finished` vs Clawdex run log schema).
 
 ## Memory
-- [~] Response shape parity: `startLine/endLine`, `snippet`, `provider/model`, `citations` now included. Chunking rules still differ.
-- [ ] Chunking + overlap behavior (OpenClaw ~400 token chunks, 80 token overlap).
-- [ ] Session transcript indexing + `sessionKey`-aware results.
-- [ ] `memorySearch.extraPaths` allowlist support.
-- [ ] Citation rules based on `sessionKey` (group/channel suppression).
+- [x] Response shape parity: `startLine/endLine`, `snippet`, `provider/model`, `citations` included.
+- [x] Chunking + overlap behavior (OpenClaw ~400 token chunks, 80 token overlap).
+- [x] Session transcript indexing + `sessionKey`-aware results.
+- [x] `memorySearch.extraPaths` allowlist support.
+- [x] Citation rules based on `sessionKey` (group/channel suppression).
 
 ## Heartbeat
 - [x] Suppress delivery when response == `HEARTBEAT_OK`.
-- [ ] Active hours gating and timezone support.
-- [ ] Heartbeat config parity (delivery routing, per-agent behavior).
+- [x] Active hours gating and timezone support.
+- [x] Heartbeat config parity (delivery routing, per-agent behavior).
 
 ## Gateway / Channels
-- [~] Last-route fallback supported for outbound delivery.
-- [ ] Immediate send vs queue parity (OpenClaw sends; Clawdex queues to outbox).
-- [ ] `channels.list` disabled flag parity (OpenClaw returns `disabled: true` when gateway not configured).
-- [ ] Resolve target parity for `channel: "last"` semantics.
-- [ ] Gateway protocol parity (WebSocket framing / server-methods behavior).
+- [x] Last-route fallback supported for outbound delivery.
+- [x] Immediate send vs queue parity (OpenClaw sends; Clawdex queues to outbox when gateway running).
+- [x] `channels.list` disabled flag parity (OpenClaw returns `disabled: true` when gateway not configured).
+- [x] Resolve target parity for `channel: "last"` semantics.
+- [x] Gateway protocol parity (WebSocket framing / server-methods behavior).
 
 ## MCP Tool Shapes
 - [~] Tool request schemas aligned; response shapes include required fields but may include extra fields.
-- [ ] Enforce OpenClaw validation errors (invalid request codes/messages).
+- [x] Enforce OpenClaw validation errors (invalid request codes/messages).
 
 ## Tests
 - [x] P0 scenario tests (cron persistence, isolated session key, heartbeat suppression, memory line ranges, last-route delivery).
-- [ ] Add parity tests for cron normalization edge cases and delivery object rules.
-- [ ] Add gateway protocol integration tests.
+- [x] Add parity tests for cron normalization edge cases and delivery object rules.
+- [x] Add gateway protocol integration tests.

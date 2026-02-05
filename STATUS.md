@@ -1,5 +1,8 @@
 # Status
 
+- [x] Add parity tests for cron normalization edge cases + delivery rules
+- [x] Add gateway protocol integration tests + tighten last-route fallback
+- [x] Clean up CLI help text now that cron/heartbeat are live
 - [x] Implement Rust `clawdex` core (MCP server, cron/memory stores, heartbeat stubs, skills sync, UI bridge)
 - [x] Update macOS app embed script to build `codex` + `clawdex` Rust binaries (no Node/OpenClaw runtime)
 - [x] Refresh docs for Rust-first flow (README, MAC_APP, COMPATIBILITY)

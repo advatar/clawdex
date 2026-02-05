@@ -16,10 +16,10 @@ struct Cli {
 enum Commands {
     /// Run the MCP server (stdio)
     McpServer {
-        /// Disable cron scheduler (stubbed in Rust MVP).
+        /// Disable cron scheduler.
         #[arg(long = "no-cron")]
         no_cron: bool,
-        /// Disable heartbeat scheduler (stubbed in Rust MVP).
+        /// Disable heartbeat scheduler.
         #[arg(long = "no-heartbeat")]
         no_heartbeat: bool,
         /// Workspace directory (overrides config/env)
@@ -66,6 +66,9 @@ enum Commands {
         /// Bind address (overrides config; default: 127.0.0.1:18789)
         #[arg(long)]
         bind: Option<String>,
+        /// Optional WebSocket bind address (overrides config)
+        #[arg(long = "ws-bind")]
+        ws_bind: Option<String>,
         /// Workspace directory (overrides config/env)
         #[arg(long)]
         workspace: Option<PathBuf>,
@@ -345,13 +348,24 @@ fn main() -> Result<()> {
         } => ui_bridge::run_ui_bridge(codex_path, state_dir, workspace),
         Commands::Gateway {
             bind,
+            ws_bind,
             workspace,
             state_dir,
         } => {
             let (cfg, paths) = config::load_config(state_dir, workspace)?;
+            let gateway_cfg = cfg.gateway.clone().unwrap_or_default();
             let resolved_bind = bind
-                .or_else(|| cfg.gateway.and_then(|g| g.bind))
+                .or_else(|| gateway_cfg.bind.clone())
                 .unwrap_or_else(|| "127.0.0.1:18789".to_string());
+            let resolved_ws = ws_bind.or_else(|| gateway_cfg.ws_bind.clone());
+            if let Some(ws_bind) = resolved_ws {
+                let ws_paths = paths.clone();
+                std::thread::spawn(move || {
+                    if let Err(err) = gateway::run_gateway_ws(&ws_bind, &ws_paths) {
+                        eprintln!("[clawdex][gateway-ws] {err}");
+                    }
+                });
+            }
             gateway::run_gateway(&resolved_bind, &paths)
         }
         Commands::Tasks { command } => match command {

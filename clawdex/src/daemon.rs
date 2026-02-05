@@ -18,6 +18,7 @@ use crate::cron::{
 };
 use crate::gateway;
 use crate::heartbeat;
+use crate::sessions;
 use crate::runner::{CodexRunner, CodexRunnerConfig};
 use crate::util::now_ms;
 
@@ -134,7 +135,7 @@ pub fn run_daemon_loop(
         }
 
         if heartbeat_enabled && now >= next_heartbeat {
-            execute_heartbeat(&mut runner, &paths)?;
+            execute_heartbeat(&mut runner, &cfg, &paths)?;
             next_heartbeat = now + interval as i64;
         }
 
@@ -350,8 +351,8 @@ fn execute_job(
     Ok(())
 }
 
-fn execute_heartbeat(runner: &mut CodexRunner, paths: &ClawdPaths) -> Result<()> {
-    let entry = heartbeat::wake(paths, Some("interval".to_string()))?;
+fn execute_heartbeat(runner: &mut CodexRunner, cfg: &ClawdConfig, paths: &ClawdPaths) -> Result<()> {
+    let entry = heartbeat::wake(cfg, paths, Some("interval".to_string()))?;
     let status = entry
         .get("payload")
         .and_then(|p| p.get("status"))
@@ -361,10 +362,10 @@ fn execute_heartbeat(runner: &mut CodexRunner, paths: &ClawdPaths) -> Result<()>
         return Ok(());
     }
 
-    let prompt = "Heartbeat check. If HEARTBEAT.md exists in the workspace, read it and act. If nothing needs attention, respond with exactly HEARTBEAT_OK.";
-    let outcome = runner.run_main(prompt)?;
+    let prompt = heartbeat::resolve_prompt(cfg);
+    let outcome = runner.run_main(&prompt)?;
     let response = outcome.message.trim().to_string();
-    let _ = deliver_heartbeat_response(paths, &response)?;
+    let _ = deliver_heartbeat_response(cfg, paths, &response)?;
     Ok(())
 }
 
@@ -467,13 +468,59 @@ fn resolve_delivery_target(
     })
 }
 
-fn deliver_heartbeat_response(paths: &ClawdPaths, response: &str) -> Result<bool> {
-    if response.trim() == "HEARTBEAT_OK" {
+fn deliver_heartbeat_response(cfg: &ClawdConfig, paths: &ClawdPaths, response: &str) -> Result<bool> {
+    let trimmed = response.trim();
+    if trimmed.is_empty() || trimmed == "HEARTBEAT_OK" {
         return Ok(false);
     }
+
+    let max_chars = heartbeat::resolve_ack_max_chars(cfg);
+    let deliver_text = if max_chars == 0 {
+        String::new()
+    } else {
+        trimmed.chars().take(max_chars).collect::<String>()
+    };
+    if deliver_text.trim().is_empty() {
+        return Ok(false);
+    }
+
+    let mut channel = cfg
+        .heartbeat
+        .as_ref()
+        .and_then(|h| h.delivery.as_ref())
+        .and_then(|d| d.channel.clone());
+    let mut to = cfg
+        .heartbeat
+        .as_ref()
+        .and_then(|h| h.delivery.as_ref())
+        .and_then(|d| d.to.clone());
+    let mut account_id = cfg
+        .heartbeat
+        .as_ref()
+        .and_then(|h| h.delivery.as_ref())
+        .and_then(|d| d.account_id.clone());
+
+    if channel.is_none() || to.is_none() {
+        if let Some(last) = resolve_delivery_target(paths, None, None) {
+            channel = channel.or(Some(last.channel));
+            to = to.or(Some(last.to));
+            account_id = account_id.or(last.account_id);
+        }
+    }
+
+    let Some(channel) = channel else {
+        return Ok(false);
+    };
+    let Some(to) = to else {
+        return Ok(false);
+    };
+
     let args = json!({
         "sessionKey": "agent:main:main",
-        "text": response,
+        "channel": channel,
+        "to": to,
+        "accountId": account_id,
+        "text": deliver_text,
         "idempotencyKey": format!("heartbeat:{}", now_ms()),
     });
     let _ = gateway::send_message(paths, &args);
@@ -481,8 +528,12 @@ fn deliver_heartbeat_response(paths: &ClawdPaths, response: &str) -> Result<bool
 }
 
 /// Test helper for validating heartbeat delivery behavior.
-pub fn deliver_heartbeat_response_for_test(paths: &ClawdPaths, response: &str) -> Result<bool> {
-    deliver_heartbeat_response(paths, response)
+pub fn deliver_heartbeat_response_for_test(
+    cfg: &ClawdConfig,
+    paths: &ClawdPaths,
+    response: &str,
+) -> Result<bool> {
+    deliver_heartbeat_response(cfg, paths, response)
 }
 
 fn handle_incoming_message(runner: &mut CodexRunner, paths: &ClawdPaths, entry: serde_json::Value) -> Result<()> {
@@ -491,6 +542,7 @@ fn handle_incoming_message(runner: &mut CodexRunner, paths: &ClawdPaths, entry: 
         return Ok(());
     }
     let session_key = resolve_inbound_session_key(&entry);
+    let _ = sessions::append_session_message(paths, &session_key, "user", text);
     let outcome = if session_key == "agent:main:main" {
         runner.run_main(text)?
     } else {
@@ -500,6 +552,7 @@ fn handle_incoming_message(runner: &mut CodexRunner, paths: &ClawdPaths, entry: 
     if response.is_empty() {
         return Ok(());
     }
+    let _ = sessions::append_session_message(paths, &session_key, "assistant", response);
     let args = json!({
         "sessionKey": session_key,
         "text": response,

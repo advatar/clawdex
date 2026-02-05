@@ -1,27 +1,32 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use rusqlite::types::Value as SqlValue;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use walkdir::WalkDir;
 
 use crate::config::{
-    resolve_embeddings_config, resolve_memory_enabled, resolve_workspace_path, ClawdPaths,
-    EmbeddingsConfig,
+    resolve_embeddings_config, resolve_memory_enabled, ClawdConfig, ClawdPaths, EmbeddingsConfig,
 };
 use crate::util::read_to_string;
 
 const DB_FILE: &str = "fts.sqlite";
+const DEFAULT_CHUNK_TOKENS: usize = 400;
+const DEFAULT_CHUNK_OVERLAP: usize = 80;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone)]
 struct SearchRow {
     path: String,
-    line_no: i64,
+    start_line: i64,
+    end_line: i64,
     text: String,
+    source: String,
     fts_score: f64,
     embed_score: Option<f64>,
     final_score: f64,
@@ -47,28 +52,64 @@ struct EmbeddingData {
     index: usize,
 }
 
+#[derive(Debug, Clone)]
+struct MemoryChunk {
+    start_line: i64,
+    end_line: i64,
+    text: String,
+}
+
+#[derive(Debug, Clone)]
+struct IndexedFile {
+    rel_path: String,
+    mtime: i64,
+    size: i64,
+    source: String,
+    content: String,
+}
+
 pub fn memory_get(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     let cfg = paths_config(paths)?;
     if !resolve_memory_enabled(&cfg) {
-        return Ok(json!({ "ok": false, "disabled": true, "error": "memory disabled" }));
+        return Ok(json!({
+            "path": args.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+            "text": "",
+            "disabled": true,
+            "error": "memory disabled"
+        }));
     }
 
-    let path_str = args
+    let raw_path = args
         .get("path")
         .and_then(|v| v.as_str())
         .context("memory_get requires path")?;
 
-    let resolved = resolve_workspace_path(paths, path_str)?;
-    let rel = resolved
+    let abs_path = if Path::new(raw_path).is_absolute() {
+        PathBuf::from(raw_path)
+    } else {
+        paths.workspace_dir.join(raw_path)
+    };
+    let rel_path = abs_path
         .strip_prefix(&paths.workspace_dir)
-        .unwrap_or(&resolved)
-        .to_path_buf();
+        .ok()
+        .map(|p| normalize_rel_path(&p.to_string_lossy()))
+        .unwrap_or_else(|| abs_path.to_string_lossy().to_string());
 
-    if !allowed_memory_path(&rel) {
-        anyhow::bail!("path not allowed for memory_get");
+    let extra_paths = normalize_extra_paths(&paths.workspace_dir, cfg.memory.as_ref());
+    let allowed_workspace = is_memory_rel_path(&rel_path);
+    let allowed_extra = is_allowed_extra_path(&abs_path, &extra_paths)?;
+    if !allowed_workspace && !allowed_extra {
+        anyhow::bail!("path required");
+    }
+    if !abs_path.to_string_lossy().ends_with(".md") {
+        anyhow::bail!("path required");
+    }
+    let stat = std::fs::symlink_metadata(&abs_path)?;
+    if stat.file_type().is_symlink() || !stat.is_file() {
+        anyhow::bail!("path required");
     }
 
-    let contents = read_to_string(&resolved)?;
+    let contents = read_to_string(&abs_path)?;
     let lines: Vec<&str> = contents.lines().collect();
     let total_lines = lines.len();
 
@@ -83,7 +124,7 @@ pub fn memory_get(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     let slice = lines[start_idx..end_idx].join("\n");
 
     Ok(json!({
-        "path": rel.to_string_lossy(),
+        "path": rel_path,
         "from": from,
         "lines": end_idx.saturating_sub(start_idx),
         "totalLines": total_lines,
@@ -96,41 +137,96 @@ pub fn memory_search(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     let query = args
         .get("query")
         .and_then(|v| v.as_str())
-        .context("memory_search requires query")?;
+        .context("memory_search requires query")?
+        .trim()
+        .to_string();
+    if query.is_empty() {
+        return Ok(json!({ "results": [] }));
+    }
+
+    let cfg = paths_config(paths)?;
+    if !resolve_memory_enabled(&cfg) {
+        return Ok(json!({ "results": [], "disabled": true, "error": "memory disabled" }));
+    }
+
     let max_results = args
         .get("maxResults")
         .or_else(|| args.get("max_results"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(20) as usize;
+        .map(|v| v as usize)
+        .unwrap_or(6)
+        .clamp(1, 50);
     let min_score = args
         .get("minScore")
         .or_else(|| args.get("min_score"))
         .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    let session_key = args
+        .get("sessionKey")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
-    let cfg = paths_config(paths)?;
-    if !resolve_memory_enabled(&cfg) {
-        return Ok(json!({ "results": [], "query": query, "disabled": true }));
-    }
+    let citations_mode = resolve_citations_mode(&cfg);
+    let include_citations = should_include_citations(citations_mode.as_str(), session_key.as_deref());
+
+    let (chunk_tokens, chunk_overlap) = resolve_chunking(&cfg);
+    let extra_paths = normalize_extra_paths(&paths.workspace_dir, cfg.memory.as_ref());
+    let include_sessions = cfg
+        .memory
+        .as_ref()
+        .and_then(|m| m.session_memory)
+        .unwrap_or(false)
+        || session_key.is_some();
+
     let embeddings_cfg = resolve_embeddings_config(&cfg);
-    ensure_index(paths, &embeddings_cfg)?;
+    ensure_index(
+        paths,
+        &embeddings_cfg,
+        &extra_paths,
+        include_sessions,
+        session_key.as_deref(),
+        chunk_tokens,
+        chunk_overlap,
+    )?;
     let conn = open_db(paths)?;
 
+    let sources = resolve_sources(include_sessions);
+    let source_filter = if sources.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " AND source IN ({})",
+            vec!["?"; sources.len()].join(", ")
+        )
+    };
+    let sql = format!(
+        "SELECT path, start_line, end_line, text, source, bm25(memory_fts) as score FROM memory_fts WHERE memory_fts MATCH ?{source_filter} ORDER BY score LIMIT ?"
+    );
+    let mut params_vec: Vec<SqlValue> = Vec::new();
+    params_vec.push(SqlValue::from(query.clone()));
+    for source in &sources {
+        params_vec.push(SqlValue::from(source.clone()));
+    }
+    params_vec.push(SqlValue::from(max_results as i64));
+
     let mut rows = Vec::new();
-    let mut stmt = conn.prepare(
-        "SELECT path, line_no, text, bm25(memory_fts) as score FROM memory_fts WHERE memory_fts MATCH ? ORDER BY score LIMIT ?",
-    )?;
-    let mut results = stmt.query(params![query, max_results as i64])?;
+    let mut stmt = conn.prepare(&sql)?;
+    let mut results = stmt.query(params_from_iter(params_vec.iter()))?;
     while let Some(row) = results.next()? {
         let path: String = row.get(0)?;
-        let line_no: i64 = row.get(1)?;
-        let text: String = row.get(2)?;
-        let bm25: f64 = row.get(3)?;
+        let start_line: i64 = row.get(1)?;
+        let end_line: i64 = row.get(2)?;
+        let text: String = row.get(3)?;
+        let source: String = row.get(4)?;
+        let bm25: f64 = row.get(5)?;
         let fts_score = 1.0 / (1.0 + bm25.abs());
         rows.push(SearchRow {
             path,
-            line_no,
+            start_line,
+            end_line,
             text,
+            source,
             fts_score,
             embed_score: None,
             final_score: fts_score,
@@ -139,9 +235,9 @@ pub fn memory_search(paths: &ClawdPaths, args: &Value) -> Result<Value> {
 
     if let Some(provider) = build_embedding_provider(&embeddings_cfg)? {
         if !rows.is_empty() {
-            let query_vec = provider.embed(&[query.to_string()])?;
+            let query_vec = provider.embed(&[query.clone()])?;
             if let Some(query_embedding) = query_vec.first() {
-                let mut embed_scores = HashMap::new();
+                let mut embed_scores: HashMap<String, f64> = HashMap::new();
                 for chunk in rows.chunks(provider.batch_size) {
                     let mut inputs = Vec::new();
                     for row in chunk {
@@ -151,12 +247,12 @@ pub fn memory_search(paths: &ClawdPaths, args: &Value) -> Result<Value> {
                     for (idx, vec) in vectors.into_iter().enumerate() {
                         let row = &chunk[idx];
                         let score = cosine_similarity(query_embedding, &vec);
-                        embed_scores.insert((row.path.clone(), row.line_no), score);
+                        embed_scores.insert(row_key(row), score);
                     }
                 }
 
                 for row in &mut rows {
-                    if let Some(score) = embed_scores.get(&(row.path.clone(), row.line_no)) {
+                    if let Some(score) = embed_scores.get(&row_key(row)) {
                         row.embed_score = Some(*score);
                         row.final_score = 0.6 * row.fts_score + 0.4 * score;
                     }
@@ -172,33 +268,33 @@ pub fn memory_search(paths: &ClawdPaths, args: &Value) -> Result<Value> {
         if row.final_score < min_score {
             continue;
         }
-        let rel = Path::new(&row.path)
-            .strip_prefix(&paths.workspace_dir)
-            .unwrap_or(Path::new(&row.path))
-            .to_string_lossy()
-            .to_string();
-        output.push(json!({
-            "path": rel,
-            "startLine": row.line_no,
-            "endLine": row.line_no,
-            "lineStart": row.line_no,
-            "lineEnd": row.line_no,
+        let mut entry = json!({
+            "path": row.path,
+            "startLine": row.start_line,
+            "endLine": row.end_line,
+            "lineStart": row.start_line,
+            "lineEnd": row.end_line,
             "snippet": row.text,
             "score": row.final_score,
             "ftsScore": row.fts_score,
             "embeddingScore": row.embed_score,
-            "source": "memory",
-        }));
+            "source": row.source,
+        });
+        if include_citations {
+            if let (Some(path), Some(start), Some(end)) = (
+                entry.get("path").and_then(|v| v.as_str()),
+                entry.get("startLine").and_then(|v| v.as_i64()),
+                entry.get("endLine").and_then(|v| v.as_i64()),
+            ) {
+                entry["citation"] = Value::String(format_citation(path, start, end));
+            }
+        }
+        output.push(entry);
     }
-
-    let citations = cfg
-        .memory
-        .as_ref()
-        .and_then(|m| m.citations.clone());
 
     let mut response = json!({
         "results": output,
-        "query": query,
+        "citations": citations_mode,
     });
     if let Some(provider) = embeddings_cfg.provider {
         response["provider"] = Value::String(provider);
@@ -206,116 +302,157 @@ pub fn memory_search(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     if let Some(model) = embeddings_cfg.model {
         response["model"] = Value::String(model);
     }
-    if let Some(citations) = citations {
-        response["citations"] = Value::String(citations);
-    }
 
     Ok(response)
 }
 
-fn ensure_index(paths: &ClawdPaths, embeddings_cfg: &EmbeddingsConfig) -> Result<()> {
+fn ensure_index(
+    paths: &ClawdPaths,
+    embeddings_cfg: &EmbeddingsConfig,
+    extra_paths: &[PathBuf],
+    include_sessions: bool,
+    session_key: Option<&str>,
+    chunk_tokens: usize,
+    chunk_overlap: usize,
+) -> Result<()> {
     let mut conn = open_db(paths)?;
     ensure_schema(&conn)?;
 
-    let files = memory_files(&paths.workspace_dir);
-    let mut current = HashMap::new();
-    for file in &files {
-        let meta = std::fs::metadata(file).with_context(|| format!("metadata {}", file.display()))?;
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        let size = meta.len() as i64;
-        current.insert(file.to_string_lossy().to_string(), (modified, size));
+    let provider = build_embedding_provider(embeddings_cfg)?;
+    let mut active: HashSet<(String, String)> = HashSet::new();
+
+    for file in list_memory_files(&paths.workspace_dir, extra_paths) {
+        if let Some(entry) = build_index_entry(&paths.workspace_dir, &file, "memory")? {
+            active.insert((entry.rel_path.clone(), entry.source.clone()));
+            index_file(
+                &mut conn,
+                entry,
+                provider.as_ref(),
+                chunk_tokens,
+                chunk_overlap,
+            )?;
+        }
+    }
+
+    if include_sessions {
+        for file in list_session_files(paths, session_key) {
+            if let Some(entry) = build_session_entry(&file)? {
+                active.insert((entry.rel_path.clone(), entry.source.clone()));
+                index_file(
+                    &mut conn,
+                    entry,
+                    provider.as_ref(),
+                    chunk_tokens,
+                    chunk_overlap,
+                )?;
+            }
+        }
     }
 
     let mut stale = Vec::new();
-    let mut existing = Vec::new();
     {
-        let mut stmt = conn.prepare("SELECT path, mtime, size FROM memory_files")?;
+        let mut stmt = conn.prepare("SELECT path, source FROM memory_files")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let path: String = row.get(0)?;
-            let mtime: i64 = row.get(1)?;
-            let size: i64 = row.get(2)?;
-            existing.push((path, mtime, size));
-        }
-    }
-
-    for (path, mtime, size) in existing {
-        match current.get(&path) {
-            Some((cur_mtime, cur_size)) if *cur_mtime == mtime && *cur_size == size => {}
-            Some(_) => {
-                reindex_file(&mut conn, Path::new(&path), embeddings_cfg)?;
+            let source: String = row.get(1)?;
+            if !active.contains(&(path.clone(), source.clone())) {
+                stale.push((path, source));
             }
-            None => stale.push(path),
         }
     }
 
-    for (path, _) in current.iter() {
-        let exists = conn.query_row(
-            "SELECT 1 FROM memory_files WHERE path = ?",
-            [path],
-            |_| Ok(1),
-        )
-        .optional()?;
-        if exists.is_none() {
-            reindex_file(&mut conn, Path::new(path), embeddings_cfg)?;
-        }
-    }
-
-    for path in stale {
-        conn.execute("DELETE FROM memory_fts WHERE path = ?", [path.as_str()])?;
-        conn.execute("DELETE FROM memory_embeddings WHERE path = ?", [path.as_str()])?;
-        conn.execute("DELETE FROM memory_files WHERE path = ?", [path.as_str()])?;
+    for (path, source) in stale {
+        conn.execute(
+            "DELETE FROM memory_fts WHERE path = ? AND source = ?",
+            params![path, source],
+        )?;
+        conn.execute(
+            "DELETE FROM memory_embeddings WHERE path = ? AND source = ?",
+            params![path, source],
+        )?;
+        conn.execute(
+            "DELETE FROM memory_files WHERE path = ? AND source = ?",
+            params![path, source],
+        )?;
     }
 
     Ok(())
 }
 
-fn reindex_file(conn: &mut Connection, path: &Path, embeddings_cfg: &EmbeddingsConfig) -> Result<()> {
-    let contents = read_to_string(path)?;
-    let meta = std::fs::metadata(path).with_context(|| format!("metadata {}", path.display()))?;
-    let modified = meta
-        .modified()
-        .ok()
-        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let size = meta.len() as i64;
+fn index_file(
+    conn: &mut Connection,
+    entry: IndexedFile,
+    provider: Option<&EmbeddingProvider>,
+    chunk_tokens: usize,
+    chunk_overlap: usize,
+) -> Result<()> {
+    let rel_path = entry.rel_path.clone();
+    let source = entry.source.clone();
+    let existing = conn
+        .query_row(
+            "SELECT mtime, size FROM memory_files WHERE path = ? AND source = ?",
+            params![&rel_path, &source],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
 
-    conn.execute("DELETE FROM memory_fts WHERE path = ?", [path.to_string_lossy().as_ref()])?;
+    if let Some((mtime, size)) = existing {
+        if mtime == entry.mtime && size == entry.size {
+            return Ok(());
+        }
+    }
+
     conn.execute(
-        "DELETE FROM memory_embeddings WHERE path = ?",
-        [path.to_string_lossy().as_ref()],
+        "DELETE FROM memory_fts WHERE path = ? AND source = ?",
+        params![&rel_path, &source],
+    )?;
+    conn.execute(
+        "DELETE FROM memory_embeddings WHERE path = ? AND source = ?",
+        params![&rel_path, &source],
     )?;
 
+    let chunks = chunk_markdown(&entry.content, chunk_tokens, chunk_overlap)
+        .into_iter()
+        .filter(|chunk| !chunk.text.trim().is_empty())
+        .collect::<Vec<_>>();
+
     let tx = conn.transaction()?;
-    for (idx, line) in contents.lines().enumerate() {
+    for chunk in &chunks {
         tx.execute(
-            "INSERT INTO memory_fts(path, line_no, text) VALUES (?1, ?2, ?3)",
-            params![path.to_string_lossy().as_ref(), (idx + 1) as i64, line],
+            "INSERT INTO memory_fts(path, start_line, end_line, source, text) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                &rel_path,
+                chunk.start_line,
+                chunk.end_line,
+                &source,
+                &chunk.text
+            ],
         )?;
     }
     tx.execute(
-        "INSERT OR REPLACE INTO memory_files(path, mtime, size) VALUES (?1, ?2, ?3)",
-        params![path.to_string_lossy().as_ref(), modified, size],
+        "INSERT OR REPLACE INTO memory_files(path, source, mtime, size) VALUES (?1, ?2, ?3, ?4)",
+        params![&rel_path, &source, entry.mtime, entry.size],
     )?;
     tx.commit()?;
 
-    if let Some(provider) = build_embedding_provider(embeddings_cfg)? {
-        let lines: Vec<String> = contents.lines().map(|s| s.to_string()).collect();
-        for (chunk_index, chunk) in lines.chunks(provider.batch_size).enumerate() {
-            let vectors = provider.embed(&chunk.to_vec())?;
+    if let Some(provider) = provider {
+        for batch in chunks.chunks(provider.batch_size) {
+            let inputs = batch.iter().map(|chunk| chunk.text.clone()).collect::<Vec<_>>();
+            let vectors = provider.embed(&inputs)?;
             let tx = conn.transaction()?;
-            for (offset, vector) in vectors.into_iter().enumerate() {
-                let line_no = chunk_index * provider.batch_size + offset + 1;
+            for (idx, vector) in vectors.into_iter().enumerate() {
+                let chunk = &batch[idx];
                 let vec_json = serde_json::to_string(&vector)?;
                 tx.execute(
-                    "INSERT INTO memory_embeddings(path, line_no, vector) VALUES (?1, ?2, ?3)",
-                    params![path.to_string_lossy().as_ref(), line_no as i64, vec_json],
+                    "INSERT INTO memory_embeddings(path, start_line, end_line, source, vector) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        &rel_path,
+                        chunk.start_line,
+                        chunk.end_line,
+                        &source,
+                        vec_json
+                    ],
                 )?;
             }
             tx.commit()?;
@@ -333,52 +470,502 @@ fn open_db(paths: &ClawdPaths) -> Result<Connection> {
 }
 
 fn ensure_schema(conn: &Connection) -> Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version < SCHEMA_VERSION {
+        conn.execute("DROP TABLE IF EXISTS memory_fts", [])?;
+        conn.execute("DROP TABLE IF EXISTS memory_embeddings", [])?;
+        conn.execute("DROP TABLE IF EXISTS memory_files", [])?;
+        conn.execute(&format!("PRAGMA user_version = {}", SCHEMA_VERSION), [])?;
+    }
     conn.execute(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(path, line_no UNINDEXED, text, tokenize='unicode61')",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(path, start_line UNINDEXED, end_line UNINDEXED, source UNINDEXED, text, tokenize='unicode61')",
         [],
     )?;
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS memory_files (path TEXT PRIMARY KEY, mtime INTEGER, size INTEGER)",
+        "CREATE TABLE IF NOT EXISTS memory_files (path TEXT, source TEXT, mtime INTEGER, size INTEGER, PRIMARY KEY(path, source))",
         [],
     )?;
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS memory_embeddings (path TEXT, line_no INTEGER, vector TEXT, PRIMARY KEY(path, line_no))",
+        "CREATE TABLE IF NOT EXISTS memory_embeddings (path TEXT, start_line INTEGER, end_line INTEGER, source TEXT, vector TEXT, PRIMARY KEY(path, start_line, end_line, source))",
         [],
     )?;
     Ok(())
 }
 
-fn memory_files(workspace: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let memory_md = workspace.join("MEMORY.md");
-    if memory_md.exists() {
-        files.push(memory_md);
+fn normalize_rel_path(value: &str) -> String {
+    let trimmed = value.trim();
+    let stripped = trimmed.trim_start_matches(|c| c == '.' || c == '/' || c == '\\');
+    stripped.replace('\\', "/")
+}
+
+fn normalize_extra_paths(workspace: &Path, cfg: Option<&crate::config::MemoryConfig>) -> Vec<PathBuf> {
+    let Some(cfg) = cfg else {
+        return Vec::new();
+    };
+    let Some(raw) = cfg.extra_paths.as_ref() else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let mut resolved = Vec::new();
+    for value in raw {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let path = if Path::new(trimmed).is_absolute() {
+            PathBuf::from(trimmed)
+        } else {
+            workspace.join(trimmed)
+        };
+        let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if seen.insert(key.clone()) {
+            resolved.push(path);
+        }
     }
-    let mem_dir = workspace.join("memory");
-    if mem_dir.exists() {
-        for entry in WalkDir::new(mem_dir)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
-            if entry.file_type().is_file() {
-                if let Some(ext) = entry.path().extension() {
-                    if ext == "md" {
-                        files.push(entry.path().to_path_buf());
-                    }
-                }
+    resolved
+}
+
+fn is_memory_rel_path(rel_path: &str) -> bool {
+    let normalized = normalize_rel_path(rel_path);
+    if normalized.is_empty() {
+        return false;
+    }
+    if normalized == "MEMORY.md" || normalized == "memory.md" {
+        return true;
+    }
+    normalized.starts_with("memory/")
+}
+
+fn is_allowed_extra_path(abs_path: &Path, extra_paths: &[PathBuf]) -> Result<bool> {
+    if extra_paths.is_empty() {
+        return Ok(false);
+    }
+    for extra in extra_paths {
+        let meta = match std::fs::symlink_metadata(extra) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            if abs_path == extra || abs_path.starts_with(extra) {
+                return Ok(true);
             }
+            continue;
+        }
+        if meta.is_file() {
+            if abs_path == extra && abs_path.to_string_lossy().ends_with(".md") {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn list_memory_files(workspace: &Path, extra_paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut add_markdown = |path: &Path| {
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                return;
+            }
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                return;
+            }
+            files.push(path.to_path_buf());
+        }
+    };
+    add_markdown(&workspace.join("MEMORY.md"));
+    add_markdown(&workspace.join("memory.md"));
+
+    let mem_dir = workspace.join("memory");
+    if let Ok(meta) = std::fs::symlink_metadata(&mem_dir) {
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            for entry in WalkDir::new(&mem_dir)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                if entry.file_type().is_symlink() {
+                    continue;
+                }
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                if entry.path().extension().and_then(|s| s.to_str()) != Some("md") {
+                    continue;
+                }
+                files.push(entry.path().to_path_buf());
+            }
+        }
+    }
+
+    for extra in extra_paths {
+        let meta = match std::fs::symlink_metadata(extra) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            for entry in WalkDir::new(extra)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                if entry.file_type().is_symlink() || !entry.file_type().is_file() {
+                    continue;
+                }
+                if entry.path().extension().and_then(|s| s.to_str()) != Some("md") {
+                    continue;
+                }
+                files.push(entry.path().to_path_buf());
+            }
+            continue;
+        }
+        if meta.is_file() && extra.extension().and_then(|s| s.to_str()) == Some("md") {
+            files.push(extra.to_path_buf());
+        }
+    }
+
+    if files.len() <= 1 {
+        return files;
+    }
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for entry in files {
+        let key = std::fs::canonicalize(&entry).unwrap_or_else(|_| entry.clone());
+        if seen.insert(key) {
+            deduped.push(entry);
+        }
+    }
+    deduped
+}
+
+fn build_index_entry(workspace: &Path, abs_path: &Path, source: &str) -> Result<Option<IndexedFile>> {
+    let meta = match std::fs::symlink_metadata(abs_path) {
+        Ok(meta) => meta,
+        Err(_) => return Ok(None),
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Ok(None);
+    }
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let size = meta.len() as i64;
+    let content = read_to_string(abs_path)?;
+    let rel_path = match abs_path.strip_prefix(workspace) {
+        Ok(rel) => normalize_rel_path(&rel.to_string_lossy()),
+        Err(_) => abs_path.to_string_lossy().to_string(),
+    };
+    Ok(Some(IndexedFile {
+        rel_path,
+        mtime,
+        size,
+        source: source.to_string(),
+        content,
+    }))
+}
+
+fn list_session_files(paths: &ClawdPaths, session_key: Option<&str>) -> Vec<PathBuf> {
+    if let Some(key) = session_key {
+        let file = crate::sessions::session_transcript_path(paths, key);
+        if file.exists() {
+            return vec![file];
+        }
+        return Vec::new();
+    }
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&paths.sessions_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            files.push(path);
         }
     }
     files
 }
 
-fn allowed_memory_path(relative: &Path) -> bool {
-    let rel = relative.to_string_lossy();
-    if rel == "MEMORY.md" || rel == "memory/MEMORY.md" {
+fn build_session_entry(abs_path: &Path) -> Result<Option<IndexedFile>> {
+    let meta = match std::fs::symlink_metadata(abs_path) {
+        Ok(meta) => meta,
+        Err(_) => return Ok(None),
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Ok(None);
+    }
+    let raw = read_to_string(abs_path)?;
+    let mut collected = Vec::new();
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if value.get("type").and_then(|v| v.as_str()) != Some("message") {
+            continue;
+        }
+        let message = value.get("message").and_then(|v| v.as_object());
+        let role = message.and_then(|m| m.get("role")).and_then(|v| v.as_str());
+        let role = match role {
+            Some("user") => "User",
+            Some("assistant") => "Assistant",
+            _ => continue,
+        };
+        let content = message.and_then(|m| m.get("content"));
+        let text = content.and_then(extract_session_text);
+        let Some(text) = text else { continue };
+        collected.push(format!("{role}: {text}"));
+    }
+    let content = collected.join("\n");
+    if content.trim().is_empty() {
+        return Ok(None);
+    }
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let size = meta.len() as i64;
+    let rel_path = session_rel_path(abs_path);
+    Ok(Some(IndexedFile {
+        rel_path,
+        mtime,
+        size,
+        source: "sessions".to_string(),
+        content,
+    }))
+}
+
+fn session_rel_path(abs_path: &Path) -> String {
+    let file_name = abs_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("session.jsonl");
+    format!("sessions/{file_name}")
+}
+
+fn normalize_session_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn extract_session_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        let normalized = normalize_session_text(text);
+        return if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized)
+        };
+    }
+    let array = value.as_array()?;
+    let mut parts = Vec::new();
+    for entry in array {
+        let obj = entry.as_object()?;
+        if obj.get("type").and_then(|v| v.as_str()) != Some("text") {
+            continue;
+        }
+        let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let normalized = normalize_session_text(text);
+        if !normalized.is_empty() {
+            parts.push(normalized);
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+fn resolve_chunking(cfg: &ClawdConfig) -> (usize, usize) {
+    let chunk_tokens = cfg
+        .memory
+        .as_ref()
+        .and_then(|m| m.chunk_tokens)
+        .unwrap_or(DEFAULT_CHUNK_TOKENS)
+        .max(1);
+    let overlap = cfg
+        .memory
+        .as_ref()
+        .and_then(|m| m.chunk_overlap)
+        .unwrap_or(DEFAULT_CHUNK_OVERLAP);
+    (chunk_tokens, overlap.min(chunk_tokens))
+}
+
+fn resolve_citations_mode(cfg: &ClawdConfig) -> String {
+    match cfg
+        .memory
+        .as_ref()
+        .and_then(|m| m.citations.as_deref())
+        .unwrap_or("auto")
+        .to_lowercase()
+        .as_str()
+    {
+        "on" => "on".to_string(),
+        "off" => "off".to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
+fn should_include_citations(mode: &str, session_key: Option<&str>) -> bool {
+    match mode {
+        "on" => return true,
+        "off" => return false,
+        _ => {}
+    }
+    let raw = session_key.unwrap_or("").trim();
+    if raw.is_empty() {
         return true;
     }
-    rel.starts_with("memory/") && rel.ends_with(".md")
+    let rest = parse_agent_session_key(raw).unwrap_or_else(|| raw.to_string());
+    let tokens = rest.to_lowercase();
+    let tokens = tokens.split(':').collect::<Vec<_>>();
+    !tokens.iter().any(|t| *t == "channel" || *t == "group")
+}
+
+fn parse_agent_session_key(value: &str) -> Option<String> {
+    let parts: Vec<&str> = value.split(':').filter(|s| !s.is_empty()).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    if parts[0] != "agent" {
+        return None;
+    }
+    let rest = parts[2..].join(":");
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest)
+    }
+}
+
+fn row_key(row: &SearchRow) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        row.path, row.start_line, row.end_line, row.source
+    )
+}
+
+fn resolve_sources(include_sessions: bool) -> Vec<String> {
+    let mut sources = vec!["memory".to_string()];
+    if include_sessions {
+        sources.push("sessions".to_string());
+    }
+    sources
+}
+
+fn format_citation(path: &str, start_line: i64, end_line: i64) -> String {
+    if start_line <= 0 || end_line <= 0 {
+        return path.to_string();
+    }
+    if start_line == end_line {
+        format!("{path}#L{start_line}")
+    } else {
+        format!("{path}#L{start_line}-L{end_line}")
+    }
+}
+
+fn chunk_markdown(content: &str, chunk_tokens: usize, chunk_overlap: usize) -> Vec<MemoryChunk> {
+    let lines: Vec<&str> = content.split('\n').collect();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let max_chars = std::cmp::max(32, chunk_tokens.saturating_mul(4));
+    let overlap_chars = chunk_overlap.saturating_mul(4);
+    let mut chunks = Vec::new();
+    let mut current: Vec<(String, i64)> = Vec::new();
+    let mut current_chars = 0usize;
+
+    let flush = |current: &Vec<(String, i64)>, chunks: &mut Vec<MemoryChunk>| {
+        if current.is_empty() {
+            return;
+        }
+        let start_line = current.first().map(|c| c.1).unwrap_or(1);
+        let end_line = current.last().map(|c| c.1).unwrap_or(start_line);
+        let text = current.iter().map(|c| c.0.as_str()).collect::<Vec<_>>().join("\n");
+        chunks.push(MemoryChunk {
+            start_line,
+            end_line,
+            text,
+        });
+    };
+
+    let carry_overlap = |current: &mut Vec<(String, i64)>, current_chars: &mut usize| {
+        if overlap_chars == 0 || current.is_empty() {
+            current.clear();
+            *current_chars = 0;
+            return;
+        }
+        let mut acc = 0usize;
+        let mut kept: Vec<(String, i64)> = Vec::new();
+        for entry in current.iter().rev() {
+            acc += entry.0.chars().count() + 1;
+            kept.push(entry.clone());
+            if acc >= overlap_chars {
+                break;
+            }
+        }
+        kept.reverse();
+        *current_chars = kept.iter().map(|e| e.0.chars().count() + 1).sum();
+        *current = kept;
+    };
+
+    for (idx, line) in lines.iter().enumerate() {
+        let line_no = idx as i64 + 1;
+        let segments = split_line_segments(line, max_chars);
+        for segment in segments {
+            let line_size = segment.chars().count() + 1;
+            if current_chars + line_size > max_chars && !current.is_empty() {
+                flush(&current, &mut chunks);
+                carry_overlap(&mut current, &mut current_chars);
+            }
+            current.push((segment, line_no));
+            current_chars += line_size;
+        }
+    }
+    flush(&current, &mut chunks);
+    chunks
+}
+
+fn split_line_segments(line: &str, max_chars: usize) -> Vec<String> {
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+    if max_chars == 0 {
+        return vec![line.to_string()];
+    }
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut count = 0usize;
+    for ch in line.chars() {
+        current.push(ch);
+        count += 1;
+        if count >= max_chars {
+            segments.push(current);
+            current = String::new();
+            count = 0;
+        }
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    segments
 }
 
 fn build_embedding_provider(cfg: &EmbeddingsConfig) -> Result<Option<EmbeddingProvider>> {

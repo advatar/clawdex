@@ -11,6 +11,7 @@ pub mod memory;
 pub mod permissions;
 pub mod plugins;
 pub mod runner;
+pub mod sessions;
 pub mod skills_sync;
 pub mod task_db;
 pub mod tasks;

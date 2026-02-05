@@ -1,6 +1,6 @@
 use std::io::{self, BufRead, Write};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
 
 use codex_protocol::mcp::{CallToolResult, Tool};
@@ -18,6 +18,36 @@ use crate::memory;
 struct JsonRpcError {
     code: i64,
     message: String,
+}
+
+impl JsonRpcError {
+    fn invalid_request(message: impl Into<String>) -> Self {
+        Self {
+            code: -32600,
+            message: message.into(),
+        }
+    }
+
+    fn method_not_found(message: impl Into<String>) -> Self {
+        Self {
+            code: -32601,
+            message: message.into(),
+        }
+    }
+
+    fn invalid_params(message: impl Into<String>) -> Self {
+        Self {
+            code: -32602,
+            message: message.into(),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            code: -32000,
+            message: message.into(),
+        }
+    }
 }
 
 pub fn run_mcp_server(
@@ -63,10 +93,7 @@ pub fn run_mcp_server(
             continue;
         }
         let Some(method) = method else {
-            write_jsonrpc_error(&mut stdout, id, JsonRpcError {
-                code: -32600,
-                message: "missing method".to_string(),
-            })?;
+            write_jsonrpc_error(&mut stdout, id, JsonRpcError::invalid_request("missing method"))?;
             continue;
         };
 
@@ -82,14 +109,7 @@ pub fn run_mcp_server(
         match response {
             Ok(result) => write_jsonrpc_result(&mut stdout, id.unwrap(), result)?,
             Err(err) => {
-                write_jsonrpc_error(
-                    &mut stdout,
-                    id,
-                    JsonRpcError {
-                        code: -32000,
-                        message: err.to_string(),
-                    },
-                )?;
+                write_jsonrpc_error(&mut stdout, id, err)?;
             }
         }
     }
@@ -104,13 +124,15 @@ fn handle_request(
     paths: &ClawdPaths,
     cron_enabled: bool,
     heartbeat_enabled: bool,
-) -> Result<Value> {
+) -> std::result::Result<Value, JsonRpcError> {
     match method {
         "initialize" => Ok(initialize_response(&params)),
         "tools/list" => Ok(tools_list_response()),
         "tools/call" => handle_tool_call(cfg, paths, &params, cron_enabled, heartbeat_enabled),
         "ping" => Ok(json!({ "ok": true })),
-        _ => Err(anyhow::anyhow!("unknown method: {method}")),
+        _ => Err(JsonRpcError::method_not_found(format!(
+            "unknown method: {method}"
+        ))),
     }
 }
 
@@ -293,7 +315,7 @@ fn tool_definitions() -> Vec<Tool> {
         Tool {
             name: "message.send".to_string(),
             title: None,
-            description: Some("Queue a message via the gateway outbox".to_string()),
+            description: Some("Send a message via the gateway".to_string()),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -361,30 +383,57 @@ fn tool_definitions() -> Vec<Tool> {
 }
 
 fn handle_tool_call(
-    _cfg: &ClawdConfig,
+    cfg: &ClawdConfig,
     paths: &ClawdPaths,
     params: &Value,
     cron_enabled: bool,
     heartbeat_enabled: bool,
-) -> Result<Value> {
+) -> std::result::Result<Value, JsonRpcError> {
     let name = params
         .get("name")
         .and_then(|v| v.as_str())
-        .context("tools/call requires name")?;
-    let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+        .ok_or_else(|| JsonRpcError::invalid_params("tools/call requires name"))?;
+    let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    if !arguments.is_object() {
+        return Err(JsonRpcError::invalid_params("arguments must be an object"));
+    }
 
     let result = match name {
-        "cron.list" => cron::list_jobs(paths, arguments.get("includeDisabled").and_then(|v| v.as_bool()).unwrap_or(false))?,
-        "cron.status" => cron::status(paths, cron_enabled)?,
-        "cron.add" => cron::add_job(paths, &arguments)?,
-        "cron.update" => cron::update_job(paths, &arguments)?,
-        "cron.remove" => cron::remove_job(paths, &arguments)?,
+        "cron.list" => cron::list_jobs(
+            paths,
+            arguments
+                .get("includeDisabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        )
+        .map_err(|err| JsonRpcError::internal(err.to_string()))?,
+        "cron.status" => cron::status(paths, cron_enabled)
+            .map_err(|err| JsonRpcError::internal(err.to_string()))?,
+        "cron.add" => cron::add_job(paths, &arguments)
+            .map_err(|err| JsonRpcError::internal(err.to_string()))?,
+        "cron.update" => cron::update_job(paths, &arguments)
+            .map_err(|err| JsonRpcError::internal(err.to_string()))?,
+        "cron.remove" => {
+            let job_id = arguments
+                .get("jobId")
+                .or_else(|| arguments.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if job_id.is_empty() {
+                return Err(JsonRpcError::invalid_params("missing jobId"));
+            }
+            cron::remove_job(paths, &arguments)
+                .map_err(|err| JsonRpcError::internal(err.to_string()))?
+        }
         "cron.run" => {
             let job_id = arguments
                 .get("jobId")
                 .or_else(|| arguments.get("id"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            if job_id.is_empty() {
+                return Err(JsonRpcError::invalid_params("missing jobId"));
+            }
             let mode = arguments
                 .get("mode")
                 .and_then(|v| v.as_str())
@@ -393,27 +442,68 @@ fn handle_tool_call(
                 if let Some(result) = daemon_client::cron_run(job_id, mode) {
                     result
                 } else {
-                    cron::run_jobs(paths, &arguments)?
+                    cron::run_jobs(paths, &arguments)
+                        .map_err(|err| JsonRpcError::internal(err.to_string()))?
                 }
             } else {
-                cron::run_jobs(paths, &arguments)?
+                cron::run_jobs(paths, &arguments)
+                    .map_err(|err| JsonRpcError::internal(err.to_string()))?
             }
         }
-        "cron.runs" => cron::runs(paths, &arguments)?,
-        "memory_search" => memory::memory_search(paths, &arguments)?,
-        "memory_get" => memory::memory_get(paths, &arguments)?,
-        "message.send" => gateway::send_message(paths, &arguments)?,
-        "channels.list" => gateway::list_channels(paths)?,
-        "channels.resolve_target" => gateway::resolve_target(paths, &arguments)?,
+        "cron.runs" => {
+            let job_id = arguments
+                .get("jobId")
+                .or_else(|| arguments.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if job_id.is_empty() {
+                return Err(JsonRpcError::invalid_params("missing jobId"));
+            }
+            cron::runs(paths, &arguments)
+                .map_err(|err| JsonRpcError::internal(err.to_string()))?
+        }
+        "memory_search" => {
+            let query = arguments.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            if query.trim().is_empty() {
+                return Err(JsonRpcError::invalid_params("missing query"));
+            }
+            memory::memory_search(paths, &arguments)
+                .map_err(|err| JsonRpcError::internal(err.to_string()))?
+        }
+        "memory_get" => {
+            let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            if path.trim().is_empty() {
+                return Err(JsonRpcError::invalid_params("missing path"));
+            }
+            memory::memory_get(paths, &arguments)
+                .map_err(|err| JsonRpcError::internal(err.to_string()))?
+        }
+        "message.send" => {
+            let text = arguments
+                .get("text")
+                .or_else(|| arguments.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if text.trim().is_empty() {
+                return Err(JsonRpcError::invalid_params("missing text"));
+            }
+            gateway::send_message(paths, &arguments)
+                .map_err(|err| JsonRpcError::internal(err.to_string()))?
+        }
+        "channels.list" => gateway::list_channels(paths)
+            .map_err(|err| JsonRpcError::internal(err.to_string()))?,
+        "channels.resolve_target" => gateway::resolve_target(paths, &arguments)
+            .map_err(|err| JsonRpcError::internal(err.to_string()))?,
         "heartbeat.wake" => {
             if !heartbeat_enabled {
                 json!({ "ok": false, "reason": "heartbeat disabled" })
             } else {
                 let reason = arguments.get("reason").and_then(|v| v.as_str()).map(|s| s.to_string());
-                heartbeat::wake(paths, reason)?
+                heartbeat::wake(cfg, paths, reason)
+                    .map_err(|err| JsonRpcError::internal(err.to_string()))?
             }
         }
-        _ => return Ok(error_result(format!("Unknown tool: {name}"))),
+        _ => return Err(JsonRpcError::invalid_params(format!("unknown tool: {name}"))),
     };
 
     Ok(success_result(result))
@@ -425,16 +515,6 @@ fn success_result(value: Value) -> Value {
         content: vec![json!({ "type": "text", "text": summary })],
         structured_content: Some(value),
         is_error: None,
-        meta: None,
-    };
-    serde_json::to_value(result).unwrap_or_else(|_| json!({}))
-}
-
-fn error_result(message: String) -> Value {
-    let result = CallToolResult {
-        content: vec![json!({ "type": "text", "text": message.clone() })],
-        structured_content: Some(json!({ "error": message })),
-        is_error: Some(true),
         meta: None,
     };
     serde_json::to_value(result).unwrap_or_else(|_| json!({}))
