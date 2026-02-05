@@ -14,6 +14,59 @@ use crate::gateway;
 use crate::heartbeat;
 use crate::memory;
 
+const CRON_ADD_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/cron.add.request.schema.json");
+const CRON_ADD_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/cron.add.response.schema.json");
+const CRON_UPDATE_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/cron.update.request.schema.json");
+const CRON_UPDATE_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/cron.update.response.schema.json");
+const CRON_LIST_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/cron.list.request.schema.json");
+const CRON_LIST_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/cron.list.response.schema.json");
+const CRON_REMOVE_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/cron.remove.request.schema.json");
+const CRON_REMOVE_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/cron.remove.response.schema.json");
+const CRON_RUN_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/cron.run.request.schema.json");
+const CRON_RUN_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/cron.run.response.schema.json");
+const CRON_RUNS_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/cron.runs.request.schema.json");
+const CRON_RUNS_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/cron.runs.response.schema.json");
+const CRON_STATUS_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/cron.status.request.schema.json");
+const CRON_STATUS_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/cron.status.response.schema.json");
+const MEMORY_SEARCH_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/memory_search.request.schema.json");
+const MEMORY_SEARCH_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/memory_search.response.schema.json");
+const MEMORY_GET_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/memory_get.request.schema.json");
+const MEMORY_GET_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/memory_get.response.schema.json");
+const MESSAGE_SEND_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/message.send.request.schema.json");
+const MESSAGE_SEND_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/message.send.response.schema.json");
+const CHANNELS_LIST_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/channels.list.request.schema.json");
+const CHANNELS_LIST_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/channels.list.response.schema.json");
+const CHANNELS_RESOLVE_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/channels.resolve_target.request.schema.json");
+const CHANNELS_RESOLVE_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/channels.resolve_target.response.schema.json");
+const HEARTBEAT_WAKE_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/heartbeat.wake.request.schema.json");
+const HEARTBEAT_WAKE_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/heartbeat.wake.response.schema.json");
+
 #[derive(Debug)]
 struct JsonRpcError {
     code: i64,
@@ -168,14 +221,8 @@ fn tool_definitions() -> Vec<Tool> {
             name: "cron.list".to_string(),
             title: None,
             description: Some("List cron jobs".to_string()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "includeDisabled": { "type": "boolean" }
-                },
-                "additionalProperties": true
-            }),
-            output_schema: None,
+            input_schema: schema_value(CRON_LIST_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(CRON_LIST_RESPONSE_SCHEMA)),
             annotations: None,
             icons: None,
             meta: None,
@@ -184,11 +231,8 @@ fn tool_definitions() -> Vec<Tool> {
             name: "cron.status".to_string(),
             title: None,
             description: Some("Cron status summary".to_string()),
-            input_schema: json!({
-                "type": "object",
-                "additionalProperties": true
-            }),
-            output_schema: None,
+            input_schema: schema_value(CRON_STATUS_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(CRON_STATUS_RESPONSE_SCHEMA)),
             annotations: None,
             icons: None,
             meta: None,
@@ -197,8 +241,8 @@ fn tool_definitions() -> Vec<Tool> {
             name: "cron.add".to_string(),
             title: None,
             description: Some("Create a cron job".to_string()),
-            input_schema: json!({ "type": "object", "additionalProperties": true }),
-            output_schema: None,
+            input_schema: schema_value(CRON_ADD_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(CRON_ADD_RESPONSE_SCHEMA)),
             annotations: None,
             icons: None,
             meta: None,
@@ -207,16 +251,8 @@ fn tool_definitions() -> Vec<Tool> {
             name: "cron.update".to_string(),
             title: None,
             description: Some("Update a cron job".to_string()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "jobId": { "type": "string" },
-                    "id": { "type": "string" },
-                    "patch": { "type": "object" }
-                },
-                "additionalProperties": true
-            }),
-            output_schema: None,
+            input_schema: schema_value(CRON_UPDATE_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(CRON_UPDATE_RESPONSE_SCHEMA)),
             annotations: None,
             icons: None,
             meta: None,
@@ -225,15 +261,8 @@ fn tool_definitions() -> Vec<Tool> {
             name: "cron.remove".to_string(),
             title: None,
             description: Some("Remove a cron job".to_string()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "jobId": { "type": "string" },
-                    "id": { "type": "string" }
-                },
-                "additionalProperties": true
-            }),
-            output_schema: None,
+            input_schema: schema_value(CRON_REMOVE_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(CRON_REMOVE_RESPONSE_SCHEMA)),
             annotations: None,
             icons: None,
             meta: None,
@@ -242,16 +271,8 @@ fn tool_definitions() -> Vec<Tool> {
             name: "cron.run".to_string(),
             title: None,
             description: Some("Run cron jobs".to_string()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "jobId": { "type": "string" },
-                    "id": { "type": "string" },
-                    "mode": { "type": "string" }
-                },
-                "additionalProperties": true
-            }),
-            output_schema: None,
+            input_schema: schema_value(CRON_RUN_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(CRON_RUN_RESPONSE_SCHEMA)),
             annotations: None,
             icons: None,
             meta: None,
@@ -260,16 +281,8 @@ fn tool_definitions() -> Vec<Tool> {
             name: "cron.runs".to_string(),
             title: None,
             description: Some("List cron run history".to_string()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "jobId": { "type": "string" },
-                    "id": { "type": "string" },
-                    "limit": { "type": "number" }
-                },
-                "additionalProperties": true
-            }),
-            output_schema: None,
+            input_schema: schema_value(CRON_RUNS_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(CRON_RUNS_RESPONSE_SCHEMA)),
             annotations: None,
             icons: None,
             meta: None,
@@ -278,17 +291,8 @@ fn tool_definitions() -> Vec<Tool> {
             name: "memory_search".to_string(),
             title: None,
             description: Some("Search memory markdown files".to_string()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string" },
-                    "maxResults": { "type": "number" },
-                    "minScore": { "type": "number" }
-                },
-                "required": ["query"],
-                "additionalProperties": true
-            }),
-            output_schema: None,
+            input_schema: schema_value(MEMORY_SEARCH_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(MEMORY_SEARCH_RESPONSE_SCHEMA)),
             annotations: None,
             icons: None,
             meta: None,
@@ -297,17 +301,8 @@ fn tool_definitions() -> Vec<Tool> {
             name: "memory_get".to_string(),
             title: None,
             description: Some("Read a memory file".to_string()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" },
-                    "from": { "type": "number" },
-                    "lines": { "type": "number" }
-                },
-                "required": ["path"],
-                "additionalProperties": true
-            }),
-            output_schema: None,
+            input_schema: schema_value(MEMORY_GET_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(MEMORY_GET_RESPONSE_SCHEMA)),
             annotations: None,
             icons: None,
             meta: None,
@@ -316,21 +311,8 @@ fn tool_definitions() -> Vec<Tool> {
             name: "message.send".to_string(),
             title: None,
             description: Some("Send a message via the gateway".to_string()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string" },
-                    "to": { "type": "string" },
-                    "text": { "type": "string" },
-                    "message": { "type": "string" },
-                    "accountId": { "type": "string" },
-                    "sessionKey": { "type": "string" },
-                    "bestEffort": { "type": "boolean" },
-                    "dryRun": { "type": "boolean" }
-                },
-                "additionalProperties": true
-            }),
-            output_schema: None,
+            input_schema: schema_value(MESSAGE_SEND_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(MESSAGE_SEND_RESPONSE_SCHEMA)),
             annotations: None,
             icons: None,
             meta: None,
@@ -339,8 +321,8 @@ fn tool_definitions() -> Vec<Tool> {
             name: "channels.list".to_string(),
             title: None,
             description: Some("List gateway routes".to_string()),
-            input_schema: json!({ "type": "object", "additionalProperties": true }),
-            output_schema: None,
+            input_schema: schema_value(CHANNELS_LIST_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(CHANNELS_LIST_RESPONSE_SCHEMA)),
             annotations: None,
             icons: None,
             meta: None,
@@ -349,16 +331,8 @@ fn tool_definitions() -> Vec<Tool> {
             name: "channels.resolve_target".to_string(),
             title: None,
             description: Some("Resolve messaging target from known routes".to_string()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string" },
-                    "to": { "type": "string" },
-                    "accountId": { "type": "string" }
-                },
-                "additionalProperties": true
-            }),
-            output_schema: None,
+            input_schema: schema_value(CHANNELS_RESOLVE_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(CHANNELS_RESOLVE_RESPONSE_SCHEMA)),
             annotations: None,
             icons: None,
             meta: None,
@@ -367,19 +341,17 @@ fn tool_definitions() -> Vec<Tool> {
             name: "heartbeat.wake".to_string(),
             title: None,
             description: Some("Trigger a heartbeat run".to_string()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "reason": { "type": "string" }
-                },
-                "additionalProperties": true
-            }),
-            output_schema: None,
+            input_schema: schema_value(HEARTBEAT_WAKE_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(HEARTBEAT_WAKE_RESPONSE_SCHEMA)),
             annotations: None,
             icons: None,
             meta: None,
         },
     ]
+}
+
+fn schema_value(schema: &str) -> Value {
+    serde_json::from_str(schema).unwrap_or_else(|_| json!({}))
 }
 
 fn handle_tool_call(
