@@ -40,6 +40,10 @@
 - [x] Align cron.run semantics with OpenClaw (immediate run + {ok, ran, reason})
 - [x] Align cron delivery object behavior and legacy patch merging with OpenClaw
 
+Roadmap:
+- [x] Add revised OpenClaw parity roadmap (mac app parity priority, web/admin nice-to-have) in `ROADMAP.md`.
+- [x] Include plugin lifecycle + packaging + MCP/skills sync + mac app UX roadmap details.
+
 Notes:
 - `TEMPLATE_PACK.md` is the parity checklist: use it later to fill tool schemas, routing rules, and tests, then implement remaining gaps using the name `Clawdex`.
 - `MAC_APP.md` already references the Rust UI bridge and the prebuilt binaries helper; keep it in sync if flow changes.
