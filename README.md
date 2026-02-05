@@ -303,6 +303,9 @@ Workspace policy notes:
    - `--state-dir <path>` overrides state directory.
    - `--workspace <path>` overrides workspace directory.
 
+Built-in output builder plugin (spreadsheets, decks, reports):
+- `clawdex plugins add --path plugins/clawdex-artifacts`
+
 `clawdex plugins enable`
 1. Description: Enable a plugin and sync its skills.
 2. Options:
@@ -402,6 +405,12 @@ Cron tools:
 Memory tools:
 1. `memory_search({ query, maxResults?, minScore?, sessionKey? })`
 2. `memory_get({ path, from?, lines? })`
+
+Artifact tools:
+1. `artifact.create_xlsx({ outputPath, sheets, title?, taskRunId? })`
+2. `artifact.create_pptx({ outputPath, slides, title?, taskRunId? })`
+3. `artifact.create_docx({ outputPath, sections?, title?, taskRunId? })`
+4. `artifact.create_pdf({ outputPath, sections?, title?, taskRunId? })`
 
 Messaging tools:
 1. `message.send({ channel, to, text|message, accountId?, sessionKey?, bestEffort?, dryRun? })` (queues to gateway outbox)

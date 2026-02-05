@@ -1,4 +1,5 @@
 pub mod app_server;
+pub mod artifacts;
 pub mod approvals;
 pub mod config;
 pub mod cron;

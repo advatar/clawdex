@@ -1,0 +1,6 @@
+{
+  "id": "clawdex-artifacts",
+  "name": "Clawdex Outputs",
+  "version": "0.1.0",
+  "description": "Builder skills for spreadsheets, slide decks, and reports using Clawdex artifact tools."
+}

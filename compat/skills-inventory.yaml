@@ -1,1 +1,7 @@
-skills: []
+skills:
+  - name: "Spreadsheet Builder"
+    source: "clawdex-artifacts plugin"
+  - name: "Slide Deck Builder"
+    source: "clawdex-artifacts plugin"
+  - name: "Report Writer"
+    source: "clawdex-artifacts plugin"

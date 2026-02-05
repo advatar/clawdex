@@ -44,6 +44,16 @@ pub struct TaskEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactRecord {
+    pub id: String,
+    pub task_run_id: String,
+    pub path: String,
+    pub mime: Option<String>,
+    pub sha256: Option<String>,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginRecord {
     pub id: String,
     pub name: String,
@@ -332,6 +342,27 @@ impl TaskStore {
             params![id, run_id, path, mime, sha256, now],
         )?;
         Ok(())
+    }
+
+    pub fn list_artifacts(&self, run_id: &str) -> Result<Vec<ArtifactRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_run_id, path, mime, sha256, created_at_ms FROM artifacts WHERE task_run_id = ? ORDER BY created_at_ms ASC",
+        )?;
+        let rows = stmt.query_map(params![run_id], |row| {
+            Ok(ArtifactRecord {
+                id: row.get(0)?,
+                task_run_id: row.get(1)?,
+                path: row.get(2)?,
+                mime: row.get(3)?,
+                sha256: row.get(4)?,
+                created_at_ms: row.get(5)?,
+            })
+        })?;
+        let mut artifacts = Vec::new();
+        for row in rows {
+            artifacts.push(row?);
+        }
+        Ok(artifacts)
     }
 
     pub fn list_events(&self, run_id: &str, limit: Option<usize>) -> Result<Vec<TaskEvent>> {

@@ -209,6 +209,10 @@ impl TaskEngine {
             "CODEX_WORKSPACE_DIR".to_string(),
             self.paths.workspace_dir.to_string_lossy().to_string(),
         ));
+        env.push((
+            "CLAWDEX_TASK_RUN_ID".to_string(),
+            run.id.clone(),
+        ));
 
         let config_overrides = self
             .cfg
@@ -274,6 +278,25 @@ impl TaskEngine {
                     "turn_completed",
                     &json!({ "message": turn_outcome.message, "warnings": turn_outcome.warnings }),
                 )?;
+                if let Ok(artifacts) = store.list_artifacts(&run.id) {
+                    if !artifacts.is_empty() {
+                        let _ = store.record_event(
+                            &run.id,
+                            "artifacts",
+                            &json!({ "artifacts": artifacts }),
+                        );
+                        if emit_output {
+                            println!("\n[task] outputs:");
+                            for artifact in artifacts {
+                                if let Some(mime) = artifact.mime.as_ref() {
+                                    println!("  - {} ({})", artifact.path, mime);
+                                } else {
+                                    println!("  - {}", artifact.path);
+                                }
+                            }
+                        }
+                    }
+                }
                 if emit_output {
                     if created {
                         println!("[task] created {} ({})", task.id, task.title);

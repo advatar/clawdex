@@ -9,6 +9,7 @@ use jsonschema::{Draft, JSONSchema};
 use crate::config::{
     resolve_cron_enabled, resolve_heartbeat_enabled, ClawdConfig, ClawdPaths,
 };
+use crate::artifacts;
 use crate::cron;
 use crate::daemon_client;
 use crate::gateway;
@@ -67,6 +68,22 @@ const HEARTBEAT_WAKE_REQUEST_SCHEMA: &str =
     include_str!("../../compat/tool-schemas/heartbeat.wake.request.schema.json");
 const HEARTBEAT_WAKE_RESPONSE_SCHEMA: &str =
     include_str!("../../compat/tool-schemas/heartbeat.wake.response.schema.json");
+const ARTIFACT_CREATE_XLSX_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/artifact.create_xlsx.request.schema.json");
+const ARTIFACT_CREATE_XLSX_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/artifact.create_xlsx.response.schema.json");
+const ARTIFACT_CREATE_PPTX_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/artifact.create_pptx.request.schema.json");
+const ARTIFACT_CREATE_PPTX_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/artifact.create_pptx.response.schema.json");
+const ARTIFACT_CREATE_DOCX_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/artifact.create_docx.request.schema.json");
+const ARTIFACT_CREATE_DOCX_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/artifact.create_docx.response.schema.json");
+const ARTIFACT_CREATE_PDF_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/artifact.create_pdf.request.schema.json");
+const ARTIFACT_CREATE_PDF_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/artifact.create_pdf.response.schema.json");
 
 #[derive(Debug)]
 struct JsonRpcError {
@@ -339,6 +356,46 @@ fn tool_definitions() -> Vec<Tool> {
             meta: None,
         },
         Tool {
+            name: "artifact.create_xlsx".to_string(),
+            title: None,
+            description: Some("Create an Excel workbook from a structured spec".to_string()),
+            input_schema: schema_value(ARTIFACT_CREATE_XLSX_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(ARTIFACT_CREATE_XLSX_RESPONSE_SCHEMA)),
+            annotations: None,
+            icons: None,
+            meta: None,
+        },
+        Tool {
+            name: "artifact.create_pptx".to_string(),
+            title: None,
+            description: Some("Create a PowerPoint deck from a structured spec".to_string()),
+            input_schema: schema_value(ARTIFACT_CREATE_PPTX_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(ARTIFACT_CREATE_PPTX_RESPONSE_SCHEMA)),
+            annotations: None,
+            icons: None,
+            meta: None,
+        },
+        Tool {
+            name: "artifact.create_docx".to_string(),
+            title: None,
+            description: Some("Create a Word document from a structured spec".to_string()),
+            input_schema: schema_value(ARTIFACT_CREATE_DOCX_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(ARTIFACT_CREATE_DOCX_RESPONSE_SCHEMA)),
+            annotations: None,
+            icons: None,
+            meta: None,
+        },
+        Tool {
+            name: "artifact.create_pdf".to_string(),
+            title: None,
+            description: Some("Create a PDF report from a structured spec".to_string()),
+            input_schema: schema_value(ARTIFACT_CREATE_PDF_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(ARTIFACT_CREATE_PDF_RESPONSE_SCHEMA)),
+            annotations: None,
+            icons: None,
+            meta: None,
+        },
+        Tool {
             name: "heartbeat.wake".to_string(),
             title: None,
             description: Some("Trigger a heartbeat run".to_string()),
@@ -468,6 +525,14 @@ fn handle_tool_call(
             .map_err(|err| JsonRpcError::internal(err.to_string()))?,
         "channels.resolve_target" => gateway::resolve_target(paths, &arguments)
             .map_err(|err| JsonRpcError::internal(err.to_string()))?,
+        "artifact.create_xlsx" => artifacts::create_xlsx(paths, &arguments)
+            .map_err(|err| JsonRpcError::internal(err.to_string()))?,
+        "artifact.create_pptx" => artifacts::create_pptx(paths, &arguments)
+            .map_err(|err| JsonRpcError::internal(err.to_string()))?,
+        "artifact.create_docx" => artifacts::create_docx(paths, &arguments)
+            .map_err(|err| JsonRpcError::internal(err.to_string()))?,
+        "artifact.create_pdf" => artifacts::create_pdf(paths, &arguments)
+            .map_err(|err| JsonRpcError::internal(err.to_string()))?,
         "heartbeat.wake" => {
             if !heartbeat_enabled {
                 json!({ "ok": false, "reason": "heartbeat disabled" })
@@ -509,6 +574,10 @@ fn validate_tool_arguments(name: &str, arguments: &Value) -> std::result::Result
         "channels.list" => Some(CHANNELS_LIST_REQUEST_SCHEMA),
         "channels.resolve_target" => Some(CHANNELS_RESOLVE_REQUEST_SCHEMA),
         "heartbeat.wake" => Some(HEARTBEAT_WAKE_REQUEST_SCHEMA),
+        "artifact.create_xlsx" => Some(ARTIFACT_CREATE_XLSX_REQUEST_SCHEMA),
+        "artifact.create_pptx" => Some(ARTIFACT_CREATE_PPTX_REQUEST_SCHEMA),
+        "artifact.create_docx" => Some(ARTIFACT_CREATE_DOCX_REQUEST_SCHEMA),
+        "artifact.create_pdf" => Some(ARTIFACT_CREATE_PDF_REQUEST_SCHEMA),
         _ => None,
     };
     let Some(schema) = schema else {
@@ -567,6 +636,15 @@ fn normalize_args_for_validation(name: &str, arguments: &Value) -> Value {
         }
         "channels.resolve_target" => {
             normalize_aliases(map, &[("account_id", "accountId")]);
+        }
+        "artifact.create_xlsx"
+        | "artifact.create_pptx"
+        | "artifact.create_docx"
+        | "artifact.create_pdf" => {
+            normalize_aliases(
+                map,
+                &[("output_path", "outputPath"), ("task_run_id", "taskRunId")],
+            );
         }
         _ => {}
     }
@@ -732,6 +810,17 @@ mod tests {
     fn validates_message_send_requires_channel_and_to() {
         let args = json!({ "text": "hi" });
         assert!(validate_tool_arguments("message.send", &args).is_err());
+    }
+
+    #[test]
+    fn validates_artifact_create_xlsx() {
+        let args = json!({
+            "outputPath": "reports/demo.xlsx",
+            "sheets": [
+                { "name": "Sheet1", "cells": [] }
+            ]
+        });
+        assert!(validate_tool_arguments("artifact.create_xlsx", &args).is_ok());
     }
 }
 

@@ -1,5 +1,9 @@
 # Status
 
+- [x] Add artifact service tools (xlsx/pptx/docx/pdf) with schema validation + hashing
+- [x] Record artifact events and list outputs at end of task runs
+- [x] Add builder skills plugin for spreadsheet/slide/report outputs
+
 - [x] Validate MCP tool arguments against OpenClaw JSON schemas
 - [x] Expose OpenClaw JSON Schemas in MCP tool definitions
 - [x] Default memory embeddings provider/model from Codex config overrides
