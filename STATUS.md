@@ -43,6 +43,7 @@
 Roadmap:
 - [x] Add revised OpenClaw parity roadmap (mac app parity priority, web/admin nice-to-have) in `ROADMAP.md`.
 - [x] Include plugin lifecycle + packaging + MCP/skills sync + mac app UX roadmap details.
+- [x] Emphasize Rust-first parity and porting OpenClaw TypeScript components where needed.
 
 Notes:
 - `TEMPLATE_PACK.md` is the parity checklist: use it later to fill tool schemas, routing rules, and tests, then implement remaining gaps using the name `Clawdex`.

@@ -9,7 +9,8 @@ Last updated: 2026-02-05
 - OpenClaw web/admin surfaces are nice-to-have and are deliberately down-prioritized.
 
 **Assumptions**
-- Clawdex remains Rust-first unless a Node compatibility shim is clearly cheaper for parity.
+- Clawdex remains Rust-first; port legacy OpenClaw TypeScript components to Rust where needed.
+- A Node compatibility shim is a last resort for parity-only gaps.
 - Parity means behavior and semantics, not visual UI fidelity.
 
 **Phase 0 — Parity Guardrails (1–2 weeks)**
@@ -97,4 +98,3 @@ Deliverables:
 - Compatibility and integration test suites for gateway, plugins, memory, and server methods.
 - Observability: structured logs and diagnostics for daemon, gateway, and mac app.
 - Migration tooling and documented upgrade paths.
-
