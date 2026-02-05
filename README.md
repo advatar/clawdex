@@ -185,6 +185,9 @@ Example `config.json5`:
 }
 ```
 
+Memory embeddings defaults:
+- If `memory.embeddings` is omitted, Clawdex derives the provider from `codex.config_overrides` (falls back to `openai`) and defaults the model to `text-embedding-3-small`, with `enabled: true` (unless memory is disabled).
+
 Workspace policy notes:
 - `workspace_policy.allowed_roots` expands writable roots for Codex sandbox.
 - `workspace_policy.deny_patterns` blocks tool access via `resolve_workspace_path`.

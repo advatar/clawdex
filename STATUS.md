@@ -1,5 +1,6 @@
 # Status
 
+- [x] Default memory embeddings provider/model from Codex config overrides
 - [x] Add parity tests for cron normalization edge cases + delivery rules
 - [x] Add gateway protocol integration tests + tighten last-route fallback
 - [x] Clean up CLI help text now that cron/heartbeat are live

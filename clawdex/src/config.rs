@@ -359,10 +359,158 @@ pub fn resolve_citations_mode(cfg: &ClawdConfig) -> String {
 }
 
 pub fn resolve_embeddings_config(cfg: &ClawdConfig) -> EmbeddingsConfig {
-    cfg.memory
+    let mut resolved = cfg
+        .memory
         .as_ref()
         .and_then(|m| m.embeddings.clone())
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    let memory_enabled = cfg
+        .memory
+        .as_ref()
+        .and_then(|m| m.enabled)
+        .unwrap_or(true);
+    if !memory_enabled {
+        return resolved;
+    }
+
+    let overrides = collect_codex_overrides(cfg);
+    let override_map = parse_codex_overrides(&overrides);
+    let codex_provider = resolve_codex_provider(&override_map);
+
+    if resolved.provider.is_none() {
+        let provider = codex_provider.unwrap_or_else(|| "openai".to_string());
+        resolved.provider = Some(provider);
+    }
+
+    if resolved.model.is_none() {
+        if let Some(provider) = resolved.provider.as_deref() {
+            if let Some(default_model) = default_embedding_model_for_provider(provider) {
+                resolved.model = Some(default_model);
+            }
+        }
+    }
+
+    if resolved.enabled.is_none() {
+        resolved.enabled = Some(true);
+    }
+
+    resolved
+}
+
+fn collect_codex_overrides(cfg: &ClawdConfig) -> Vec<String> {
+    let mut overrides = cfg
+        .codex
+        .as_ref()
+        .and_then(|c| c.config_overrides.clone())
+        .unwrap_or_default();
+    if let Ok(raw) = std::env::var("CLAWDEX_CODEX_CONFIG") {
+        for entry in raw.split(';') {
+            let trimmed = entry.trim();
+            if !trimmed.is_empty() {
+                overrides.push(trimmed.to_string());
+            }
+        }
+    }
+    overrides
+}
+
+fn parse_codex_overrides(overrides: &[String]) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for entry in overrides {
+        let Some((key, value)) = entry.split_once('=') else {
+            continue;
+        };
+        let key = normalize_override_key(key);
+        let value = value.trim().to_string();
+        if !key.is_empty() && !value.is_empty() {
+            map.insert(key, value);
+        }
+    }
+    map
+}
+
+fn normalize_override_key(raw: &str) -> String {
+    raw.trim()
+        .to_lowercase()
+        .replace('-', "_")
+        .replace(' ', "")
+}
+
+fn resolve_codex_provider(overrides: &std::collections::HashMap<String, String>) -> Option<String> {
+    if let Some(provider) = get_override_value(overrides, &["model_provider", "modelprovider", "provider"]) {
+        let trimmed = provider.trim().to_lowercase();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+
+    if let Some(model) = get_override_value(overrides, &["model", "models.default", "model.name"]) {
+        if let Some(provider) = infer_provider_from_model(&model) {
+            return Some(provider);
+        }
+    }
+
+    None
+}
+
+fn get_override_value(
+    overrides: &std::collections::HashMap<String, String>,
+    keys: &[&str],
+) -> Option<String> {
+    for key in keys {
+        let normalized = normalize_override_key(key);
+        if let Some(value) = overrides.get(&normalized) {
+            if !value.trim().is_empty() {
+                return Some(value.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn infer_provider_from_model(model: &str) -> Option<String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((prefix, _)) = trimmed.split_once('/') {
+        let provider = prefix.trim().to_lowercase();
+        if !provider.is_empty() {
+            return Some(provider);
+        }
+    }
+    if let Some((prefix, _)) = trimmed.split_once(':') {
+        let provider = prefix.trim().to_lowercase();
+        if !provider.is_empty() {
+            return Some(provider);
+        }
+    }
+    let lower = trimmed.to_lowercase();
+    if lower.starts_with("gpt-")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+        || lower.starts_with("text-embedding")
+        || lower.starts_with("codex")
+    {
+        return Some("openai".to_string());
+    }
+    None
+}
+
+fn default_embedding_model_for_provider(provider: &str) -> Option<String> {
+    let provider = provider.trim().to_lowercase();
+    if provider.is_empty() {
+        return None;
+    }
+    if provider == "openai" || provider == "codex" || provider == "openai-compatible" {
+        return Some("text-embedding-3-small".to_string());
+    }
+    if provider.starts_with("http://") || provider.starts_with("https://") {
+        return Some("text-embedding-3-small".to_string());
+    }
+    None
 }
 
 pub fn resolve_workspace_path(paths: &ClawdPaths, rel: &str) -> Result<PathBuf> {
