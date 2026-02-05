@@ -3,6 +3,9 @@
 - [x] Add artifact service tools (xlsx/pptx/docx/pdf) with schema validation + hashing
 - [x] Record artifact events and list outputs at end of task runs
 - [x] Add builder skills plugin for spreadsheet/slide/report outputs
+- [ ] Add tamper-evident audit log with hash chain for task events/approvals/artifacts
+- [ ] Add ActionIntent + risk scoring + checkpoint metadata for approvals/tool calls
+- [ ] Add audit export command (events/approvals/artifacts/plugins + audit log)
 
 - [x] Validate MCP tool arguments against OpenClaw JSON schemas
 - [x] Expose OpenClaw JSON Schemas in MCP tool definitions
@@ -50,6 +53,15 @@ Roadmap:
 - [x] Add revised OpenClaw parity roadmap (mac app parity priority, web/admin nice-to-have) in `ROADMAP.md`.
 - [x] Include plugin lifecycle + packaging + MCP/skills sync + mac app UX roadmap details.
 - [x] Emphasize Rust-first parity and porting OpenClaw TypeScript components where needed.
+
+Parity Execution (from ROADMAP.md):
+- [ ] Phase 0: Enforce MCP response strictness + add response-schema regression tests + update `compat/parity-delta.md`.
+- [ ] Phase 1: Plugin parity (packaging layer, lifecycle parity, metadata/deps validation, permissions mapping, skill/MCP sync hooks).
+- [ ] Phase 2: Gateway core parity (auth flows, presence/last-seen, message lifecycle/receipts, channel stack order, attachments).
+- [ ] Phase 3: Server methods + lifecycle parity (registry, versioned handlers, plugin method discovery/reload, compat tests).
+- [ ] Phase 4: Advanced memory pipeline parity (watchers, batch embeddings queue/retry, cache/eviction, local backend).
+- [ ] Phase 5: mac app functional parity (timeline, approvals UI, plugin management UI, connectors, attachments, config UI).
+- [ ] Phase 6: Web/admin parity (dashboards + admin workflows where implemented).
 
 Notes:
 - `TEMPLATE_PACK.md` is the parity checklist: use it later to fill tool schemas, routing rules, and tests, then implement remaining gaps using the name `Clawdex`.
