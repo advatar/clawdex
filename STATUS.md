@@ -48,6 +48,9 @@
 - [x] Align cron storage format + run log responses with OpenClaw (versioned jobs, state.nextRunAtMs, finished runs)
 - [x] Align cron.run semantics with OpenClaw (immediate run + {ok, ran, reason})
 - [x] Align cron delivery object behavior and legacy patch merging with OpenClaw
+- [x] Fix Claude plugin skill import (skills/<name>/SKILL.md), namespacing, and overlay paths
+- [x] Convert plugin commands into namespaced skills with shared renderer semantics
+- [x] Add Claude plugin manifest path resolution for skills/commands (additive + ./ rules)
 
 Roadmap:
 - [x] Add revised OpenClaw parity roadmap (mac app parity priority, web/admin nice-to-have) in `ROADMAP.md`.
@@ -56,11 +59,11 @@ Roadmap:
 
 Parity Execution (from ROADMAP.md):
 - [ ] Phase 0: Enforce MCP response strictness + add response-schema regression tests + update `compat/parity-delta.md`.
-- [ ] Phase 1: Plugin parity (packaging layer, lifecycle parity, metadata/deps validation, permissions mapping, skill/MCP sync hooks).
-- [ ] Phase 1a: Add OpenClaw plugin manifest support (`openclaw.plugin.json`) + package metadata ingestion.
-- [ ] Phase 1b: Add plugin install/update semantics (npm spec/archive/path) with dependency install + recorded install source.
-- [ ] Phase 1c: Align enable/disable/remove flows with OpenClaw semantics + wire skill/MCP sync hooks.
-- [ ] Phase 1d: Map plugin permission hints into MCP allow/deny + workspace policy overrides (if present).
+- [x] Phase 1: Plugin parity (packaging layer, lifecycle parity, metadata/deps validation, permissions mapping, skill/MCP sync hooks).
+- [x] Phase 1a: Add OpenClaw plugin manifest support (`openclaw.plugin.json`) + package metadata ingestion.
+- [x] Phase 1b: Add plugin install/update semantics (npm spec/archive/path) with dependency install + recorded install source.
+- [x] Phase 1c: Align enable/disable/remove flows with OpenClaw semantics + wire skill/MCP sync hooks.
+- [x] Phase 1d: Map plugin permission hints into MCP allow/deny + workspace policy overrides (if present).
 - [ ] Phase 2: Gateway core parity (auth flows, presence/last-seen, message lifecycle/receipts, channel stack order, attachments).
 - [ ] Phase 3: Server methods + lifecycle parity (registry, versioned handlers, plugin method discovery/reload, compat tests).
 - [ ] Phase 4: Advanced memory pipeline parity (watchers, batch embeddings queue/retry, cache/eviction, local backend).

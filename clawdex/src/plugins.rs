@@ -1,24 +1,134 @@
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
+use std::io;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result};
+use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use serde_yaml::{Mapping, Value as YamlValue};
+use tar::Archive;
+use uuid::Uuid;
 use walkdir::WalkDir;
+use zip::ZipArchive;
 
 use crate::app_server::{ApprovalMode, CodexClient};
-use crate::config::{load_config, resolve_mcp_policy, ClawdPaths, McpPolicy};
+use crate::config::{load_config, resolve_mcp_policy, ClawdPaths, McpPolicy, WorkspacePolicy};
 use crate::runner::workspace_sandbox_policy;
 use crate::task_db::{PluginRecord, TaskStore};
 use crate::util::{ensure_dir, home_dir, now_ms, read_to_string, write_json_value};
 
-#[derive(Debug, Deserialize)]
-struct PluginManifest {
+const COWORK_MANIFEST_PATH: &str = ".claude-plugin/plugin.json";
+const OPENCLAW_MANIFEST_FILENAME: &str = "openclaw.plugin.json";
+const INSTALLS_FILE: &str = "installs.json";
+
+#[derive(Debug, Clone, Copy)]
+enum PluginManifestKind {
+    Cowork,
+    OpenClaw,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginPermissions {
+    #[serde(default, alias = "mcp_allow", alias = "mcpAllow")]
+    mcp_allow: Option<Vec<String>>,
+    #[serde(default, alias = "mcp_deny", alias = "mcpDeny")]
+    mcp_deny: Option<Vec<String>>,
+    #[serde(default, alias = "allowed_roots", alias = "allowedRoots")]
+    allowed_roots: Option<Vec<String>>,
+    #[serde(default, alias = "read_only", alias = "readOnly")]
+    read_only: Option<bool>,
+    #[serde(default, alias = "network_access", alias = "networkAccess")]
+    network_access: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudePluginManifest {
     id: Option<String>,
     name: Option<String>,
     version: Option<String>,
     description: Option<String>,
+    permissions: Option<PluginPermissions>,
+    skills: Option<ComponentPathSpec>,
+    commands: Option<ComponentPathSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ComponentPathSpec {
+    Single(String),
+    Many(Vec<String>),
+    Object(ComponentPathObject),
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ComponentPathObject {
+    path: Option<String>,
+    paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenClawManifest {
+    id: String,
+    #[serde(rename = "configSchema")]
+    config_schema: Value,
+    name: Option<String>,
+    description: Option<String>,
+    version: Option<String>,
+    permissions: Option<PluginPermissions>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackageManifest {
+    name: Option<String>,
+    version: Option<String>,
+    description: Option<String>,
+    dependencies: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone)]
+struct PluginManifestInfo {
+    id: String,
+    name: String,
+    version: Option<String>,
+    description: Option<String>,
+    kind: PluginManifestKind,
+    manifest_path: PathBuf,
+    config_schema: Option<Value>,
+    permissions: PluginPermissions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginInstallRecord {
+    source: String,
+    spec: Option<String>,
+    #[serde(alias = "source_path")]
+    source_path: Option<String>,
+    #[serde(alias = "install_path")]
+    install_path: Option<String>,
+    version: Option<String>,
+    #[serde(alias = "installedAt", alias = "installed_at_ms")]
+    installed_at_ms: i64,
+    #[serde(alias = "updatedAt", alias = "updated_at_ms")]
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginInstallMode {
+    Install,
+    Update,
+}
+
+#[derive(Debug, Clone)]
+enum PluginInstallSource {
+    Path(PathBuf),
+    Npm { spec: String },
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -26,6 +136,25 @@ struct PluginAssets {
     skills: usize,
     commands: usize,
     has_mcp: bool,
+}
+
+#[derive(Debug, Default)]
+struct PluginComponentPaths {
+    skills: Vec<PathBuf>,
+    commands: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+enum SkillSource {
+    Directory { root: PathBuf, name: String },
+    LegacyFile { path: PathBuf, name: String },
+}
+
+#[derive(Debug, Clone)]
+struct CommandTemplate {
+    name: String,
+    description: Option<String>,
+    template: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -45,6 +174,326 @@ struct CommandEntry {
     source: String,
 }
 
+fn manifest_kind_label(kind: PluginManifestKind) -> &'static str {
+    match kind {
+        PluginManifestKind::Cowork => "cowork",
+        PluginManifestKind::OpenClaw => "openclaw",
+    }
+}
+
+fn installs_path(paths: &ClawdPaths) -> PathBuf {
+    paths.state_dir.join("plugins").join(INSTALLS_FILE)
+}
+
+fn load_install_records(paths: &ClawdPaths) -> Result<HashMap<String, PluginInstallRecord>> {
+    let path = installs_path(paths);
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let raw = read_to_string(&path)?;
+    let map: HashMap<String, PluginInstallRecord> =
+        serde_json::from_str(&raw).unwrap_or_default();
+    Ok(map)
+}
+
+fn save_install_records(paths: &ClawdPaths, records: &HashMap<String, PluginInstallRecord>) -> Result<()> {
+    let path = installs_path(paths);
+    if let Some(parent) = path.parent() {
+        ensure_dir(parent)?;
+    }
+    write_json_value(&path, &serde_json::to_value(records).unwrap_or(Value::Object(Map::new())))
+}
+
+fn read_package_manifest(root: &Path) -> Option<PackageManifest> {
+    let path = root.join("package.json");
+    if !path.exists() {
+        return None;
+    }
+    let raw = read_to_string(&path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn normalize_plugin_id(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("plugin id missing");
+    }
+    if trimmed == "." || trimmed == ".." {
+        anyhow::bail!("invalid plugin id");
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        anyhow::bail!("invalid plugin id: path separators not allowed");
+    }
+    let normalized = trimmed.to_ascii_lowercase();
+    let safe = normalized
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+    if safe {
+        return Ok(normalized);
+    }
+    Ok(slugify(trimmed))
+}
+
+fn resolve_plugin_name(id: &str, name: Option<&str>, package: Option<&PackageManifest>) -> String {
+    if let Some(name) = name.and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.is_empty() { None } else { Some(trimmed) }
+    }) {
+        return name.to_string();
+    }
+    if let Some(pkg) = package {
+        if let Some(pkg_name) = pkg.name.as_ref() {
+            let trimmed = pkg_name.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    id.to_string()
+}
+
+fn resolve_plugin_description(
+    description: Option<&str>,
+    package: Option<&PackageManifest>,
+) -> Option<String> {
+    if let Some(desc) = description {
+        let trimmed = desc.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    package
+        .and_then(|pkg| pkg.description.as_ref())
+        .and_then(|desc| {
+            let trimmed = desc.trim();
+            if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+        })
+}
+
+fn load_plugin_manifest(root: &Path) -> Result<PluginManifestInfo> {
+    let openclaw_path = root.join(OPENCLAW_MANIFEST_FILENAME);
+    let cowork_path = root.join(COWORK_MANIFEST_PATH);
+    let package = read_package_manifest(root);
+
+    if openclaw_path.exists() {
+        let raw = read_to_string(&openclaw_path)?;
+        let manifest: OpenClawManifest =
+            serde_json::from_str(&raw).context("parse openclaw.plugin.json")?;
+        if !manifest.config_schema.is_object() {
+            anyhow::bail!("openclaw.plugin.json configSchema must be an object");
+        }
+        let id = normalize_plugin_id(&manifest.id)?;
+        let name = resolve_plugin_name(&id, manifest.name.as_deref(), package.as_ref());
+        let description = resolve_plugin_description(manifest.description.as_deref(), package.as_ref());
+        let version = manifest
+            .version
+            .clone()
+            .or_else(|| package.as_ref().and_then(|pkg| pkg.version.clone()));
+        return Ok(PluginManifestInfo {
+            id,
+            name,
+            version,
+            description,
+            kind: PluginManifestKind::OpenClaw,
+            manifest_path: openclaw_path,
+            config_schema: Some(manifest.config_schema),
+            permissions: manifest.permissions.unwrap_or_default(),
+        });
+    }
+
+    if cowork_path.exists() {
+        let raw = read_to_string(&cowork_path)?;
+        let manifest: ClaudePluginManifest =
+            serde_json::from_str(&raw).context("parse plugin.json")?;
+        let raw_id = manifest
+            .id
+            .clone()
+            .or_else(|| manifest.name.clone())
+            .or_else(|| root.file_name().and_then(|s| s.to_str()).map(|s| s.to_string()))
+            .context("plugin id not found")?;
+        let id = normalize_plugin_id(&raw_id)?;
+        let name = resolve_plugin_name(&id, manifest.name.as_deref(), package.as_ref());
+        let description = resolve_plugin_description(manifest.description.as_deref(), package.as_ref());
+        let version = manifest
+            .version
+            .clone()
+            .or_else(|| package.as_ref().and_then(|pkg| pkg.version.clone()));
+        return Ok(PluginManifestInfo {
+            id,
+            name,
+            version,
+            description,
+            kind: PluginManifestKind::Cowork,
+            manifest_path: cowork_path,
+            config_schema: None,
+            permissions: manifest.permissions.unwrap_or_default(),
+        });
+    }
+
+    anyhow::bail!("plugin manifest not found")
+}
+
+fn plugin_permissions_for_root(root: &Path) -> Option<PluginPermissions> {
+    load_plugin_manifest(root).ok().map(|manifest| manifest.permissions)
+}
+
+fn resolve_permission_root(raw: &str, workspace_dir: &Path) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut path = PathBuf::from(trimmed);
+    if trimmed == "~" {
+        if let Ok(home) = home_dir() {
+            path = home;
+        }
+    } else if let Some(stripped) = trimmed.strip_prefix("~/") {
+        if let Ok(home) = home_dir() {
+            path = home.join(stripped);
+        }
+    }
+    if path.is_relative() {
+        path = workspace_dir.join(path);
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return None;
+    }
+    Some(path)
+}
+
+fn is_root_allowed(candidate: &Path, allowed_roots: &[PathBuf]) -> bool {
+    allowed_roots.iter().any(|root| candidate.starts_with(root))
+}
+
+fn apply_plugin_permissions_to_policy(
+    policy: &WorkspacePolicy,
+    permissions: Option<&PluginPermissions>,
+    workspace_dir: &Path,
+) -> WorkspacePolicy {
+    let mut next = policy.clone();
+    let Some(perms) = permissions else { return next };
+
+    if perms.read_only.unwrap_or(false) {
+        next.read_only = true;
+    }
+    if let Some(net) = perms.network_access {
+        if !net {
+            next.network_access = false;
+        }
+    }
+    if let Some(roots) = perms.allowed_roots.as_ref() {
+        let mut resolved = Vec::new();
+        for raw in roots {
+            if let Some(root) = resolve_permission_root(raw, workspace_dir) {
+                if is_root_allowed(&root, &policy.allowed_roots) {
+                    resolved.push(root);
+                }
+            }
+        }
+        if !resolved.is_empty() {
+            next.allowed_roots = resolved;
+        }
+    }
+
+    next
+}
+
+fn load_claude_manifest(root: &Path) -> Result<Option<ClaudePluginManifest>> {
+    let path = root.join(COWORK_MANIFEST_PATH);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = read_to_string(&path)?;
+    let manifest: ClaudePluginManifest =
+        serde_json::from_str(&raw).context("parse plugin.json")?;
+    Ok(Some(manifest))
+}
+
+fn component_paths_from_spec(spec: &ComponentPathSpec) -> Vec<String> {
+    match spec {
+        ComponentPathSpec::Single(value) => vec![value.clone()],
+        ComponentPathSpec::Many(values) => values.clone(),
+        ComponentPathSpec::Object(obj) => {
+            let mut out = Vec::new();
+            if let Some(path) = obj.path.as_ref() {
+                out.push(path.clone());
+            }
+            if let Some(paths) = obj.paths.as_ref() {
+                out.extend(paths.clone());
+            }
+            out
+        }
+    }
+}
+
+fn resolve_manifest_path(root: &Path, raw: &str) -> Result<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("manifest path is empty");
+    }
+    if Path::new(trimmed).is_absolute() {
+        anyhow::bail!("manifest path must be relative to plugin root: {trimmed}");
+    }
+    if !trimmed.starts_with("./") {
+        anyhow::bail!("manifest path must start with ./ ({trimmed})");
+    }
+    let without_prefix = trimmed.trim_start_matches("./");
+    if without_prefix.is_empty() {
+        anyhow::bail!("manifest path must not be empty");
+    }
+    let rel = Path::new(without_prefix);
+    for component in rel.components() {
+        if matches!(component, Component::ParentDir) {
+            anyhow::bail!("manifest path cannot traverse outside plugin root: {trimmed}");
+        }
+    }
+    Ok(root.join(rel))
+}
+
+fn resolve_plugin_component_paths(root: &Path) -> Result<PluginComponentPaths> {
+    let mut paths = PluginComponentPaths::default();
+    paths.skills.push(root.join("skills"));
+    paths.commands.push(root.join("commands"));
+
+    if let Some(manifest) = load_claude_manifest(root)? {
+        if let Some(spec) = manifest.skills.as_ref() {
+            for raw in component_paths_from_spec(spec) {
+                let resolved = resolve_manifest_path(root, &raw)?;
+                if resolved.exists() {
+                    paths.skills.push(resolved);
+                }
+            }
+        }
+        if let Some(spec) = manifest.commands.as_ref() {
+            for raw in component_paths_from_spec(spec) {
+                let resolved = resolve_manifest_path(root, &raw)?;
+                if resolved.exists() {
+                    paths.commands.push(resolved);
+                }
+            }
+        }
+    }
+
+    paths.skills = dedupe_paths(paths.skills);
+    paths.commands = dedupe_paths(paths.commands);
+    Ok(paths)
+}
+
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for path in paths {
+        let key = path.to_string_lossy().to_string();
+        if seen.insert(key) {
+            out.push(path);
+        }
+    }
+    out
+}
+
 pub fn list_plugins_command(
     state_dir: Option<PathBuf>,
     workspace: Option<PathBuf>,
@@ -53,12 +502,17 @@ pub fn list_plugins_command(
     let (cfg, paths) = load_config(state_dir, workspace)?;
     let policy = resolve_mcp_policy(&cfg);
     let store = TaskStore::open(&paths)?;
+    let installs = load_install_records(&paths)?;
     let plugins = store.list_plugins(include_disabled)?;
     let items: Vec<Value> = plugins
         .into_iter()
         .map(|plugin| {
             let assets = plugin_assets(Path::new(&plugin.path));
-            let mcp_enabled = assets.has_mcp && policy.is_plugin_enabled(&plugin.id);
+            let manifest = load_plugin_manifest(Path::new(&plugin.path)).ok();
+            let permissions = manifest.as_ref().map(|m| m.permissions.clone());
+            let install = installs.get(&plugin.id).cloned();
+            let mcp_enabled =
+                plugin.enabled && assets.has_mcp && policy.is_plugin_enabled(&plugin.id);
             json!({
                 "id": plugin.id,
                 "name": plugin.name,
@@ -73,6 +527,12 @@ pub fn list_plugins_command(
                 "commands": assets.commands,
                 "hasMcp": assets.has_mcp,
                 "mcpEnabled": mcp_enabled,
+                "manifestType": manifest.as_ref().map(|m| manifest_kind_label(m.kind)),
+                "manifestPath": manifest
+                    .as_ref()
+                    .map(|m| m.manifest_path.to_string_lossy().to_string()),
+                "permissions": permissions,
+                "install": install,
             })
         })
         .collect();
@@ -123,9 +583,21 @@ pub fn run_plugin_command_command(
         anyhow::bail!("plugin is disabled");
     }
 
-    let prompt = resolve_plugin_command_prompt(&paths, &plugin, command, input.as_deref())?;
+    let prompt = resolve_plugin_command_prompt(
+        &paths,
+        &plugin,
+        command,
+        input.as_deref(),
+        auto_approve,
+    )?;
     let codex_path = resolve_codex_path(&cfg, codex_path)?;
-    let sandbox_policy = workspace_sandbox_policy(&paths.workspace_policy)?;
+    let permissions = plugin_permissions_for_root(Path::new(&plugin.path));
+    let effective_policy = apply_plugin_permissions_to_policy(
+        &paths.workspace_policy,
+        permissions.as_ref(),
+        &paths.workspace_dir,
+    );
+    let sandbox_policy = workspace_sandbox_policy(&effective_policy)?;
 
     let codex_home = paths.state_dir.join("codex");
     std::fs::create_dir_all(&codex_home)
@@ -166,7 +638,8 @@ pub fn run_plugin_command_command(
 }
 
 pub fn add_plugin_command(
-    path: PathBuf,
+    path: Option<PathBuf>,
+    npm: Option<String>,
     link: bool,
     source: Option<String>,
     state_dir: Option<PathBuf>,
@@ -175,9 +648,184 @@ pub fn add_plugin_command(
     let (cfg, paths) = load_config(state_dir, workspace)?;
     let store = TaskStore::open(&paths)?;
     let policy = resolve_mcp_policy(&cfg);
-    let plugin = install_plugin(&paths, &store, &path, link, source, &policy)?;
+    let install_source = if let Some(spec) = npm {
+        PluginInstallSource::Npm { spec }
+    } else if let Some(path) = path {
+        PluginInstallSource::Path(path)
+    } else {
+        anyhow::bail!("missing plugin source");
+    };
+    let plugin = install_plugin(
+        &paths,
+        &store,
+        install_source,
+        link,
+        source,
+        &policy,
+        PluginInstallMode::Install,
+        None,
+    )?;
     let assets = plugin_assets(Path::new(&plugin.path));
     Ok(json!({ "plugin": plugin, "assets": assets }))
+}
+
+fn read_installed_version(paths: &ClawdPaths, plugin_id: &str, install_path: Option<&str>) -> Option<String> {
+    let root = install_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| plugin_root(paths, plugin_id));
+    load_plugin_manifest(&root).ok().and_then(|manifest| manifest.version)
+}
+
+fn probe_npm_spec(spec: &str, expected_id: Option<&str>) -> Result<Option<String>> {
+    let source = PluginInstallSource::Npm { spec: spec.to_string() };
+    let prepared = prepare_plugin_source(&source)?;
+    if let Some(expected) = expected_id {
+        let expected_id = normalize_plugin_id(expected)?;
+        if prepared.plugin.manifest.id != expected_id {
+            anyhow::bail!(
+                "plugin id mismatch: expected {expected_id}, got {}",
+                prepared.plugin.manifest.id
+            );
+        }
+    }
+    Ok(prepared.plugin.manifest.version.clone())
+}
+
+pub fn update_plugin_command(
+    plugin_id: Option<String>,
+    all: bool,
+    dry_run: bool,
+    state_dir: Option<PathBuf>,
+    workspace: Option<PathBuf>,
+) -> Result<Value> {
+    let (cfg, paths) = load_config(state_dir, workspace)?;
+    let store = TaskStore::open(&paths)?;
+    let policy = resolve_mcp_policy(&cfg);
+    let installs = load_install_records(&paths)?;
+    let targets: Vec<String> = if all {
+        installs.keys().cloned().collect()
+    } else if let Some(id) = plugin_id {
+        vec![id]
+    } else {
+        anyhow::bail!("provide --all or a plugin id");
+    };
+
+    let mut outcomes = Vec::new();
+    for plugin_id in targets {
+        let record = match installs.get(&plugin_id) {
+            Some(record) => record.clone(),
+            None => {
+                outcomes.push(json!({
+                    "pluginId": plugin_id,
+                    "status": "skipped",
+                    "message": format!("No install record for \"{plugin_id}\".")
+                }));
+                continue;
+            }
+        };
+
+        if record.source != "npm" {
+            outcomes.push(json!({
+                "pluginId": plugin_id,
+                "status": "skipped",
+                "message": format!("Skipping \"{plugin_id}\" (source: {}).", record.source)
+            }));
+            continue;
+        }
+
+        let Some(spec) = record.spec.clone().filter(|s| !s.trim().is_empty()) else {
+            outcomes.push(json!({
+                "pluginId": plugin_id,
+                "status": "skipped",
+                "message": format!("Skipping \"{plugin_id}\" (missing npm spec).")
+            }));
+            continue;
+        };
+
+        let current_version = read_installed_version(&paths, &plugin_id, record.install_path.as_deref());
+
+        if dry_run {
+            match probe_npm_spec(&spec, Some(&plugin_id)) {
+                Ok(next_version) => {
+                    let current_label = current_version.clone().unwrap_or_else(|| "unknown".to_string());
+                    let next_label = next_version.clone().unwrap_or_else(|| "unknown".to_string());
+                    let status = if current_version.is_some() && next_version.is_some() && current_version == next_version {
+                        "unchanged"
+                    } else {
+                        "updated"
+                    };
+                    let message = if status == "unchanged" {
+                        format!("{plugin_id} already at {current_label}.")
+                    } else {
+                        format!("Would update {plugin_id}: {current_label} -> {next_label}.")
+                    };
+                    outcomes.push(json!({
+                        "pluginId": plugin_id,
+                        "status": status,
+                        "currentVersion": current_version,
+                        "nextVersion": next_version,
+                        "message": message
+                    }));
+                }
+                Err(err) => {
+                    outcomes.push(json!({
+                        "pluginId": plugin_id,
+                        "status": "error",
+                        "message": format!("Failed to check {plugin_id}: {err}")
+                    }));
+                }
+            }
+            continue;
+        }
+
+        let install_source = PluginInstallSource::Npm { spec: spec.clone() };
+        let plugin = match install_plugin(
+            &paths,
+            &store,
+            install_source,
+            false,
+            None,
+            &policy,
+            PluginInstallMode::Update,
+            Some(&plugin_id),
+        ) {
+            Ok(plugin) => plugin,
+            Err(err) => {
+                outcomes.push(json!({
+                    "pluginId": plugin_id,
+                    "status": "error",
+                    "message": format!("Failed to update {plugin_id}: {err}")
+                }));
+                continue;
+            }
+        };
+
+        let next_version = plugin.version.clone();
+        let current_label = current_version.clone().unwrap_or_else(|| "unknown".to_string());
+        let next_label = next_version.clone().unwrap_or_else(|| "unknown".to_string());
+        let status = if current_version.is_some() && next_version.is_some() && current_version == next_version {
+            "unchanged"
+        } else {
+            "updated"
+        };
+        let message = if status == "unchanged" {
+            format!("{plugin_id} already at {current_label}.")
+        } else {
+            format!("Updated {plugin_id}: {current_label} -> {next_label}.")
+        };
+        outcomes.push(json!({
+            "pluginId": plugin_id,
+            "status": status,
+            "currentVersion": current_version,
+            "nextVersion": next_version,
+            "message": message
+        }));
+    }
+
+    Ok(json!({
+        "dryRun": dry_run,
+        "outcomes": outcomes
+    }))
 }
 
 pub fn enable_plugin_command(
@@ -228,6 +876,10 @@ pub fn remove_plugin_command(
         }
         store.remove_plugin(plugin_id)?;
     }
+    let mut installs = load_install_records(&paths)?;
+    if installs.remove(plugin_id).is_some() {
+        save_install_records(&paths, &installs)?;
+    }
     Ok(json!({ "ok": true }))
 }
 
@@ -266,7 +918,9 @@ pub fn export_mcp_command(
     for plugin in plugins {
         let root = PathBuf::from(&plugin.path);
         let Some(mcp_value) = read_plugin_mcp(&root)? else { continue };
-        let count = merge_mcp_config(&mut mcp_servers, &plugin.id, &mcp_value, &policy);
+        let permissions = plugin_permissions_for_root(&root);
+        let count =
+            merge_mcp_config(&mut mcp_servers, &plugin.id, &mcp_value, &policy, permissions.as_ref());
         if count > 0 {
             included.push(plugin.id);
         }
@@ -282,41 +936,361 @@ pub fn export_mcp_command(
     }))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveKind {
+    Tar,
+    Zip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreparedSourceKind {
+    Path,
+    Archive,
+    Npm,
+}
+
+struct PreparedPlugin {
+    root: PathBuf,
+    manifest: PluginManifestInfo,
+    package: Option<PackageManifest>,
+    temp_dir: Option<PathBuf>,
+}
+
+impl Drop for PreparedPlugin {
+    fn drop(&mut self) {
+        if let Some(dir) = self.temp_dir.take() {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+}
+
+struct PreparedPluginSource {
+    plugin: PreparedPlugin,
+    kind: PreparedSourceKind,
+    source_path: Option<PathBuf>,
+    spec: Option<String>,
+    link_source: Option<PathBuf>,
+}
+
+fn resolve_user_path(path: &Path) -> Result<PathBuf> {
+    let raw = path.to_string_lossy();
+    if raw == "~" {
+        return Ok(home_dir()?);
+    }
+    if let Some(stripped) = raw.strip_prefix("~/") {
+        return Ok(home_dir()?.join(stripped));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn detect_archive_kind(path: &Path) -> Option<ArchiveKind> {
+    let name = path.file_name()?.to_string_lossy().to_lowercase();
+    if name.ends_with(".zip") {
+        return Some(ArchiveKind::Zip);
+    }
+    if name.ends_with(".tgz") || name.ends_with(".tar.gz") || name.ends_with(".tar") {
+        return Some(ArchiveKind::Tar);
+    }
+    None
+}
+
+fn sanitize_archive_path(path: &Path) -> Result<PathBuf> {
+    let mut cleaned = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
+                anyhow::bail!("archive entry escapes destination: {}", path.display());
+            }
+            Component::CurDir => {}
+            Component::Normal(part) => cleaned.push(part),
+        }
+    }
+    if cleaned.as_os_str().is_empty() {
+        anyhow::bail!("archive entry has empty path");
+    }
+    Ok(cleaned)
+}
+
+fn extract_tar_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
+    let file = File::open(archive_path)
+        .with_context(|| format!("open {}", archive_path.display()))?;
+    let is_gz = archive_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase())
+        .map(|s| s.ends_with(".tgz") || s.ends_with(".tar.gz"))
+        .unwrap_or(false);
+    let reader: Box<dyn io::Read> = if is_gz {
+        Box::new(GzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+    let mut archive = Archive::new(reader);
+    for entry in archive.entries().context("read tar entries")? {
+        let mut entry = entry.context("read tar entry")?;
+        let raw_path = entry.path().context("read tar path")?.to_path_buf();
+        let rel = sanitize_archive_path(&raw_path)?;
+        let out = dest_dir.join(&rel);
+        if entry.header().entry_type().is_dir() {
+            ensure_dir(&out)?;
+        } else {
+            if let Some(parent) = out.parent() {
+                ensure_dir(parent)?;
+            }
+            entry
+                .unpack(&out)
+                .with_context(|| format!("extract {}", out.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_zip_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
+    let file = File::open(archive_path)
+        .with_context(|| format!("open {}", archive_path.display()))?;
+    let mut archive = ZipArchive::new(file).context("read zip archive")?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).context("read zip entry")?;
+        let raw = entry.name().replace('\\', "/");
+        let rel = sanitize_archive_path(Path::new(&raw))?;
+        let out = dest_dir.join(&rel);
+        if entry.is_dir() {
+            ensure_dir(&out)?;
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            ensure_dir(parent)?;
+        }
+        let mut out_file = File::create(&out)
+            .with_context(|| format!("create {}", out.display()))?;
+        io::copy(&mut entry, &mut out_file)
+            .with_context(|| format!("extract {}", out.display()))?;
+    }
+    Ok(())
+}
+
+fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
+    match detect_archive_kind(archive_path) {
+        Some(ArchiveKind::Tar) => extract_tar_archive(archive_path, dest_dir),
+        Some(ArchiveKind::Zip) => extract_zip_archive(archive_path, dest_dir),
+        None => anyhow::bail!("unsupported archive: {}", archive_path.display()),
+    }
+}
+
+fn resolve_packed_root_dir(extract_dir: &Path) -> Result<PathBuf> {
+    let direct = extract_dir.join("package");
+    if direct.is_dir() {
+        return Ok(direct);
+    }
+    let mut dirs = Vec::new();
+    for entry in fs::read_dir(extract_dir)
+        .with_context(|| format!("read {}", extract_dir.display()))?
+    {
+        let entry = entry?;
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            dirs.push(entry.path());
+        }
+    }
+    if dirs.len() != 1 {
+        let names: Vec<String> = dirs
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|s| s.to_str()).map(|s| s.to_string()))
+            .collect();
+        anyhow::bail!("unexpected archive layout (dirs: {})", names.join(", "));
+    }
+    Ok(dirs.remove(0))
+}
+
+fn create_temp_dir(prefix: &str) -> Result<PathBuf> {
+    let mut path = std::env::temp_dir();
+    path.push(format!("{}{}", prefix, Uuid::new_v4()));
+    ensure_dir(&path)?;
+    Ok(path)
+}
+
+fn run_npm_pack(spec: &str, dest_dir: &Path) -> Result<PathBuf> {
+    let output = Command::new("npm")
+        .arg("pack")
+        .arg(spec)
+        .current_dir(dest_dir)
+        .env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
+        .output()
+        .context("npm pack")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        anyhow::bail!("npm pack failed: {}", detail);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let packed = stdout
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .last()
+        .context("npm pack produced no archive")?;
+    Ok(dest_dir.join(packed))
+}
+
+fn install_dependencies_if_needed(root: &Path, package: Option<&PackageManifest>) -> Result<()> {
+    let has_deps = package
+        .and_then(|pkg| pkg.dependencies.as_ref())
+        .map(|deps| !deps.is_empty())
+        .unwrap_or(false);
+    if !has_deps {
+        return Ok(());
+    }
+    let output = Command::new("npm")
+        .args(["install", "--omit=dev", "--silent"])
+        .current_dir(root)
+        .env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
+        .output()
+        .context("npm install")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        anyhow::bail!("npm install failed: {}", detail);
+    }
+    Ok(())
+}
+
+fn prepare_plugin_source(source: &PluginInstallSource) -> Result<PreparedPluginSource> {
+    match source {
+        PluginInstallSource::Path(path) => {
+            let resolved = resolve_user_path(path)?;
+            let metadata = fs::metadata(&resolved)
+                .with_context(|| format!("stat {}", resolved.display()))?;
+            if metadata.is_dir() {
+                let manifest = load_plugin_manifest(&resolved)?;
+                let package = read_package_manifest(&resolved);
+                return Ok(PreparedPluginSource {
+                    plugin: PreparedPlugin {
+                        root: resolved.clone(),
+                        manifest,
+                        package,
+                        temp_dir: None,
+                    },
+                    kind: PreparedSourceKind::Path,
+                    source_path: Some(resolved.clone()),
+                    spec: None,
+                    link_source: Some(resolved),
+                });
+            }
+            if metadata.is_file() {
+                let kind = detect_archive_kind(&resolved)
+                    .context("plugin path must be a directory or archive")?;
+                let temp_dir = create_temp_dir("clawdex-plugin-")?;
+                let extract_dir = temp_dir.join("extract");
+                ensure_dir(&extract_dir)?;
+                extract_archive(&resolved, &extract_dir)?;
+                let root = resolve_packed_root_dir(&extract_dir)?;
+                let manifest = load_plugin_manifest(&root)?;
+                let package = read_package_manifest(&root);
+                return Ok(PreparedPluginSource {
+                    plugin: PreparedPlugin {
+                        root,
+                        manifest,
+                        package,
+                        temp_dir: Some(temp_dir),
+                    },
+                    kind: match kind {
+                        ArchiveKind::Tar | ArchiveKind::Zip => PreparedSourceKind::Archive,
+                    },
+                    source_path: Some(resolved),
+                    spec: None,
+                    link_source: None,
+                });
+            }
+            anyhow::bail!("unsupported plugin path: {}", resolved.display())
+        }
+        PluginInstallSource::Npm { spec } => {
+            let trimmed = spec.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!("missing npm spec");
+            }
+            let temp_dir = create_temp_dir("clawdex-npm-")?;
+            let archive_path = run_npm_pack(trimmed, &temp_dir)?;
+            let extract_dir = temp_dir.join("extract");
+            ensure_dir(&extract_dir)?;
+            extract_archive(&archive_path, &extract_dir)?;
+            let root = resolve_packed_root_dir(&extract_dir)?;
+            let manifest = load_plugin_manifest(&root)?;
+            let package = read_package_manifest(&root);
+            Ok(PreparedPluginSource {
+                plugin: PreparedPlugin {
+                    root,
+                    manifest,
+                    package,
+                    temp_dir: Some(temp_dir),
+                },
+                kind: PreparedSourceKind::Npm,
+                source_path: None,
+                spec: Some(trimmed.to_string()),
+                link_source: None,
+            })
+        }
+    }
+}
+
 fn install_plugin(
     paths: &ClawdPaths,
     store: &TaskStore,
-    plugin_dir: &Path,
+    source: PluginInstallSource,
     link: bool,
-    source: Option<String>,
+    source_label: Option<String>,
     policy: &McpPolicy,
+    mode: PluginInstallMode,
+    expected_id: Option<&str>,
 ) -> Result<PluginRecord> {
-    let manifest = read_manifest(plugin_dir)?;
-    let raw_id = manifest
-        .id
-        .clone()
-        .or_else(|| manifest.name.clone())
-        .or_else(|| plugin_dir.file_name().and_then(|s| s.to_str()).map(|s| s.to_string()))
-        .context("plugin id not found")?;
-    let plugin_id = slugify(&raw_id);
-    let name = manifest
-        .name
-        .clone()
-        .unwrap_or_else(|| raw_id.clone());
-    let version = manifest.version.clone();
-    let description = manifest.description.clone();
+    if mode == PluginInstallMode::Update && link {
+        anyhow::bail!("--link is not supported for updates");
+    }
+    let prepared = prepare_plugin_source(&source)?;
+    if link && prepared.link_source.is_none() {
+        anyhow::bail!("--link requires a directory path");
+    }
+
+    let plugin_id = prepared.plugin.manifest.id.clone();
+    if let Some(expected) = expected_id {
+        let expected_id = normalize_plugin_id(expected)?;
+        if plugin_id != expected_id {
+            anyhow::bail!("plugin id mismatch: expected {expected_id}, got {plugin_id}");
+        }
+    }
 
     let root = plugin_root(paths, &plugin_id);
-    if root.exists() {
-        fs::remove_dir_all(&root).with_context(|| format!("remove {}", root.display()))?;
+    if root.exists() && mode == PluginInstallMode::Install {
+        anyhow::bail!("plugin already exists: {}", root.display());
     }
     if let Some(parent) = root.parent() {
         ensure_dir(parent)?;
     }
 
+    let mut backup = None;
+    if !link && root.exists() {
+        let backup_path = root.with_extension(format!("backup-{}", now_ms()));
+        fs::rename(&root, &backup_path)
+            .with_context(|| format!("backup {}", root.display()))?;
+        backup = Some(backup_path);
+    }
+
     if link {
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(plugin_dir, &root)
+            let link_source = prepared
+                .link_source
+                .as_ref()
+                .context("link source missing")?;
+            std::os::unix::fs::symlink(link_source, &root)
                 .with_context(|| format!("symlink {}", root.display()))?;
         }
         #[cfg(not(unix))]
@@ -324,30 +1298,102 @@ fn install_plugin(
             anyhow::bail!("--link is only supported on unix platforms");
         }
     } else {
-        copy_dir(plugin_dir, &root)?;
+        if let Err(err) = copy_dir(&prepared.plugin.root, &root) {
+            if let Some(backup_path) = backup.take() {
+                let _ = fs::remove_dir_all(&root);
+                let _ = fs::rename(&backup_path, &root);
+            }
+            return Err(err);
+        }
+        if let Err(err) = install_dependencies_if_needed(&root, prepared.plugin.package.as_ref()) {
+            if let Some(backup_path) = backup.take() {
+                let _ = fs::remove_dir_all(&root);
+                let _ = fs::rename(&backup_path, &root);
+            }
+            return Err(err);
+        }
+        if let Some(backup_path) = backup.take() {
+            let _ = fs::remove_dir_all(&backup_path);
+        }
     }
 
     let now = now_ms();
+    let existing = store.get_plugin(&plugin_id)?;
+    let installed_at_ms = if mode == PluginInstallMode::Install {
+        now
+    } else {
+        existing
+            .as_ref()
+            .map(|p| p.installed_at_ms)
+            .unwrap_or(now)
+    };
+    let enabled = if mode == PluginInstallMode::Install {
+        true
+    } else {
+        existing.as_ref().map(|p| p.enabled).unwrap_or(true)
+    };
+
+    let default_source = match prepared.kind {
+        PreparedSourceKind::Path | PreparedSourceKind::Archive => prepared
+            .source_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "path".to_string()),
+        PreparedSourceKind::Npm => prepared
+            .spec
+            .as_ref()
+            .map(|s| format!("npm:{s}"))
+            .unwrap_or_else(|| "npm".to_string()),
+    };
+
     let plugin = PluginRecord {
         id: plugin_id.clone(),
-        name,
-        version,
-        description,
-        source: source.or_else(|| Some(plugin_dir.to_string_lossy().to_string())),
+        name: prepared.plugin.manifest.name.clone(),
+        version: prepared.plugin.manifest.version.clone(),
+        description: prepared.plugin.manifest.description.clone(),
+        source: source_label.or(Some(default_source)),
         path: root.to_string_lossy().to_string(),
-        enabled: true,
-        installed_at_ms: now,
+        enabled,
+        installed_at_ms,
         updated_at_ms: now,
     };
     store.upsert_plugin(&plugin)?;
-    sync_plugin_skills(paths, &plugin, policy)?;
-    Ok(plugin)
-}
 
-fn read_manifest(plugin_dir: &Path) -> Result<PluginManifest> {
-    let path = plugin_dir.join(".claude-plugin").join("plugin.json");
-    let raw = read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    serde_json::from_str(&raw).context("parse plugin.json")
+    let mut installs = load_install_records(paths)?;
+    let previous = installs.get(&plugin_id).cloned();
+    let installed_at_ms = if mode == PluginInstallMode::Install {
+        now
+    } else {
+        previous
+            .as_ref()
+            .map(|record| record.installed_at_ms)
+            .unwrap_or(now)
+    };
+    let record = PluginInstallRecord {
+        source: match prepared.kind {
+            PreparedSourceKind::Path => "path".to_string(),
+            PreparedSourceKind::Archive => "archive".to_string(),
+            PreparedSourceKind::Npm => "npm".to_string(),
+        },
+        spec: prepared.spec.clone(),
+        source_path: prepared
+            .source_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
+        install_path: Some(root.to_string_lossy().to_string()),
+        version: prepared.plugin.manifest.version.clone(),
+        installed_at_ms,
+        updated_at_ms: now,
+    };
+    installs.insert(plugin_id.clone(), record);
+    save_install_records(paths, &installs)?;
+
+    if enabled {
+        sync_plugin_skills(paths, &plugin, policy)?;
+    } else {
+        remove_plugin_skills(paths, &plugin.id)?;
+    }
+    Ok(plugin)
 }
 
 fn plugin_root(paths: &ClawdPaths, plugin_id: &str) -> PathBuf {
@@ -358,12 +1404,17 @@ fn plugin_assets(root: &Path) -> PluginAssets {
     let mut assets = PluginAssets::default();
     let skills_dir = root.join("skills");
     if skills_dir.exists() {
-        for entry in WalkDir::new(&skills_dir)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
-            if entry.file_type().is_file() {
-                if entry.path().extension().and_then(|s| s.to_str()) == Some("md") {
+        for entry in WalkDir::new(&skills_dir).into_iter().filter_map(Result::ok) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.file_name().and_then(|s| s.to_str()) == Some("SKILL.md") {
+                assets.skills += 1;
+                continue;
+            }
+            if path.parent() == Some(skills_dir.as_path()) {
+                if path.extension().and_then(|s| s.to_str()) == Some("md") {
                     assets.skills += 1;
                 }
             }
@@ -393,7 +1444,11 @@ fn codex_home_dir() -> Result<PathBuf> {
     Ok(home_dir()?.join(".codex"))
 }
 
-fn plugin_skill_root(plugin_id: &str) -> Result<PathBuf> {
+fn plugin_overlay_root() -> Result<PathBuf> {
+    Ok(codex_home_dir()?.join("skills").join("_clawdex_plugins"))
+}
+
+fn legacy_plugin_skill_root(plugin_id: &str) -> Result<PathBuf> {
     Ok(codex_home_dir()?
         .join("skills")
         .join("clawdex")
@@ -403,53 +1458,63 @@ fn plugin_skill_root(plugin_id: &str) -> Result<PathBuf> {
 
 fn sync_plugin_skills(paths: &ClawdPaths, plugin: &PluginRecord, policy: &McpPolicy) -> Result<()> {
     let root = PathBuf::from(&plugin.path);
-    let skills_dir = root.join("skills");
-    let dest_root = plugin_skill_root(&plugin.id)?;
-    if !skills_dir.exists() {
-        if dest_root.exists() {
-            fs::remove_dir_all(&dest_root)
-                .with_context(|| format!("remove {}", dest_root.display()))?;
-        }
-        return Ok(());
-    }
+    remove_plugin_skills(paths, &plugin.id)?;
 
-    if dest_root.exists() {
-        fs::remove_dir_all(&dest_root)
-            .with_context(|| format!("remove {}", dest_root.display()))?;
-    }
-    ensure_dir(&dest_root)?;
+    let component_paths = resolve_plugin_component_paths(&root)?;
+    let skill_sources = collect_skill_sources(&component_paths.skills)?;
+    let command_sources = collect_command_sources(&component_paths.commands)?;
 
-    for entry in WalkDir::new(&skills_dir)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        if !entry.file_type().is_file() {
+    let overlay_root = plugin_overlay_root()?;
+    ensure_dir(&overlay_root)?;
+
+    let mut skill_names = HashSet::new();
+    for skill in skill_sources {
+        let namespaced = format!("{}:{}", plugin.id, skill.name());
+        if !skill_names.insert(namespaced.clone()) {
             continue;
         }
-        if entry.path().extension().and_then(|s| s.to_str()) != Some("md") {
+        let dest = overlay_root.join(&namespaced);
+        if dest.exists() {
+            fs::remove_dir_all(&dest)
+                .with_context(|| format!("remove {}", dest.display()))?;
+        }
+        ensure_dir(&dest)?;
+        match skill {
+            SkillSource::Directory { root, .. } => {
+                copy_dir(&root, &dest)?;
+            }
+            SkillSource::LegacyFile { path, .. } => {
+                fs::copy(&path, dest.join("SKILL.md"))
+                    .with_context(|| format!("copy {} -> {}", path.display(), dest.display()))?;
+            }
+        }
+        let skill_md = dest.join("SKILL.md");
+        ensure_namespaced_frontmatter(&skill_md, &namespaced)?;
+    }
+
+    let mut command_names = HashSet::new();
+    for path in command_sources {
+        let template = load_command_template(&path)?;
+        if template.template.trim().is_empty() {
             continue;
         }
-        let rel = entry
-            .path()
-            .strip_prefix(&skills_dir)
-            .unwrap_or(entry.path());
-        let mut skill_dir = dest_root.join(rel);
-        skill_dir.set_extension("");
-        ensure_dir(&skill_dir)?;
-
-        let body = read_to_string(entry.path())?;
-        let skill_name = rel
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Skill");
-        let display_name = format!("{} / {}", plugin.name, skill_name);
-        let description = plugin
-            .description
-            .clone()
-            .unwrap_or_else(|| format!("{} plugin skill", plugin.name));
-        let yaml = render_skill_frontmatter(&display_name, &description, &plugin.id)?;
-        let contents = format!("---\n{}---\n{}", yaml, body);
-        fs::write(skill_dir.join("SKILL.md"), contents)?;
+        let namespaced = format!("{}:{}", plugin.id, template.name);
+        if skill_names.contains(&namespaced) {
+            continue;
+        }
+        if !command_names.insert(namespaced.clone()) {
+            continue;
+        }
+        let dest = overlay_root.join(&namespaced);
+        if dest.exists() {
+            fs::remove_dir_all(&dest)
+                .with_context(|| format!("remove {}", dest.display()))?;
+        }
+        ensure_dir(&dest)?;
+        let yaml = render_command_frontmatter(&namespaced, template.description.as_deref())?;
+        let contents = format!("---\n{}---\n{}", yaml, template.template);
+        fs::write(dest.join("SKILL.md"), contents)
+            .with_context(|| format!("write {}", dest.display()))?;
     }
 
     let _ = export_plugin_mcp(paths, plugin, policy);
@@ -457,10 +1522,26 @@ fn sync_plugin_skills(paths: &ClawdPaths, plugin: &PluginRecord, policy: &McpPol
 }
 
 fn remove_plugin_skills(paths: &ClawdPaths, plugin_id: &str) -> Result<()> {
-    let dest_root = plugin_skill_root(plugin_id)?;
-    if dest_root.exists() {
-        fs::remove_dir_all(&dest_root)
-            .with_context(|| format!("remove {}", dest_root.display()))?;
+    let overlay_root = plugin_overlay_root()?;
+    if overlay_root.exists() {
+        let prefix = format!("{plugin_id}:");
+        for entry in fs::read_dir(&overlay_root)
+            .with_context(|| format!("read {}", overlay_root.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
+            if !name.starts_with(&prefix) {
+                continue;
+            }
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("remove {}", path.display()))?;
+        }
+    }
+    let legacy_root = legacy_plugin_skill_root(plugin_id)?;
+    if legacy_root.exists() {
+        fs::remove_dir_all(&legacy_root)
+            .with_context(|| format!("remove {}", legacy_root.display()))?;
     }
     let mcp_path = paths.state_dir.join("mcp").join(format!("{plugin_id}.json"));
     if mcp_path.exists() {
@@ -470,21 +1551,224 @@ fn remove_plugin_skills(paths: &ClawdPaths, plugin_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn render_skill_frontmatter(name: &str, description: &str, plugin_id: &str) -> Result<String> {
+impl SkillSource {
+    fn name(&self) -> &str {
+        match self {
+            SkillSource::Directory { name, .. } => name,
+            SkillSource::LegacyFile { name, .. } => name,
+        }
+    }
+}
+
+fn collect_skill_sources(paths: &[PathBuf]) -> Result<Vec<SkillSource>> {
+    let mut out = Vec::new();
+    for path in paths {
+        if !path.exists() {
+            continue;
+        }
+        if path.is_file() {
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("skill")
+                .to_string();
+            out.push(SkillSource::LegacyFile {
+                path: path.to_path_buf(),
+                name,
+            });
+            continue;
+        }
+        collect_skills_from_dir(path, &mut out)?;
+    }
+    Ok(out)
+}
+
+fn collect_skills_from_dir(dir: &Path, out: &mut Vec<SkillSource>) -> Result<()> {
+    if dir.join("SKILL.md").exists() {
+        let name = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("skill")
+            .to_string();
+        out.push(SkillSource::Directory {
+            root: dir.to_path_buf(),
+            name,
+        });
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            if path.join("SKILL.md").exists() {
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("skill")
+                    .to_string();
+                out.push(SkillSource::Directory { root: path, name });
+            }
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) == Some("md") {
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("skill")
+                .to_string();
+            out.push(SkillSource::LegacyFile { path, name });
+        }
+    }
+    Ok(())
+}
+
+fn ensure_namespaced_frontmatter(path: &Path, namespaced: &str) -> Result<()> {
+    let contents = read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let (frontmatter, body) = split_frontmatter(&contents);
+    let mut mapping = frontmatter.unwrap_or_else(Mapping::new);
+
+    let name_key = YamlValue::String("name".to_string());
+    let mut needs_update = true;
+    if let Some(YamlValue::String(existing)) = mapping.get(&name_key) {
+        if existing == namespaced {
+            needs_update = false;
+        }
+    }
+    if needs_update {
+        mapping.insert(name_key, YamlValue::String(namespaced.to_string()));
+    }
+
+    let yaml = serde_yaml::to_string(&mapping).context("serialize skill frontmatter")?;
+    let updated = format!("---\n{}---\n{}", yaml, body);
+    fs::write(path, updated).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+fn split_frontmatter(contents: &str) -> (Option<Mapping>, String) {
+    let mut lines = contents.lines();
+    let first = lines.next().unwrap_or("");
+    if first.trim() != "---" {
+        return (None, contents.to_string());
+    }
+    let mut yaml_lines = Vec::new();
+    for line in lines.by_ref() {
+        if line.trim() == "---" {
+            break;
+        }
+        yaml_lines.push(line);
+    }
+    let rest = lines.collect::<Vec<&str>>().join("\n");
+    let yaml_text = yaml_lines.join("\n");
+    let mapping = serde_yaml::from_str::<Mapping>(&yaml_text).ok();
+    (mapping, rest)
+}
+
+fn render_command_frontmatter(name: &str, description: Option<&str>) -> Result<String> {
     let mut mapping = Mapping::new();
     mapping.insert(
         YamlValue::String("name".to_string()),
         YamlValue::String(name.to_string()),
     );
     mapping.insert(
-        YamlValue::String("description".to_string()),
-        YamlValue::String(description.to_string()),
+        YamlValue::String("disable-model-invocation".to_string()),
+        YamlValue::Bool(true),
     );
     mapping.insert(
-        YamlValue::String("plugin".to_string()),
-        YamlValue::String(plugin_id.to_string()),
+        YamlValue::String("user-invocable".to_string()),
+        YamlValue::Bool(true),
     );
-    serde_yaml::to_string(&mapping).context("serialize skill frontmatter")
+    if let Some(desc) = description {
+        if !desc.trim().is_empty() {
+            mapping.insert(
+                YamlValue::String("description".to_string()),
+                YamlValue::String(desc.trim().to_string()),
+            );
+        }
+    }
+    serde_yaml::to_string(&mapping).context("serialize command frontmatter")
+}
+
+fn collect_command_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for path in paths {
+        if !path.exists() {
+            continue;
+        }
+        if path.is_file() {
+            if is_command_file(path) {
+                let key = path.to_string_lossy().to_string();
+                if seen.insert(key) {
+                    out.push(path.to_path_buf());
+                }
+            }
+            continue;
+        }
+        for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let entry_path = entry.path();
+            if !is_command_file(entry_path) {
+                continue;
+            }
+            let key = entry_path.to_string_lossy().to_string();
+            if seen.insert(key) {
+                out.push(entry_path.to_path_buf());
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn is_command_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|s| s.to_str()),
+        Some("md") | Some("json") | Some("json5")
+    )
+}
+
+fn load_command_template(path: &Path) -> Result<CommandTemplate> {
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    let name = |fallback: &str| -> String {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(fallback)
+            .to_string()
+    };
+    if ext == "json" || ext == "json5" {
+        let spec = read_command_json(path)?;
+        let command_name = spec.name.clone().unwrap_or_else(|| name("command"));
+        let template = command_template_from_spec(&spec);
+        return Ok(CommandTemplate {
+            name: command_name,
+            description: spec.description.clone(),
+            template,
+        });
+    }
+    let template = read_to_string(path)?;
+    Ok(CommandTemplate {
+        name: name("command"),
+        description: extract_description(path).ok(),
+        template,
+    })
+}
+
+fn command_template_from_spec(spec: &CommandSpec) -> String {
+    let base = spec.prompt.clone().unwrap_or_default();
+    if let Some(system) = spec.system.as_ref() {
+        if base.trim().is_empty() {
+            format!("System:\n{}", system)
+        } else {
+            format!("System:\n{}\n\n{}", system, base)
+        }
+    } else {
+        base
+    }
 }
 
 fn read_plugin_mcp(root: &Path) -> Result<Option<Value>> {
@@ -502,7 +1786,9 @@ fn export_plugin_mcp(paths: &ClawdPaths, plugin: &PluginRecord, policy: &McpPoli
     let Some(value) = read_plugin_mcp(&root)? else { return Ok(()) };
     let dest = paths.state_dir.join("mcp").join(format!("{}.json", plugin.id));
     let mut mcp_servers = Map::new();
-    let count = merge_mcp_config(&mut mcp_servers, &plugin.id, &value, policy);
+    let permissions = plugin_permissions_for_root(&root);
+    let count =
+        merge_mcp_config(&mut mcp_servers, &plugin.id, &value, policy, permissions.as_ref());
     if count == 0 {
         if dest.exists() {
             fs::remove_file(&dest)
@@ -515,11 +1801,16 @@ fn export_plugin_mcp(paths: &ClawdPaths, plugin: &PluginRecord, policy: &McpPoli
     Ok(())
 }
 
+fn normalize_mcp_name(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
 fn merge_mcp_config(
     target: &mut Map<String, Value>,
     plugin_id: &str,
     value: &Value,
     policy: &McpPolicy,
+    permissions: Option<&PluginPermissions>,
 ) -> usize {
     if !policy.is_plugin_enabled(plugin_id) {
         return 0;
@@ -529,8 +1820,41 @@ fn merge_mcp_config(
         .and_then(|v| v.as_object())
         .or_else(|| value.as_object());
     let Some(servers) = candidate else { return 0 };
+    let mut allow_set: Option<HashSet<String>> = None;
+    let mut deny_set = HashSet::new();
+    if let Some(perms) = permissions {
+        if let Some(list) = perms.mcp_deny.as_ref() {
+            for entry in list {
+                let key = normalize_mcp_name(entry);
+                if !key.is_empty() {
+                    deny_set.insert(key);
+                }
+            }
+        }
+        if let Some(list) = perms.mcp_allow.as_ref() {
+            let mut set = HashSet::new();
+            for entry in list {
+                let key = normalize_mcp_name(entry);
+                if !key.is_empty() {
+                    set.insert(key);
+                }
+            }
+            if !set.is_empty() {
+                allow_set = Some(set);
+            }
+        }
+    }
     let mut inserted = 0usize;
     for (name, config) in servers {
+        let key = normalize_mcp_name(name);
+        if deny_set.contains(&key) {
+            continue;
+        }
+        if let Some(allow) = allow_set.as_ref() {
+            if !allow.contains(&key) {
+                continue;
+            }
+        }
         if !policy.is_allowed(name) {
             continue;
         }
@@ -547,47 +1871,17 @@ fn merge_mcp_config(
 
 fn load_plugin_commands(root: &Path, plugin: &PluginRecord) -> Result<Vec<CommandEntry>> {
     let mut entries = Vec::new();
-    let commands_dir = root.join("commands");
-    if !commands_dir.exists() {
-        return Ok(entries);
-    }
-    for entry in WalkDir::new(&commands_dir).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        if ext == "json" || ext == "json5" {
-            if let Ok(spec) = read_command_json(path) {
-                if let Some(command) = spec
-                    .name
-                    .clone()
-                    .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
-                {
-                    entries.push(CommandEntry {
-                        plugin_id: plugin.id.clone(),
-                        plugin_name: plugin.name.clone(),
-                        command,
-                        description: spec.description.clone(),
-                        source: path.to_string_lossy().to_string(),
-                    });
-                }
-            }
-        } else if ext == "md" {
-            let command = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("command")
-                .to_string();
-            let description = extract_description(path).ok();
-            entries.push(CommandEntry {
-                plugin_id: plugin.id.clone(),
-                plugin_name: plugin.name.clone(),
-                command,
-                description,
-                source: path.to_string_lossy().to_string(),
-            });
-        }
+    let component_paths = resolve_plugin_component_paths(root)?;
+    let command_files = collect_command_sources(&component_paths.commands)?;
+    for path in command_files {
+        let template = load_command_template(&path)?;
+        entries.push(CommandEntry {
+            plugin_id: plugin.id.clone(),
+            plugin_name: plugin.name.clone(),
+            command: template.name,
+            description: template.description,
+            source: path.to_string_lossy().to_string(),
+        });
     }
     Ok(entries)
 }
@@ -597,57 +1891,254 @@ pub fn resolve_plugin_command_prompt(
     plugin: &PluginRecord,
     command: &str,
     input: Option<&str>,
+    allow_preprocess: bool,
 ) -> Result<String> {
     let root = PathBuf::from(&plugin.path);
-    let commands_dir = root.join("commands");
-    if !commands_dir.exists() {
-        anyhow::bail!("plugin has no commands directory");
+    let component_paths = resolve_plugin_component_paths(&root)?;
+    let command_files = collect_command_sources(&component_paths.commands)?;
+    let mut selected = None;
+    for path in command_files {
+        let template = load_command_template(&path)?;
+        if template.name == command {
+            selected = Some(template);
+            break;
+        }
     }
-    let mut candidates = Vec::new();
-    for entry in WalkDir::new(&commands_dir).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if stem != command {
-            continue;
-        }
-        candidates.push(path.to_path_buf());
-    }
-    let path = candidates
-        .into_iter()
-        .next()
-        .context("command not found")?;
-
-    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-    let mut prompt = if ext == "json" || ext == "json5" {
-        let spec = read_command_json(&path)?;
-        let base = spec
-            .prompt
-            .clone()
-            .unwrap_or_else(|| "".to_string());
-        if let Some(system) = spec.system {
-            format!("System:\n{}\n\n{}", system, base)
-        } else {
-            base
-        }
-    } else {
-        read_to_string(&path)?
+    let Some(template) = selected else {
+        anyhow::bail!("command not found");
     };
 
-    if let Some(input) = input {
-        if prompt.contains("{{input}}") {
-            prompt = prompt.replace("{{input}}", input);
-        } else {
-            prompt.push_str("\n\nUser input:\n");
-            prompt.push_str(input);
-        }
-    }
-    if prompt.trim().is_empty() {
+    let rendered = render_command_prompt(
+        &template.template,
+        input.unwrap_or(""),
+        allow_preprocess,
+        &root,
+    )?;
+    if rendered.trim().is_empty() {
         anyhow::bail!("command prompt is empty");
     }
-    Ok(prompt)
+    Ok(rendered)
+}
+
+fn render_command_prompt(
+    template: &str,
+    args: &str,
+    allow_preprocess: bool,
+    plugin_root: &Path,
+) -> Result<String> {
+    let args_str = args.trim();
+    let mut legacy_used = false;
+    let mut working = template.to_string();
+    if working.contains("{{input}}") {
+        working = working.replace("{{input}}", args_str);
+        legacy_used = true;
+    }
+    let (mut rendered, used_args) = apply_argument_substitutions(&working, args_str);
+    let used_args = used_args || legacy_used;
+
+    if allow_preprocess {
+        rendered = apply_preprocess_commands(&rendered, plugin_root)?;
+    } else if contains_preprocess_command(&rendered) {
+        anyhow::bail!("preprocess commands are disabled");
+    }
+
+    if !used_args && !args_str.is_empty() {
+        if !rendered.trim().is_empty() {
+            rendered.push_str("\n\n");
+        }
+        rendered.push_str(args_str);
+    }
+
+    let plugin_root_str = plugin_root.to_string_lossy();
+    if rendered.contains("${CLAUDE_PLUGIN_ROOT}") {
+        rendered = rendered.replace("${CLAUDE_PLUGIN_ROOT}", &plugin_root_str);
+    }
+
+    Ok(rendered)
+}
+
+fn apply_argument_substitutions(template: &str, args_str: &str) -> (String, bool) {
+    let args = split_arguments(args_str);
+    let mut out = String::new();
+    let mut used = false;
+    let chars: Vec<char> = template.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] != '$' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        if matches_sequence(&chars, i + 1, "ARGUMENTS") {
+            let idx = i + "ARGUMENTS".len() + 1;
+            if idx < chars.len() && chars[idx] == '[' {
+                if let Some((value, next_idx)) = parse_indexed_argument(&args, &chars, idx + 1) {
+                    out.push_str(&value);
+                    used = true;
+                    i = next_idx;
+                    continue;
+                }
+            }
+            out.push_str(args_str);
+            used = true;
+            i = i + "ARGUMENTS".len() + 1;
+            continue;
+        }
+
+        if let Some((value, next_idx)) = parse_numeric_argument(&args, &chars, i + 1) {
+            out.push_str(&value);
+            used = true;
+            i = next_idx;
+            continue;
+        }
+
+        out.push('$');
+        i += 1;
+    }
+    (out, used)
+}
+
+fn matches_sequence(chars: &[char], start: usize, sequence: &str) -> bool {
+    let seq: Vec<char> = sequence.chars().collect();
+    if start + seq.len() > chars.len() {
+        return false;
+    }
+    chars[start..start + seq.len()] == seq[..]
+}
+
+fn parse_indexed_argument(args: &[String], chars: &[char], start: usize) -> Option<(String, usize)> {
+    let mut idx = start;
+    let mut digits = String::new();
+    while idx < chars.len() {
+        let ch = chars[idx];
+        if ch == ']' {
+            if digits.is_empty() {
+                return None;
+            }
+            let value = digits.parse::<usize>().ok()?;
+            let replacement = args.get(value).cloned().unwrap_or_default();
+            return Some((replacement, idx + 1));
+        }
+        if !ch.is_ascii_digit() {
+            return None;
+        }
+        digits.push(ch);
+        idx += 1;
+    }
+    None
+}
+
+fn parse_numeric_argument(args: &[String], chars: &[char], start: usize) -> Option<(String, usize)> {
+    if start >= chars.len() || !chars[start].is_ascii_digit() {
+        return None;
+    }
+    let mut idx = start;
+    let mut digits = String::new();
+    while idx < chars.len() && chars[idx].is_ascii_digit() {
+        digits.push(chars[idx]);
+        idx += 1;
+    }
+    let value = digits.parse::<usize>().ok()?;
+    let replacement = args.get(value).cloned().unwrap_or_default();
+    Some((replacement, idx))
+}
+
+fn split_arguments(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    for ch in raw.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && !in_single {
+            escaped = true;
+            continue;
+        }
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+            continue;
+        }
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+            continue;
+        }
+        if ch.is_whitespace() && !in_single && !in_double {
+            if !current.is_empty() {
+                out.push(current.clone());
+                current.clear();
+            }
+            continue;
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+fn contains_preprocess_command(template: &str) -> bool {
+    template.lines().any(|line| is_preprocess_line(line))
+}
+
+fn apply_preprocess_commands(template: &str, plugin_root: &Path) -> Result<String> {
+    let mut output = String::new();
+    for line in template.lines() {
+        if is_preprocess_line(line) {
+            let cmd = line.trim_start();
+            let cmd = cmd.trim_start_matches('!').trim();
+            if cmd.is_empty() {
+                continue;
+            }
+            let result = run_preprocess_command(cmd, plugin_root)?;
+            output.push_str(&result);
+            if !result.ends_with('\n') {
+                output.push('\n');
+            }
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    if output.ends_with('\n') {
+        output.pop();
+    }
+    Ok(output)
+}
+
+fn is_preprocess_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with('!') && trimmed.len() > 1
+}
+
+fn run_preprocess_command(command: &str, plugin_root: &Path) -> Result<String> {
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.arg("/C").arg(command);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(command);
+        c
+    };
+    cmd.current_dir(plugin_root);
+    cmd.env(
+        "CLAUDE_PLUGIN_ROOT",
+        plugin_root.to_string_lossy().to_string(),
+    );
+    let output = cmd.output().with_context(|| format!("run preprocess command: {command}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("preprocess command failed: {command}\n{stderr}");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn read_command_json(path: &Path) -> Result<CommandSpec> {
