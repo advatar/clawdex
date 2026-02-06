@@ -1,5 +1,11 @@
 # Status
 
+Upstream Sync (Submodules):
+- [ ] Establish and follow a regular cadence to pull upstream changes into our forks and then bump the pinned submodule SHAs in this repo (`codex/` from `openai/main`, `openclaw/` from `openclaw/main`).
+- [ ] On each `openclaw/` bump: scan upstream skills/tooling for new/changed tool usage, update `compat/` schemas/specs, and add regression tests before porting required behavior into `clawdex/`.
+- [ ] On each `codex/` bump: review upstream Codex changes for new capabilities we should adopt in `clawdex/` (protocol/tool-calling, approvals, ui-bridge/runtime), and capture concrete port tasks here before implementing.
+- [ ] Keep submodule bump commits isolated (one `chore(submodules)` commit), and land parity/feature ports as separate commits with tests.
+
 - [x] Add artifact service tools (xlsx/pptx/docx/pdf) with schema validation + hashing
 - [x] Record artifact events and list outputs at end of task runs
 - [x] Add builder skills plugin for spreadsheet/slide/report outputs
@@ -51,6 +57,7 @@
 - [x] Fix Claude plugin skill import (skills/<name>/SKILL.md), namespacing, and overlay paths
 - [x] Convert plugin commands into namespaced skills with shared renderer semantics
 - [x] Add Claude plugin manifest path resolution for skills/commands (additive + ./ rules)
+- [x] Import Claude plugin marketplace artifacts bundle (CR/DiffPlan/schema/SQL)
 
 Roadmap:
 - [x] Add revised OpenClaw parity roadmap (mac app parity priority, web/admin nice-to-have) in `ROADMAP.md`.
