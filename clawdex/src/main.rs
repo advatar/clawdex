@@ -81,7 +81,7 @@ enum Commands {
         #[command(subcommand)]
         command: TasksCommand,
     },
-    /// Plugin manager (Cowork/OpenClaw-compatible plugins)
+    /// Plugin manager (Cowork-style plugins)
     Plugins {
         #[command(subcommand)]
         command: PluginsCommand,
@@ -157,17 +157,6 @@ enum TasksCommand {
         #[arg(long)]
         workspace: Option<PathBuf>,
     },
-    /// Export an audit packet for a task run
-    Export {
-        #[arg(long = "run-id")]
-        run_id: String,
-        #[arg(long)]
-        output: Option<PathBuf>,
-        #[arg(long = "state-dir")]
-        state_dir: Option<PathBuf>,
-        #[arg(long)]
-        workspace: Option<PathBuf>,
-    },
     /// Run a simple HTTP task server (for UI integration)
     Server {
         #[arg(long, default_value = "127.0.0.1:18790")]
@@ -190,29 +179,14 @@ enum PluginsCommand {
         #[arg(long = "include-disabled")]
         include_disabled: bool,
     },
-    /// Install a plugin from a local path or npm spec
+    /// Install a plugin from a local path
     Add {
-        #[arg(long, required_unless_present = "npm")]
-        path: Option<PathBuf>,
-        #[arg(long, required_unless_present = "path", conflicts_with = "path")]
-        npm: Option<String>,
-        #[arg(long, conflicts_with = "npm")]
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
         link: bool,
         #[arg(long)]
         source: Option<String>,
-        #[arg(long = "state-dir")]
-        state_dir: Option<PathBuf>,
-        #[arg(long)]
-        workspace: Option<PathBuf>,
-    },
-    /// Update installed plugins (npm installs only)
-    Update {
-        #[arg(long = "id")]
-        id: Option<String>,
-        #[arg(long)]
-        all: bool,
-        #[arg(long = "dry-run")]
-        dry_run: bool,
         #[arg(long = "state-dir")]
         state_dir: Option<PathBuf>,
         #[arg(long)]
@@ -440,17 +414,6 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&value)?);
                 Ok(())
             }
-            TasksCommand::Export {
-                run_id,
-                output,
-                state_dir,
-                workspace,
-            } => {
-                let value =
-                    tasks::export_audit_packet_command(&run_id, output, state_dir, workspace)?;
-                println!("{}", serde_json::to_string_pretty(&value)?);
-                Ok(())
-            }
             TasksCommand::Server {
                 bind,
                 state_dir,
@@ -469,26 +432,12 @@ fn main() -> Result<()> {
             }
             PluginsCommand::Add {
                 path,
-                npm,
                 link,
                 source,
                 state_dir,
                 workspace,
             } => {
-                let value =
-                    plugins::add_plugin_command(path, npm, link, source, state_dir, workspace)?;
-                println!("{}", serde_json::to_string_pretty(&value)?);
-                Ok(())
-            }
-            PluginsCommand::Update {
-                id,
-                all,
-                dry_run,
-                state_dir,
-                workspace,
-            } => {
-                let value =
-                    plugins::update_plugin_command(id, all, dry_run, state_dir, workspace)?;
+                let value = plugins::add_plugin_command(path, link, source, state_dir, workspace)?;
                 println!("{}", serde_json::to_string_pretty(&value)?);
                 Ok(())
             }

@@ -137,10 +137,9 @@ Default state layout:
 12. `WORKSPACE/MEMORY.md`
 13. `WORKSPACE/memory/YYYY-MM-DD.md`
 14. `WORKSPACE/HEARTBEAT.md` (optional)
-15. `~/.codex/clawdex/plugins/installs.json`
-16. `~/.codex/clawdex/plugins/<pluginId>/...`
-17. `~/.codex/clawdex/mcp/plugins.json`
-18. `~/.codex/skills/clawdex/plugins/<pluginId>/<skill>/SKILL.md`
+15. `~/.codex/clawdex/plugins/<pluginId>/...`
+16. `~/.codex/clawdex/mcp/plugins.json`
+17. `~/.codex/skills/clawdex/plugins/<pluginId>/<skill>/SKILL.md`
 
 Example `config.json5`:
 
@@ -296,26 +295,16 @@ Workspace policy notes:
    - `--workspace <path>` overrides workspace directory.
 
 `clawdex plugins add`
-1. Description: Install a plugin from a local path (folder/archive) or npm spec.
+1. Description: Install a Cowork-style plugin from a local folder.
 2. Options:
-   - `--path <dir|archive>` plugin root folder or archive (`.tgz`, `.tar.gz`, `.tar`, `.zip`).
-   - `--npm <spec>` npm spec (example: `@openclaw/telegram`).
-   - `--link` create a symlink instead of copying (local path only).
+   - `--path <dir>` plugin root folder.
+   - `--link` create a symlink instead of copying.
    - `--source <text>` optional source label.
    - `--state-dir <path>` overrides state directory.
    - `--workspace <path>` overrides workspace directory.
 
 Built-in output builder plugin (spreadsheets, decks, reports):
 - `clawdex plugins add --path plugins/clawdex-artifacts`
-
-`clawdex plugins update`
-1. Description: Update installed plugins (npm installs only).
-2. Options:
-   - `--id <pluginId>` plugin id (omit with `--all`).
-   - `--all` update all tracked npm plugins.
-   - `--dry-run` show what would change without writing.
-   - `--state-dir <path>` overrides state directory.
-   - `--workspace <path>` overrides workspace directory.
 
 `clawdex plugins enable`
 1. Description: Enable a plugin and sync its skills.
