@@ -57,7 +57,6 @@ Upstream Sync (Submodules):
 - [x] Fix Claude plugin skill import (skills/<name>/SKILL.md), namespacing, and overlay paths
 - [x] Convert plugin commands into namespaced skills with shared renderer semantics
 - [x] Add Claude plugin manifest path resolution for skills/commands (additive + ./ rules)
-- [x] Import Claude plugin marketplace artifacts bundle (CR/DiffPlan/schema/SQL)
 
 Roadmap:
 - [x] Add revised OpenClaw parity roadmap (mac app parity priority, web/admin nice-to-have) in `ROADMAP.md`.
