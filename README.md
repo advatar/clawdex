@@ -305,8 +305,10 @@ Workspace policy notes:
    - `--state-dir <path>` overrides state directory.
    - `--workspace <path>` overrides workspace directory.
 
+Bundled Claude plugins are installed automatically on first run (when available).
+
 Built-in output builder plugin (spreadsheets, decks, reports):
-- `clawdex plugins add --path plugins/clawdex-artifacts`
+- `clawdex-artifacts` (source: `bundled-claude`)
 
 `clawdex plugins update`
 1. Description: Update installed plugins (npm installs only).

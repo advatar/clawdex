@@ -15,7 +15,7 @@ use walkdir::WalkDir;
 use zip::ZipArchive;
 
 use crate::app_server::{ApprovalMode, CodexClient};
-use crate::config::{load_config, resolve_mcp_policy, ClawdPaths, McpPolicy, WorkspacePolicy};
+use crate::config::{load_config, resolve_mcp_policy, ClawdConfig, ClawdPaths, McpPolicy, WorkspacePolicy};
 use crate::runner::workspace_sandbox_policy;
 use crate::task_db::{PluginRecord, TaskStore};
 use crate::util::{ensure_dir, home_dir, now_ms, read_to_string, write_json_value};
@@ -23,6 +23,135 @@ use crate::util::{ensure_dir, home_dir, now_ms, read_to_string, write_json_value
 const COWORK_MANIFEST_PATH: &str = ".claude-plugin/plugin.json";
 const OPENCLAW_MANIFEST_FILENAME: &str = "openclaw.plugin.json";
 const INSTALLS_FILE: &str = "installs.json";
+const BUNDLED_CLAUDE_PLUGINS_DIR_ENV: &str = "CLAWDEX_BUNDLED_CLAUDE_PLUGINS_DIR";
+const DISABLE_BUNDLED_CLAUDE_PLUGINS_ENV: &str = "CLAWDEX_DISABLE_DEFAULT_CLAUDE_PLUGINS";
+const BUNDLED_CLAUDE_PLUGINS_SOURCE_LABEL: &str = "bundled-claude";
+
+pub fn ensure_default_claude_plugins_installed(cfg: &ClawdConfig, paths: &ClawdPaths) -> Result<()> {
+    if std::env::var(DISABLE_BUNDLED_CLAUDE_PLUGINS_ENV)
+        .ok()
+        .is_some_and(|value| value.trim() == "1")
+    {
+        return Ok(());
+    }
+
+    let Some(root) = discover_bundled_claude_plugins_dir() else {
+        return Ok(());
+    };
+
+    let plugin_roots = list_bundled_claude_plugins(&root)?;
+    if plugin_roots.is_empty() {
+        return Ok(());
+    }
+
+    let store = TaskStore::open(paths)?;
+    let policy = resolve_mcp_policy(cfg);
+
+    for plugin_root in plugin_roots {
+        if let Err(err) = ensure_bundled_claude_plugin(paths, &store, &policy, &plugin_root) {
+            eprintln!(
+                "[clawdex][plugins] bundled Claude plugin install failed for {}: {err}",
+                plugin_root.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn discover_bundled_claude_plugins_dir() -> Option<PathBuf> {
+    if let Ok(env) = std::env::var(BUNDLED_CLAUDE_PLUGINS_DIR_ENV) {
+        let trimmed = env.trim();
+        if !trimmed.is_empty() {
+            let path = PathBuf::from(trimmed);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            // App embed layout: .../Contents/Resources/bin/clawdex
+            if let Some(resources) = parent.parent() {
+                let candidate = resources.join("claude-plugins");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+            // CLI dist layout: .../bin/clawdex
+            let candidate = parent.join("claude-plugins");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join("plugins");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if let Some(parent) = cwd.parent() {
+            let candidate = parent.join("plugins");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+fn list_bundled_claude_plugins(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut plugins = Vec::new();
+    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|name| name.starts_with('.'))
+        {
+            continue;
+        }
+
+        // Claude plugins are rooted at a directory that contains `.claude-plugin/`.
+        if path.join(".claude-plugin").is_dir() {
+            plugins.push(path);
+        }
+    }
+    plugins.sort_by(|a, b| a.to_string_lossy().to_lowercase().cmp(&b.to_string_lossy().to_lowercase()));
+    Ok(plugins)
+}
+
+fn ensure_bundled_claude_plugin(
+    paths: &ClawdPaths,
+    store: &TaskStore,
+    policy: &McpPolicy,
+    plugin_root: &Path,
+) -> Result<()> {
+    let manifest = load_plugin_manifest(plugin_root)?;
+    if store.get_plugin(&manifest.id)?.is_some() {
+        return Ok(());
+    }
+
+    let source = PluginInstallSource::Path(plugin_root.to_path_buf());
+    let _ = install_plugin(
+        paths,
+        store,
+        source,
+        false,
+        Some(BUNDLED_CLAUDE_PLUGINS_SOURCE_LABEL.to_string()),
+        policy,
+        PluginInstallMode::Install,
+        Some(&manifest.id),
+    )?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy)]
 enum PluginManifestKind {
@@ -330,7 +459,35 @@ fn load_plugin_manifest(root: &Path) -> Result<PluginManifestInfo> {
         });
     }
 
-    anyhow::bail!("plugin manifest not found")
+    // Claude plugin.json is optional; if absent, derive metadata from directory and/or package.json.
+    let looks_like_claude_plugin = root.join(".claude-plugin").is_dir()
+        || root.join("skills").is_dir()
+        || root.join("commands").is_dir()
+        || root.join(".mcp.json").is_file()
+        || root.join(".lsp.json").is_file();
+    if !looks_like_claude_plugin {
+        anyhow::bail!("plugin manifest not found");
+    }
+
+    let raw_id = root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .context("plugin id not found")?;
+    let id = normalize_plugin_id(&raw_id)?;
+    let name = resolve_plugin_name(&id, None, package.as_ref());
+    let description = resolve_plugin_description(None, package.as_ref());
+    let version = package.as_ref().and_then(|pkg| pkg.version.clone());
+    Ok(PluginManifestInfo {
+        id,
+        name,
+        version,
+        description,
+        kind: PluginManifestKind::Cowork,
+        manifest_path: cowork_path,
+        config_schema: None,
+        permissions: PluginPermissions::default(),
+    })
 }
 
 fn plugin_permissions_for_root(root: &Path) -> Option<PluginPermissions> {
@@ -1435,25 +1592,20 @@ fn plugin_assets(root: &Path) -> PluginAssets {
     assets
 }
 
-fn codex_home_dir() -> Result<PathBuf> {
-    if let Ok(env) = std::env::var("CODEX_HOME") {
-        if !env.trim().is_empty() {
-            return Ok(PathBuf::from(env));
-        }
-    }
-    Ok(home_dir()?.join(".codex"))
+fn codex_home_dir(paths: &ClawdPaths) -> PathBuf {
+    paths.state_dir.join("codex")
 }
 
-fn plugin_overlay_root() -> Result<PathBuf> {
-    Ok(codex_home_dir()?.join("skills").join("_clawdex_plugins"))
+fn plugin_overlay_root(paths: &ClawdPaths) -> PathBuf {
+    codex_home_dir(paths).join("skills").join("_clawdex_plugins")
 }
 
-fn legacy_plugin_skill_root(plugin_id: &str) -> Result<PathBuf> {
-    Ok(codex_home_dir()?
+fn legacy_plugin_skill_root(paths: &ClawdPaths, plugin_id: &str) -> PathBuf {
+    codex_home_dir(paths)
         .join("skills")
         .join("clawdex")
         .join("plugins")
-        .join(plugin_id))
+        .join(plugin_id)
 }
 
 fn sync_plugin_skills(paths: &ClawdPaths, plugin: &PluginRecord, policy: &McpPolicy) -> Result<()> {
@@ -1464,7 +1616,7 @@ fn sync_plugin_skills(paths: &ClawdPaths, plugin: &PluginRecord, policy: &McpPol
     let skill_sources = collect_skill_sources(&component_paths.skills)?;
     let command_sources = collect_command_sources(&component_paths.commands)?;
 
-    let overlay_root = plugin_overlay_root()?;
+    let overlay_root = plugin_overlay_root(paths);
     ensure_dir(&overlay_root)?;
 
     let mut skill_names = HashSet::new();
@@ -1522,7 +1674,7 @@ fn sync_plugin_skills(paths: &ClawdPaths, plugin: &PluginRecord, policy: &McpPol
 }
 
 fn remove_plugin_skills(paths: &ClawdPaths, plugin_id: &str) -> Result<()> {
-    let overlay_root = plugin_overlay_root()?;
+    let overlay_root = plugin_overlay_root(paths);
     if overlay_root.exists() {
         let prefix = format!("{plugin_id}:");
         for entry in fs::read_dir(&overlay_root)
@@ -1538,7 +1690,7 @@ fn remove_plugin_skills(paths: &ClawdPaths, plugin_id: &str) -> Result<()> {
                 .with_context(|| format!("remove {}", path.display()))?;
         }
     }
-    let legacy_root = legacy_plugin_skill_root(plugin_id)?;
+    let legacy_root = legacy_plugin_skill_root(paths, plugin_id);
     if legacy_root.exists() {
         fs::remove_dir_all(&legacy_root)
             .with_context(|| format!("remove {}", legacy_root.display()))?;

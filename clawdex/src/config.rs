@@ -232,16 +232,23 @@ pub fn load_config(
     ensure_dir(&memory_dir)?;
     ensure_dir(&sessions_dir)?;
 
+    let paths = ClawdPaths {
+        state_dir,
+        cron_dir,
+        memory_dir,
+        sessions_dir,
+        workspace_dir,
+        workspace_policy,
+    };
+
+    // Best-effort: install bundled Claude plugins (if present) for first-run UX.
+    if let Err(err) = crate::plugins::ensure_default_claude_plugins_installed(&config, &paths) {
+        eprintln!("[clawdex][plugins] default install failed: {err}");
+    }
+
     Ok((
         config,
-        ClawdPaths {
-            state_dir,
-            cron_dir,
-            memory_dir,
-            sessions_dir,
-            workspace_dir,
-            workspace_policy,
-        },
+        paths,
     ))
 }
 

@@ -234,6 +234,19 @@ else
   log "OpenClaw extensions not found at ${OPENCLAW_EXTENSIONS_SRC}; skipping embed."
 fi
 
+# Embed Claude-style plugins for first-run plugin install.
+CLAUDE_PLUGINS_SRC="${CLAUDE_PLUGINS_SRC:-${REPO_ROOT}/plugins}"
+CLAUDE_PLUGINS_DEST="${APP_RES_DIR}/claude-plugins"
+if [[ -d "${CLAUDE_PLUGINS_SRC}" ]]; then
+  /bin/rm -rf "${CLAUDE_PLUGINS_DEST}"
+  /bin/mkdir -p "${CLAUDE_PLUGINS_DEST}"
+  /usr/bin/rsync -a --delete --exclude "node_modules" --exclude ".DS_Store" \
+    "${CLAUDE_PLUGINS_SRC}/" "${CLAUDE_PLUGINS_DEST}/"
+  log "Embedded Claude plugins into ${CLAUDE_PLUGINS_DEST}"
+else
+  log "Claude plugins not found at ${CLAUDE_PLUGINS_SRC}; skipping embed."
+fi
+
 # Codesign the embedded executables so they can be executed from a sandboxed app.
 # NOTE: For Debug builds you may not have an expanded signing identity; skip in that case.
 if [[ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]]; then
