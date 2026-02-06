@@ -1,0 +1,8 @@
+version: 1
+commands:
+  - name: cargo-test
+    description: Run clawdex Rust tests
+    cmd: cargo test --manifest-path clawdex/Cargo.toml
+  - name: clawdex-cli
+    description: Run the clawdex CLI from source
+    cmd: cargo run --manifest-path clawdex/Cargo.toml -- <args>

@@ -108,7 +108,14 @@ pub fn run_ui_bridge(
                     emit_error(&mut stdout, "plugin is disabled")?;
                     continue;
                 }
-                let prompt = match plugins::resolve_plugin_command_prompt(&paths, &plugin, command, input) {
+                let allow_preprocess = matches!(approval_mode, ApprovalMode::AutoApprove);
+                let prompt = match plugins::resolve_plugin_command_prompt(
+                    &paths,
+                    &plugin,
+                    command,
+                    input,
+                    allow_preprocess,
+                ) {
                     Ok(prompt) => prompt,
                     Err(err) => {
                         emit_error(&mut stdout, &err.to_string())?;
