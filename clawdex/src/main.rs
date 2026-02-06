@@ -179,10 +179,12 @@ enum PluginsCommand {
         #[arg(long = "include-disabled")]
         include_disabled: bool,
     },
-    /// Install a plugin from a local path
+    /// Install a plugin from a local path or npm spec
     Add {
         #[arg(long)]
-        path: PathBuf,
+        path: Option<PathBuf>,
+        #[arg(long)]
+        npm: Option<String>,
         #[arg(long)]
         link: bool,
         #[arg(long)]
@@ -432,12 +434,14 @@ fn main() -> Result<()> {
             }
             PluginsCommand::Add {
                 path,
+                npm,
                 link,
                 source,
                 state_dir,
                 workspace,
             } => {
-                let value = plugins::add_plugin_command(path, link, source, state_dir, workspace)?;
+                let value =
+                    plugins::add_plugin_command(path, npm, link, source, state_dir, workspace)?;
                 println!("{}", serde_json::to_string_pretty(&value)?);
                 Ok(())
             }
