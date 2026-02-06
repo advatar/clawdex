@@ -20,12 +20,15 @@ final class RuntimeManager: ObservableObject {
     private var workspaceURL: URL?
 
     private var cancellables = Set<AnyCancellable>()
+    private let toolsInstallLock = NSLock()
 
     let assistantMessagePublisher = PassthroughSubject<String, Never>()
     let errorPublisher = PassthroughSubject<String, Never>()
 
     // Increment this whenever you change embedded tool wiring.
     private let toolsVersion = "0.3.0"
+    private let openclawPluginsVersion = "1"
+    private let openclawPluginsSourceLabel = "bundled-openclaw"
 
     func bootstrap(appState: AppState) {
         self.appState = appState
@@ -37,6 +40,8 @@ final class RuntimeManager: ObservableObject {
         appState.agentAutoStart = UserDefaults.standard.bool(forKey: DefaultsKeys.agentAutoStart)
         appState.launchAtLoginEnabled = LaunchAtLoginController.isEnabled()
         appState.hasOpenAIKey = (try? Keychain.loadOpenAIKey()) != nil
+
+        preinstallOpenClawPluginsIfNeeded()
 
         // Optional: auto-start agent
         if appState.agentAutoStart {
@@ -280,6 +285,8 @@ final class RuntimeManager: ObservableObject {
     // MARK: - Tool installation
 
     func installToolsIfNeeded(force: Bool) throws {
+        toolsInstallLock.lock()
+        defer { toolsInstallLock.unlock() }
         let installedVersion = UserDefaults.standard.string(forKey: DefaultsKeys.toolsVersion)
         if !force, installedVersion == toolsVersion {
             return
@@ -327,6 +334,140 @@ final class RuntimeManager: ObservableObject {
 
         UserDefaults.standard.set(toolsVersion, forKey: DefaultsKeys.toolsVersion)
         appendLog("[app] Installed tools into \(destDir.path) (version \(toolsVersion))")
+    }
+
+    private func preinstallOpenClawPluginsIfNeeded() {
+        let defaults = UserDefaults.standard
+        if defaults.string(forKey: DefaultsKeys.openclawPluginsVersion) == openclawPluginsVersion {
+            return
+        }
+
+        let weakSelf = WeakRuntimeManager(self)
+        DispatchQueue.global(qos: .utility).async {
+            guard let self = weakSelf.value else { return }
+            let defaults = UserDefaults.standard
+            do {
+                try self.installToolsIfNeeded(force: false)
+                let toolPaths = try self.toolInstallPaths()
+                let stateDir = try self.ensureStateDir()
+                let pluginRoots = try self.bundledOpenClawPluginRoots()
+                if pluginRoots.isEmpty {
+                    self.appendLog("[app] No bundled OpenClaw plugins found.")
+                    defaults.set(self.openclawPluginsVersion, forKey: DefaultsKeys.openclawPluginsVersion)
+                    return
+                }
+
+                self.appendLog("[app] Preinstalling bundled OpenClaw plugins...")
+                var failures = 0
+                for root in pluginRoots {
+                    do {
+                        try self.installBundledOpenClawPlugin(
+                            clawdexURL: toolPaths.clawdex,
+                            stateDir: stateDir,
+                            pluginDir: root
+                        )
+                    } catch {
+                        failures += 1
+                        self.appendLog("[app] Failed to install \(root.lastPathComponent): \(error.localizedDescription)")
+                    }
+                }
+
+                if failures == 0 {
+                    defaults.set(self.openclawPluginsVersion, forKey: DefaultsKeys.openclawPluginsVersion)
+                    self.appendLog("[app] OpenClaw plugin preinstall complete.")
+                } else {
+                    self.appendLog("[app] OpenClaw plugin preinstall finished with \(failures) failures.")
+                }
+            } catch {
+                self.appendLog("[app] OpenClaw plugin preinstall error: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func bundledOpenClawPluginRoots() throws -> [URL] {
+        guard let root = Bundle.main.resourceURL?.appendingPathComponent("openclaw-extensions", isDirectory: true) else {
+            return []
+        }
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: root.path) else {
+            return []
+        }
+        let entries = try fm.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        var plugins: [URL] = []
+        for entry in entries {
+            let isDir = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            if !isDir { continue }
+            let manifest = entry.appendingPathComponent("openclaw.plugin.json")
+            if fm.fileExists(atPath: manifest.path) {
+                plugins.append(entry)
+            }
+        }
+        return plugins.sorted { $0.lastPathComponent.lowercased() < $1.lastPathComponent.lowercased() }
+    }
+
+    private func installBundledOpenClawPlugin(
+        clawdexURL: URL,
+        stateDir: URL,
+        pluginDir: URL
+    ) throws {
+        var args = [
+            "plugins",
+            "add",
+            "--path",
+            pluginDir.path,
+            "--source",
+            openclawPluginsSourceLabel,
+            "--state-dir",
+            stateDir.path
+        ]
+        if let workspaceURL {
+            args += ["--workspace", workspaceURL.path]
+        }
+        let result = try runClawdexCommand(clawdexURL: clawdexURL, args: args)
+        if !result.stdout.isEmpty {
+            self.appendLog(result.stdout)
+        }
+        if !result.stderr.isEmpty {
+            self.appendLog(result.stderr)
+        }
+    }
+
+    private func runClawdexCommand(clawdexURL: URL, args: [String]) throws -> (stdout: String, stderr: String) {
+        let process = Process()
+        process.executableURL = clawdexURL
+        process.arguments = args
+
+        var env = ProcessInfo.processInfo.environment
+        env["CLAWDEX_APP"] = "1"
+        process.environment = env
+
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        let stdout = String(data: outData, encoding: .utf8) ?? ""
+        let stderr = String(data: errData, encoding: .utf8) ?? ""
+
+        if process.terminationStatus != 0 {
+            let detail = stderr.isEmpty ? stdout : stderr
+            throw NSError(
+                domain: "Clawdex",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: detail.isEmpty ? "clawdex command failed" : detail]
+            )
+        }
+        return (stdout.trimmingCharacters(in: .whitespacesAndNewlines),
+                stderr.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     private func toolInstallPaths() throws -> (codex: URL, clawdex: URL, clawdexd: URL) {

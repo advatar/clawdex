@@ -221,6 +221,19 @@ BIN_DIR="${APP_RES_DIR}/bin"
 /bin/mkdir -p "${BIN_DIR}"
 /usr/bin/rsync -a --delete "${BIN_STAGE_DIR}/" "${BIN_DIR}/"
 
+# Embed OpenClaw extensions for first-run plugin install.
+OPENCLAW_EXTENSIONS_SRC="${OPENCLAW_EXTENSIONS_SRC:-${REPO_ROOT}/openclaw/extensions}"
+OPENCLAW_EXTENSIONS_DEST="${APP_RES_DIR}/openclaw-extensions"
+if [[ -d "${OPENCLAW_EXTENSIONS_SRC}" ]]; then
+  /bin/rm -rf "${OPENCLAW_EXTENSIONS_DEST}"
+  /bin/mkdir -p "${OPENCLAW_EXTENSIONS_DEST}"
+  /usr/bin/rsync -a --delete --exclude "node_modules" --exclude ".DS_Store" \
+    "${OPENCLAW_EXTENSIONS_SRC}/" "${OPENCLAW_EXTENSIONS_DEST}/"
+  log "Embedded OpenClaw extensions into ${OPENCLAW_EXTENSIONS_DEST}"
+else
+  log "OpenClaw extensions not found at ${OPENCLAW_EXTENSIONS_SRC}; skipping embed."
+fi
+
 # Codesign the embedded executables so they can be executed from a sandboxed app.
 # NOTE: For Debug builds you may not have an expanded signing identity; skip in that case.
 if [[ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]]; then
