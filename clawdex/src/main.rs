@@ -81,7 +81,7 @@ enum Commands {
         #[command(subcommand)]
         command: TasksCommand,
     },
-    /// Plugin manager (Cowork-style plugins)
+    /// Plugin manager (Cowork/OpenClaw-compatible plugins)
     Plugins {
         #[command(subcommand)]
         command: PluginsCommand,
@@ -181,14 +181,27 @@ enum PluginsCommand {
     },
     /// Install a plugin from a local path or npm spec
     Add {
-        #[arg(long)]
+        #[arg(long, required_unless_present = "npm")]
         path: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, required_unless_present = "path", conflicts_with = "path")]
         npm: Option<String>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "npm")]
         link: bool,
         #[arg(long)]
         source: Option<String>,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Update installed plugins (npm installs only)
+    Update {
+        #[arg(long = "id")]
+        id: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long = "dry-run")]
+        dry_run: bool,
         #[arg(long = "state-dir")]
         state_dir: Option<PathBuf>,
         #[arg(long)]
@@ -442,6 +455,18 @@ fn main() -> Result<()> {
             } => {
                 let value =
                     plugins::add_plugin_command(path, npm, link, source, state_dir, workspace)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
+            PluginsCommand::Update {
+                id,
+                all,
+                dry_run,
+                state_dir,
+                workspace,
+            } => {
+                let value =
+                    plugins::update_plugin_command(id, all, dry_run, state_dir, workspace)?;
                 println!("{}", serde_json::to_string_pretty(&value)?);
                 Ok(())
             }
