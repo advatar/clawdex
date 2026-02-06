@@ -57,6 +57,10 @@ Roadmap:
 Parity Execution (from ROADMAP.md):
 - [ ] Phase 0: Enforce MCP response strictness + add response-schema regression tests + update `compat/parity-delta.md`.
 - [ ] Phase 1: Plugin parity (packaging layer, lifecycle parity, metadata/deps validation, permissions mapping, skill/MCP sync hooks).
+- [ ] Phase 1a: Add OpenClaw plugin manifest support (`openclaw.plugin.json`) + package metadata ingestion.
+- [ ] Phase 1b: Add plugin install/update semantics (npm spec/archive/path) with dependency install + recorded install source.
+- [ ] Phase 1c: Align enable/disable/remove flows with OpenClaw semantics + wire skill/MCP sync hooks.
+- [ ] Phase 1d: Map plugin permission hints into MCP allow/deny + workspace policy overrides (if present).
 - [ ] Phase 2: Gateway core parity (auth flows, presence/last-seen, message lifecycle/receipts, channel stack order, attachments).
 - [ ] Phase 3: Server methods + lifecycle parity (registry, versioned handlers, plugin method discovery/reload, compat tests).
 - [ ] Phase 4: Advanced memory pipeline parity (watchers, batch embeddings queue/retry, cache/eviction, local backend).
