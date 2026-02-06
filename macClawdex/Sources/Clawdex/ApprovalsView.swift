@@ -104,7 +104,10 @@ struct ApprovalsView: View {
         }
         .padding()
         .onAppear {
-            viewModel.startPolling()
+            handleDaemonStateChange(running: runtime.daemonRunning)
+        }
+        .onChange(of: runtime.daemonRunning) { _, running in
+            handleDaemonStateChange(running: running)
         }
         .onDisappear {
             viewModel.stopPolling()
@@ -450,5 +453,15 @@ struct ApprovalsView: View {
     private func formatMs(_ ms: Int64) -> String {
         let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000.0)
         return date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private func handleDaemonStateChange(running: Bool) {
+        if running {
+            viewModel.statusMessage = ""
+            viewModel.startPolling()
+        } else {
+            viewModel.stopPolling()
+            viewModel.statusMessage = "Daemon not running."
+        }
     }
 }

@@ -91,9 +91,10 @@ struct TasksView: View {
             detail
         }
         .onAppear {
-            Task {
-                await viewModel.refreshTasks()
-            }
+            handleDaemonStateChange(running: runtime.daemonRunning)
+        }
+        .onChange(of: runtime.daemonRunning) { _, running in
+            handleDaemonStateChange(running: running)
         }
         .onDisappear {
             viewModel.stopPolling()
@@ -207,5 +208,17 @@ struct TasksView: View {
     private func formatMs(_ ms: Int64) -> String {
         let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000.0)
         return date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private func handleDaemonStateChange(running: Bool) {
+        if running {
+            viewModel.statusMessage = ""
+            Task {
+                await viewModel.refreshTasks()
+            }
+        } else {
+            viewModel.stopPolling()
+            viewModel.statusMessage = "Daemon not running."
+        }
     }
 }

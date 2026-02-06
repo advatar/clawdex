@@ -71,14 +71,6 @@ final class RuntimeManager: ObservableObject {
         // Workspace access (optional but recommended)
         workspaceURL = WorkspaceAccess.resolveWorkspaceURL()
 
-        // Load API key from Keychain
-        let openAIKey = (try? Keychain.loadOpenAIKey()) ?? ""
-        appState.hasOpenAIKey = !openAIKey.isEmpty
-        if openAIKey.isEmpty {
-            errorPublisher.send("No OpenAI API key found. Set it in Settings.")
-            return
-        }
-
         do {
             let toolPaths = try toolInstallPaths()
             let clawdexURL = toolPaths.clawdex
@@ -92,6 +84,14 @@ final class RuntimeManager: ObservableObject {
                 codexURL: codexURL,
                 stateDir: stateDir
             )
+
+            // Load API key from Keychain
+            let openAIKey = (try? Keychain.loadOpenAIKey()) ?? ""
+            appState.hasOpenAIKey = !openAIKey.isEmpty
+            if openAIKey.isEmpty {
+                errorPublisher.send("No OpenAI API key found. Set it in Settings.")
+                return
+            }
 
             let p = Process()
             p.executableURL = clawdexURL

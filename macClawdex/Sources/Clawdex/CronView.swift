@@ -68,9 +68,10 @@ struct CronView: View {
             editor
         }
         .onAppear {
-            Task {
-                await viewModel.refresh()
-            }
+            handleDaemonStateChange(running: runtime.daemonRunning)
+        }
+        .onChange(of: runtime.daemonRunning) { _, running in
+            handleDaemonStateChange(running: running)
         }
     }
 
@@ -223,6 +224,17 @@ struct CronView: View {
             _ = await viewModel.updateJob(id: jobId, patch: body)
         } else {
             _ = await viewModel.createJob(payload: body)
+        }
+    }
+
+    private func handleDaemonStateChange(running: Bool) {
+        if running {
+            viewModel.statusMessage = ""
+            Task {
+                await viewModel.refresh()
+            }
+        } else {
+            viewModel.statusMessage = "Daemon not running."
         }
     }
 

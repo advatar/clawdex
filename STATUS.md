@@ -43,6 +43,7 @@ Upstream Sync (Submodules):
 - [x] Add approvals + user-input UI (macOS) backed by daemon IPC
 - [x] Implement cron runner loop + per-job policy execution
 - [x] Preinstall bundled OpenClaw plugins on first app launch
+- [x] Guard daemon UI polling until daemon startup completes
 - [x] Stop Xcode signing team resets by moving Development Team config to a local override
 - [x] Build and stage prebuilt `clawdexd` universal binary
 - [x] Add helper script to build/stage `clawdexd` prebuilt binary and document it in README
@@ -59,6 +60,7 @@ Upstream Sync (Submodules):
 - [x] Convert plugin commands into namespaced skills with shared renderer semantics
 - [x] Add Claude plugin manifest path resolution for skills/commands (additive + ./ rules)
 - [x] Import Claude plugin marketplace artifacts bundle (CR/DiffPlan/schema/SQL)
+- [x] Auto-install bundled Claude plugins by default for all users
 
 Roadmap:
 - [x] Add revised OpenClaw parity roadmap (mac app parity priority, web/admin nice-to-have) in `ROADMAP.md`.
