@@ -22,6 +22,149 @@ const IDEMPOTENCY_FILE: &str = "idempotency.json";
 const INBOX_OFFSET_FILE: &str = "inbox_offset.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatewayAuthMode {
+    None,
+    Token,
+    Password,
+}
+
+#[derive(Debug, Clone)]
+struct GatewayAuth {
+    mode: GatewayAuthMode,
+    token: Option<String>,
+    password: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GatewayAuthAttempt {
+    token: Option<String>,
+    password: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GatewayAuthFailure {
+    message: String,
+}
+
+impl GatewayAuth {
+    fn none() -> Self {
+        Self {
+            mode: GatewayAuthMode::None,
+            token: None,
+            password: None,
+        }
+    }
+
+    fn required(&self) -> bool {
+        self.mode != GatewayAuthMode::None
+    }
+
+    #[cfg(test)]
+    fn token(value: &str) -> Self {
+        Self {
+            mode: GatewayAuthMode::Token,
+            token: Some(value.to_string()),
+            password: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn password(value: &str) -> Self {
+        Self {
+            mode: GatewayAuthMode::Password,
+            token: None,
+            password: Some(value.to_string()),
+        }
+    }
+}
+
+fn trimmed_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn resolve_gateway_auth(cfg: &GatewayConfig) -> GatewayAuth {
+    let token = trimmed_env("CLAWDEX_GATEWAY_TOKEN")
+        .or_else(|| trimmed_env("OPENCLAW_GATEWAY_TOKEN"))
+        .or_else(|| trimmed_env("CLAWDBOT_GATEWAY_TOKEN"))
+        .or_else(|| {
+            cfg.token
+                .as_ref()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
+    let password = trimmed_env("CLAWDEX_GATEWAY_PASSWORD")
+        .or_else(|| trimmed_env("OPENCLAW_GATEWAY_PASSWORD"))
+        .or_else(|| trimmed_env("CLAWDBOT_GATEWAY_PASSWORD"))
+        .or_else(|| {
+            cfg.password
+                .as_ref()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
+    let mode = if password.is_some() {
+        GatewayAuthMode::Password
+    } else if token.is_some() {
+        GatewayAuthMode::Token
+    } else {
+        GatewayAuthMode::None
+    };
+    GatewayAuth {
+        mode,
+        token,
+        password,
+    }
+}
+
+fn authorize_gateway_auth(auth: &GatewayAuth, attempt: &GatewayAuthAttempt) -> Result<(), GatewayAuthFailure> {
+    match auth.mode {
+        GatewayAuthMode::None => Ok(()),
+        GatewayAuthMode::Token => {
+            let provided = attempt
+                .token
+                .as_deref()
+                .or_else(|| attempt.password.as_deref())
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty());
+            let expected = auth.token.as_deref().unwrap_or("");
+            if provided.is_none() {
+                return Err(GatewayAuthFailure {
+                    message: "missing gateway token".to_string(),
+                });
+            }
+            if provided != Some(expected) {
+                return Err(GatewayAuthFailure {
+                    message: "invalid gateway token".to_string(),
+                });
+            }
+            Ok(())
+        }
+        GatewayAuthMode::Password => {
+            let provided = attempt
+                .password
+                .as_deref()
+                .or_else(|| attempt.token.as_deref())
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty());
+            let expected = auth.password.as_deref().unwrap_or("");
+            if provided.is_none() {
+                return Err(GatewayAuthFailure {
+                    message: "missing gateway password".to_string(),
+                });
+            }
+            if provided != Some(expected) {
+                return Err(GatewayAuthFailure {
+                    message: "invalid gateway password".to_string(),
+                });
+            }
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SendMode {
     Direct,
     Queue,
@@ -175,6 +318,62 @@ fn gateway_configured(cfg: &GatewayConfig) -> bool {
             .as_ref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false)
+}
+
+fn extract_bearer_token(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("bearer ") {
+        return None;
+    }
+    Some(trimmed[7..].trim().to_string()).filter(|token| !token.is_empty())
+}
+
+fn extract_http_auth(request: &tiny_http::Request) -> GatewayAuthAttempt {
+    let mut attempt = GatewayAuthAttempt::default();
+    for header in request.headers() {
+        let name = header.field.as_str().to_ascii_lowercase();
+        let value = header.value.as_str();
+        if name == "authorization" {
+            if let Some(token) = extract_bearer_token(value) {
+                attempt.token = Some(token);
+                attempt.password = attempt.token.clone();
+            }
+        } else if name == "x-openclaw-token"
+            || name == "x-clawdex-token"
+            || name == "x-clawdbot-token"
+        {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                attempt.token = Some(trimmed.to_string());
+                attempt.password = attempt.token.clone();
+            }
+        }
+    }
+    attempt
+}
+
+fn extract_ws_auth(params: &Value) -> GatewayAuthAttempt {
+    let mut attempt = GatewayAuthAttempt::default();
+    let auth = params.get("auth").and_then(|v| v.as_object());
+    if let Some(auth) = auth {
+        if let Some(token) = auth.get("token").and_then(|v| v.as_str()) {
+            let trimmed = token.trim();
+            if !trimmed.is_empty() {
+                attempt.token = Some(trimmed.to_string());
+            }
+        }
+        if let Some(password) = auth.get("password").and_then(|v| v.as_str()) {
+            let trimmed = password.trim();
+            if !trimmed.is_empty() {
+                attempt.password = Some(trimmed.to_string());
+            }
+        }
+    }
+    attempt
 }
 
 fn resolve_send_url(base: &str) -> String {
@@ -679,6 +878,14 @@ pub fn run_gateway_ws(bind: &str, paths: &ClawdPaths) -> Result<()> {
                     return;
                 }
             };
+            let auth = match load_gateway_config(&paths) {
+                Ok(cfg) => resolve_gateway_auth(&cfg),
+                Err(err) => {
+                    eprintln!("[clawdex][gateway-ws] load config failed: {err}");
+                    GatewayAuth::none()
+                }
+            };
+            let mut authorized = !auth.required();
             let conn_id = Uuid::new_v4().to_string();
             loop {
                 let msg = match websocket.read() {
@@ -697,7 +904,7 @@ pub fn run_gateway_ws(bind: &str, paths: &ClawdPaths) -> Result<()> {
                     Ok(frame) => frame,
                     Err(_) => continue,
                 };
-                let response = handle_ws_frame(&frame, &paths, &conn_id);
+                let response = handle_ws_frame(&frame, &paths, &conn_id, &auth, &mut authorized);
                 if let Some(response) = response {
                     let _ = websocket.send(Message::Text(response.to_string()));
                 }
@@ -707,7 +914,13 @@ pub fn run_gateway_ws(bind: &str, paths: &ClawdPaths) -> Result<()> {
     Ok(())
 }
 
-fn handle_ws_frame(frame: &Value, paths: &ClawdPaths, conn_id: &str) -> Option<Value> {
+fn handle_ws_frame(
+    frame: &Value,
+    paths: &ClawdPaths,
+    conn_id: &str,
+    auth: &GatewayAuth,
+    authorized: &mut bool,
+) -> Option<Value> {
     if frame.get("type").and_then(|v| v.as_str()) != Some("req") {
         return None;
     }
@@ -715,8 +928,25 @@ fn handle_ws_frame(frame: &Value, paths: &ClawdPaths, conn_id: &str) -> Option<V
     let method = frame.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let params = frame.get("params").cloned().unwrap_or_else(|| json!({}));
 
+    if auth.required() && !*authorized && method != "connect" && method != "hello" {
+        return Some(ws_response_err(
+            &id,
+            "unauthorized",
+            "gateway auth required",
+        ));
+    }
+
     match method {
-        "connect" | "hello" => Some(ws_response_ok(&id, hello_ok_payload(conn_id))),
+        "connect" | "hello" => {
+            if auth.required() {
+                let attempt = extract_ws_auth(&params);
+                if let Err(err) = authorize_gateway_auth(auth, &attempt) {
+                    return Some(ws_response_err(&id, "unauthorized", &err.message));
+                }
+                *authorized = true;
+            }
+            Some(ws_response_ok(&id, hello_ok_payload(conn_id)))
+        }
         "send" => {
             let result = send_message_with_mode(paths, &params, SendMode::Queue);
             match result {
@@ -788,6 +1018,17 @@ fn handle_request(
 ) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
     let method = request.method().clone();
     let url = request.url().to_string();
+    let requires_auth = !matches!((&method, url.as_str()), (&Method::Get, "/v1/health"));
+    if requires_auth {
+        let cfg = load_gateway_config(paths)?;
+        let auth = resolve_gateway_auth(&cfg);
+        if auth.required() {
+            let attempt = extract_http_auth(request);
+            if let Err(err) = authorize_gateway_auth(&auth, &attempt) {
+                return Ok(unauthorized_response(&err.message));
+            }
+        }
+    }
     match (&method, url.as_str()) {
         (&Method::Get, "/v1/health") => Ok(json_response(json!({ "ok": true }))?),
         (&Method::Post, "/v1/send") => {
@@ -829,5 +1070,59 @@ fn json_error_response(message: &str, status: StatusCode) -> Response<std::io::C
     match json_response(json!({ "ok": false, "error": message })) {
         Ok(resp) => resp.with_status_code(status),
         Err(_) => Response::from_string("error").with_status_code(status),
+    }
+}
+
+fn unauthorized_response(message: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    json_error_response(message, StatusCode(401))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_auth_none_allows() {
+        let auth = GatewayAuth::none();
+        let attempt = GatewayAuthAttempt::default();
+        assert!(authorize_gateway_auth(&auth, &attempt).is_ok());
+    }
+
+    #[test]
+    fn gateway_auth_token_requires_match() {
+        let auth = GatewayAuth::token("secret");
+        let missing = GatewayAuthAttempt::default();
+        assert!(authorize_gateway_auth(&auth, &missing).is_err());
+
+        let wrong = GatewayAuthAttempt {
+            token: Some("wrong".to_string()),
+            password: None,
+        };
+        assert!(authorize_gateway_auth(&auth, &wrong).is_err());
+
+        let ok = GatewayAuthAttempt {
+            token: Some("secret".to_string()),
+            password: None,
+        };
+        assert!(authorize_gateway_auth(&auth, &ok).is_ok());
+    }
+
+    #[test]
+    fn gateway_auth_password_requires_match() {
+        let auth = GatewayAuth::password("secret");
+        let missing = GatewayAuthAttempt::default();
+        assert!(authorize_gateway_auth(&auth, &missing).is_err());
+
+        let wrong = GatewayAuthAttempt {
+            token: Some("wrong".to_string()),
+            password: None,
+        };
+        assert!(authorize_gateway_auth(&auth, &wrong).is_err());
+
+        let ok = GatewayAuthAttempt {
+            token: None,
+            password: Some("secret".to_string()),
+        };
+        assert!(authorize_gateway_auth(&auth, &ok).is_ok());
     }
 }
