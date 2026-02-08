@@ -184,7 +184,11 @@ Example `config.json5`:
     approval_policy: "on-request",
     config_overrides: ["model=gpt-5.2-codex"]
   },
-  gateway: { bind: "127.0.0.1:18789", route_ttl_ms: 86400000 }
+  gateway: {
+    bind: "127.0.0.1:18789",
+    route_ttl_ms: 86400000,
+    channelOrder: ["whatsapp", "telegram", "discord"]
+  }
 }
 ```
 

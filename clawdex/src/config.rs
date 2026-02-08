@@ -113,6 +113,8 @@ pub struct GatewayConfig {
     #[serde(alias = "wsBind")]
     pub ws_bind: Option<String>,
     pub route_ttl_ms: Option<u64>,
+    #[serde(alias = "channelOrder")]
+    pub channel_order: Option<Vec<String>>,
     pub url: Option<String>,
     pub token: Option<String>,
     pub password: Option<String>,

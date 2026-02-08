@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -22,6 +23,20 @@ const RECEIPTS_FILE: &str = "receipts.jsonl";
 const ROUTES_FILE: &str = "routes.json";
 const IDEMPOTENCY_FILE: &str = "idempotency.json";
 const INBOX_OFFSET_FILE: &str = "inbox_offset.json";
+const DEFAULT_CHANNEL_ORDER: &[&str] = &[
+    "telegram",
+    "whatsapp",
+    "discord",
+    "googlechat",
+    "slack",
+    "signal",
+    "imessage",
+];
+const CHANNEL_ALIASES: &[(&str, &str)] = &[
+    ("imsg", "imessage"),
+    ("google-chat", "googlechat"),
+    ("gchat", "googlechat"),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GatewayAuthMode {
@@ -502,6 +517,43 @@ fn save_inbox_offset(paths: &ClawdPaths, offset: usize) -> Result<()> {
     write_json_value(&inbox_offset_path(paths), &json!({ "offset": offset }))
 }
 
+fn normalize_channel_id(raw: &str) -> String {
+    let trimmed = raw.trim().to_lowercase();
+    if trimmed.is_empty() {
+        return trimmed;
+    }
+    for (alias, canonical) in CHANNEL_ALIASES {
+        if trimmed == *alias {
+            return (*canonical).to_string();
+        }
+    }
+    trimmed
+}
+
+fn resolve_channel_order(cfg: &GatewayConfig) -> Vec<String> {
+    let mut order = Vec::new();
+    if let Some(entries) = cfg.channel_order.as_ref() {
+        for entry in entries {
+            let normalized = normalize_channel_id(entry);
+            if !normalized.is_empty() && !order.contains(&normalized) {
+                order.push(normalized);
+            }
+        }
+    }
+    if order.is_empty() {
+        order = DEFAULT_CHANNEL_ORDER.iter().map(|entry| (*entry).to_string()).collect();
+    }
+    order
+}
+
+fn channel_order_index(order: &[String], channel: &str) -> usize {
+    let normalized = normalize_channel_id(channel);
+    order
+        .iter()
+        .position(|entry| entry == &normalized)
+        .unwrap_or(usize::MAX - 1)
+}
+
 fn append_receipt(paths: &ClawdPaths, receipt: &Value) -> Result<()> {
     append_json_line(&receipts_path(paths), receipt)
 }
@@ -894,7 +946,7 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
     let mut channel = args
         .get("channel")
         .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_lowercase())
+        .map(normalize_channel_id)
         .filter(|s| !s.is_empty());
     if channel.as_deref() == Some("last") {
         channel = None;
@@ -1193,6 +1245,7 @@ pub fn list_channels(paths: &ClawdPaths) -> Result<Value> {
         return Ok(response);
     }
     let cutoff = route_cutoff_ms(&cfg);
+    let channel_order = resolve_channel_order(&cfg);
 
     let mut entries = store
         .entries()
@@ -1210,9 +1263,21 @@ pub fn list_channels(paths: &ClawdPaths) -> Result<Value> {
         .collect::<Vec<_>>();
 
     entries.sort_by(|a, b| {
+        let a_channel = a.get("channel").and_then(|v| v.as_str()).unwrap_or("");
+        let b_channel = b.get("channel").and_then(|v| v.as_str()).unwrap_or("");
+        let order_a = channel_order_index(&channel_order, a_channel);
+        let order_b = channel_order_index(&channel_order, b_channel);
+        let order_cmp = order_a.cmp(&order_b);
+        if order_cmp != Ordering::Equal {
+            return order_cmp;
+        }
         let a_ts = a.get("updatedAtMs").and_then(|v| v.as_i64()).unwrap_or(0);
         let b_ts = b.get("updatedAtMs").and_then(|v| v.as_i64()).unwrap_or(0);
-        b_ts.cmp(&a_ts)
+        let ts_cmp = b_ts.cmp(&a_ts);
+        if ts_cmp != Ordering::Equal {
+            return ts_cmp;
+        }
+        a_channel.cmp(b_channel)
     });
 
     let mut response = json!({
@@ -1230,7 +1295,7 @@ pub fn resolve_target(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     let mut channel = args
         .get("channel")
         .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
+        .map(normalize_channel_id)
         .filter(|s| !s.is_empty());
     if channel.as_deref() == Some("last") {
         channel = None;
@@ -1260,6 +1325,8 @@ pub fn resolve_target(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     let store = RouteStore::load(paths)?;
     let cfg = load_gateway_config(paths)?;
     let cutoff = route_cutoff_ms(&cfg);
+    let channel_order = resolve_channel_order(&cfg);
+    let use_channel_order = channel.is_none();
 
     let mut routes = store
         .entries()
@@ -1277,7 +1344,23 @@ pub fn resolve_target(paths: &ClawdPaths, args: &Value) -> Result<Value> {
         routes.retain(|(_, route)| route.account_id.as_deref() == Some(account_id.as_str()));
     }
 
-    routes.sort_by(|a, b| b.1.updated_at_ms.cmp(&a.1.updated_at_ms));
+    if use_channel_order {
+        routes.sort_by(|a, b| {
+            let order_a = channel_order_index(&channel_order, &a.1.channel);
+            let order_b = channel_order_index(&channel_order, &b.1.channel);
+            let order_cmp = order_a.cmp(&order_b);
+            if order_cmp != Ordering::Equal {
+                return order_cmp;
+            }
+            let ts_cmp = b.1.updated_at_ms.cmp(&a.1.updated_at_ms);
+            if ts_cmp != Ordering::Equal {
+                return ts_cmp;
+            }
+            a.1.channel.cmp(&b.1.channel)
+        });
+    } else {
+        routes.sort_by(|a, b| b.1.updated_at_ms.cmp(&a.1.updated_at_ms));
+    }
 
     if let Some((session_key, route)) = routes.first() {
         return Ok(json!({
@@ -1300,10 +1383,14 @@ pub fn resolve_target(paths: &ClawdPaths, args: &Value) -> Result<Value> {
 }
 
 pub fn record_incoming(paths: &ClawdPaths, payload: &Value) -> Result<Value> {
-    let channel = payload
+    let channel_raw = payload
         .get("channel")
         .and_then(|v| v.as_str())
         .context("incoming requires channel")?;
+    let channel = normalize_channel_id(channel_raw);
+    if channel.is_empty() {
+        return Err(anyhow::anyhow!("incoming requires channel"));
+    }
     let from = payload
         .get("from")
         .and_then(|v| v.as_str())
@@ -1336,7 +1423,7 @@ pub fn record_incoming(paths: &ClawdPaths, payload: &Value) -> Result<Value> {
         "incoming",
         message_id,
         entry.get("sessionKey").and_then(|v| v.as_str()),
-        Some(channel),
+        Some(channel.as_str()),
         None,
         Some(from),
         payload.get("accountId").and_then(|v| v.as_str()),
@@ -1799,6 +1886,60 @@ mod tests {
         )?;
         assert_eq!(tail.len(), 2);
         assert_eq!(tail[0].get("tsMs").and_then(|v| v.as_i64()), Some(2_000));
+
+        let _ = std::fs::remove_dir_all(base);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_target_prefers_channel_order() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("clawdex-channel-order-{}", Uuid::new_v4()));
+        let state_dir = base.join("state");
+        let workspace_dir = base.join("workspace");
+        std::fs::create_dir_all(&workspace_dir)?;
+        std::fs::create_dir_all(&state_dir)?;
+        let config_path = state_dir.join("config.json");
+        let config_payload = json!({
+            "gateway": { "channelOrder": ["whatsapp", "telegram"] }
+        });
+        std::fs::write(&config_path, serde_json::to_vec_pretty(&config_payload)?)?;
+
+        let (_cfg, paths) = crate::config::load_config(Some(state_dir), Some(workspace_dir))?;
+
+        let mut store = RouteStore::load(&paths)?;
+        store.update_route(
+            "slack:user",
+            RouteEntry {
+                channel: "slack".to_string(),
+                to: "user".to_string(),
+                account_id: None,
+                updated_at_ms: 3_000,
+            },
+        )?;
+        store.update_route(
+            "telegram:user",
+            RouteEntry {
+                channel: "telegram".to_string(),
+                to: "user".to_string(),
+                account_id: None,
+                updated_at_ms: 2_000,
+            },
+        )?;
+        store.update_route(
+            "whatsapp:user",
+            RouteEntry {
+                channel: "whatsapp".to_string(),
+                to: "user".to_string(),
+                account_id: None,
+                updated_at_ms: 1_000,
+            },
+        )?;
+
+        let resolved = resolve_target(&paths, &json!({}))?;
+        assert_eq!(resolved.get("channel").and_then(|v| v.as_str()), Some("whatsapp"));
+
+        let resolved = resolve_target(&paths, &json!({ "channel": "slack" }))?;
+        assert_eq!(resolved.get("channel").and_then(|v| v.as_str()), Some("slack"));
 
         let _ = std::fs::remove_dir_all(base);
         Ok(())
