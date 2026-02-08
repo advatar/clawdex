@@ -45,6 +45,7 @@ Upstream Sync (Submodules):
 - [x] Preinstall bundled OpenClaw plugins on first app launch
 - [x] Enforce gateway auth (token/password) for WS + HTTP endpoints
 - [x] Track gateway WS presence + last-seen in hello snapshot
+- [x] Track gateway message receipts for queued/sent/incoming events
 - [x] Guard daemon UI polling until daemon startup completes
 - [x] Stop Xcode signing team resets by moving Development Team config to a local override
 - [x] Build and stage prebuilt `clawdexd` universal binary

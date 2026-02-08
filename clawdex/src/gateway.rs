@@ -18,6 +18,7 @@ use crate::util::{append_json_line, now_ms, read_json_lines, read_json_value, wr
 const GATEWAY_DIR: &str = "gateway";
 const OUTBOX_FILE: &str = "outbox.jsonl";
 const INBOX_FILE: &str = "inbox.jsonl";
+const RECEIPTS_FILE: &str = "receipts.jsonl";
 const ROUTES_FILE: &str = "routes.json";
 const IDEMPOTENCY_FILE: &str = "idempotency.json";
 const INBOX_OFFSET_FILE: &str = "inbox_offset.json";
@@ -375,6 +376,12 @@ enum SendMode {
     Queue,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct ReceiptQuery {
+    after: Option<i64>,
+    limit: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteEntry {
     pub channel: String,
@@ -474,6 +481,10 @@ fn inbox_path(paths: &ClawdPaths) -> PathBuf {
     gateway_dir(paths).join(INBOX_FILE)
 }
 
+fn receipts_path(paths: &ClawdPaths) -> PathBuf {
+    gateway_dir(paths).join(RECEIPTS_FILE)
+}
+
 fn inbox_offset_path(paths: &ClawdPaths) -> PathBuf {
     gateway_dir(paths).join(INBOX_OFFSET_FILE)
 }
@@ -489,6 +500,88 @@ fn load_inbox_offset(paths: &ClawdPaths) -> Result<usize> {
 
 fn save_inbox_offset(paths: &ClawdPaths, offset: usize) -> Result<()> {
     write_json_value(&inbox_offset_path(paths), &json!({ "offset": offset }))
+}
+
+fn append_receipt(paths: &ClawdPaths, receipt: &Value) -> Result<()> {
+    append_json_line(&receipts_path(paths), receipt)
+}
+
+fn record_receipt(paths: &ClawdPaths, receipt: &Value) {
+    if let Err(err) = append_receipt(paths, receipt) {
+        eprintln!("[clawdex][gateway] failed to record receipt: {err}");
+    }
+}
+
+fn list_receipts(paths: &ClawdPaths, query: ReceiptQuery) -> Result<Vec<Value>> {
+    let mut entries = read_json_lines(&receipts_path(paths), None)?;
+    if let Some(after) = query.after {
+        entries.retain(|entry| entry.get("tsMs").and_then(|v| v.as_i64()).unwrap_or(0) > after);
+    }
+    if let Some(limit) = query.limit {
+        if entries.len() > limit {
+            if query.after.is_some() {
+                entries.truncate(limit);
+            } else {
+                entries = entries.split_off(entries.len() - limit);
+            }
+        }
+    }
+    Ok(entries)
+}
+
+fn parse_receipt_query(query: Option<&str>) -> ReceiptQuery {
+    let mut parsed = ReceiptQuery::default();
+    let Some(query) = query else {
+        return parsed;
+    };
+    for pair in query.split('&') {
+        if pair.trim().is_empty() {
+            continue;
+        }
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next().unwrap_or("").trim();
+        let value = parts.next().unwrap_or("").trim();
+        if value.is_empty() {
+            continue;
+        }
+        match key {
+            "after" => {
+                parsed.after = value.parse::<i64>().ok();
+            }
+            "limit" => {
+                parsed.limit = value.parse::<usize>().ok();
+            }
+            _ => {}
+        }
+    }
+    parsed
+}
+
+fn build_receipt(
+    status: &str,
+    direction: &str,
+    message_id: Option<&str>,
+    session_key: Option<&str>,
+    channel: Option<&str>,
+    to: Option<&str>,
+    from: Option<&str>,
+    account_id: Option<&str>,
+    idempotency_key: Option<&str>,
+    ts_ms: i64,
+) -> Value {
+    json!({
+        "id": Uuid::new_v4().to_string(),
+        "status": status,
+        "direction": direction,
+        "messageId": message_id,
+        "sessionKey": session_key,
+        "channel": channel,
+        "to": to,
+        "from": from,
+        "accountId": account_id,
+        "idempotencyKey": idempotency_key,
+        "tsMs": ts_ms,
+    })
 }
 
 fn load_gateway_config(paths: &ClawdPaths) -> Result<GatewayConfig> {
@@ -935,6 +1028,7 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
     }
 
     let entry_account_id = account_id.clone().or(route.account_id.clone());
+    let created_at_ms = now_ms();
     let entry = json!({
         "id": Uuid::new_v4().to_string(),
         "sessionKey": session_key,
@@ -944,8 +1038,13 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
         "text": text,
         "message": text,
         "idempotencyKey": idempotency_key,
-        "createdAtMs": now_ms(),
+        "createdAtMs": created_at_ms,
     });
+    let message_id = entry
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     if mode == SendMode::Queue {
         append_json_line(&outbox_path(paths), &entry)?;
@@ -958,6 +1057,19 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
             },
         )?;
         idempotency.insert(&idempotency_key, now_ms())?;
+        let receipt = build_receipt(
+            "queued",
+            "outgoing",
+            Some(message_id.as_str()),
+            Some(&session_key),
+            Some(&route.channel),
+            Some(&route.to),
+            None,
+            entry_account_id.as_deref(),
+            Some(&idempotency_key),
+            created_at_ms,
+        );
+        record_receipt(paths, &receipt);
         return Ok(json!({ "ok": true, "queued": true, "message": entry, "result": entry }));
     }
 
@@ -968,8 +1080,23 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
         let response = match response {
             Ok(value) => value,
             Err(err) => {
+                let err_msg = err.to_string();
+                let mut receipt = build_receipt(
+                    "failed",
+                    "outgoing",
+                    Some(message_id.as_str()),
+                    Some(&session_key),
+                    Some(&route.channel),
+                    Some(&route.to),
+                    None,
+                    entry_account_id.as_deref(),
+                    Some(&idempotency_key),
+                    now_ms(),
+                );
+                receipt["error"] = Value::String(err_msg.clone());
+                record_receipt(paths, &receipt);
                 if best_effort {
-                    return Ok(json!({ "ok": false, "bestEffort": true, "error": err.to_string() }));
+                    return Ok(json!({ "ok": false, "bestEffort": true, "error": err_msg }));
                 }
                 return Err(err);
             }
@@ -981,6 +1108,20 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
                 .and_then(|v| v.as_str())
                 .unwrap_or("message send failed")
                 .to_string();
+            let mut receipt = build_receipt(
+                "failed",
+                "outgoing",
+                Some(message_id.as_str()),
+                Some(&session_key),
+                Some(&route.channel),
+                Some(&route.to),
+                None,
+                entry_account_id.as_deref(),
+                Some(&idempotency_key),
+                now_ms(),
+            );
+            receipt["error"] = Value::String(err.clone());
+            record_receipt(paths, &receipt);
             if best_effort {
                 return Ok(json!({ "ok": false, "bestEffort": true, "error": err }));
             }
@@ -995,10 +1136,38 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
             },
         )?;
         idempotency.insert(&idempotency_key, now_ms())?;
-        let result = response.get("result").cloned().unwrap_or(response);
+        let result = response.get("result").cloned().unwrap_or_else(|| response.clone());
+        let mut receipt = build_receipt(
+            "sent",
+            "outgoing",
+            Some(message_id.as_str()),
+            Some(&session_key),
+            Some(&route.channel),
+            Some(&route.to),
+            None,
+            entry_account_id.as_deref(),
+            Some(&idempotency_key),
+            now_ms(),
+        );
+        receipt["result"] = result.clone();
+        record_receipt(paths, &receipt);
         return Ok(json!({ "ok": true, "result": result }));
     }
 
+    let mut receipt = build_receipt(
+        "failed",
+        "outgoing",
+        Some(message_id.as_str()),
+        Some(&session_key),
+        Some(&route.channel),
+        Some(&route.to),
+        None,
+        entry_account_id.as_deref(),
+        Some(&idempotency_key),
+        now_ms(),
+    );
+    receipt["error"] = Value::String("gateway disabled".to_string());
+    record_receipt(paths, &receipt);
     if best_effort {
         return Ok(json!({
             "ok": false,
@@ -1145,6 +1314,7 @@ pub fn record_incoming(paths: &ClawdPaths, payload: &Value) -> Result<Value> {
         .unwrap_or("");
 
     let session_key = format!("{channel}:{from}");
+    let received_at_ms = now_ms();
     let entry = json!({
         "id": Uuid::new_v4().to_string(),
         "sessionKey": session_key,
@@ -1152,10 +1322,28 @@ pub fn record_incoming(paths: &ClawdPaths, payload: &Value) -> Result<Value> {
         "from": from,
         "accountId": payload.get("accountId").and_then(|v| v.as_str()),
         "text": text,
-        "receivedAtMs": now_ms(),
+        "receivedAtMs": received_at_ms,
     });
 
     append_json_line(&inbox_path(paths), &entry)?;
+    let message_id = payload
+        .get("messageId")
+        .or_else(|| payload.get("id"))
+        .and_then(|v| v.as_str())
+        .or_else(|| entry.get("id").and_then(|v| v.as_str()));
+    let receipt = build_receipt(
+        "received",
+        "incoming",
+        message_id,
+        entry.get("sessionKey").and_then(|v| v.as_str()),
+        Some(channel),
+        None,
+        Some(from),
+        payload.get("accountId").and_then(|v| v.as_str()),
+        None,
+        received_at_ms,
+    );
+    record_receipt(paths, &receipt);
 
     let mut route_store = RouteStore::load(paths)?;
     route_store.update_route(
@@ -1382,7 +1570,11 @@ fn handle_request(
 ) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
     let method = request.method().clone();
     let url = request.url().to_string();
-    let requires_auth = !matches!((&method, url.as_str()), (&Method::Get, "/v1/health"));
+    let (path, query) = match url.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (url.as_str(), None),
+    };
+    let requires_auth = !matches!((&method, path), (&Method::Get, "/v1/health"));
     if requires_auth {
         let cfg = load_gateway_config(paths)?;
         let auth = resolve_gateway_auth(&cfg);
@@ -1393,7 +1585,7 @@ fn handle_request(
             }
         }
     }
-    match (&method, url.as_str()) {
+    match (&method, path) {
         (&Method::Get, "/v1/health") => Ok(json_response(json!({ "ok": true }))?),
         (&Method::Post, "/v1/send") => {
             let body = read_body(request)?;
@@ -1406,6 +1598,20 @@ fn handle_request(
             let payload: Value = serde_json::from_slice(&body).context("invalid json")?;
             let result = record_incoming(paths, &payload)?;
             Ok(json_response(result)?)
+        }
+        (&Method::Get, "/v1/receipts") => {
+            let query = parse_receipt_query(query);
+            let receipts = list_receipts(paths, query)?;
+            let count = receipts.len();
+            let next_after = receipts
+                .last()
+                .and_then(|value| value.get("tsMs"))
+                .and_then(|value| value.as_i64());
+            let mut response = json!({ "ok": true, "receipts": receipts, "count": count });
+            if let Some(next_after) = next_after {
+                response["nextAfter"] = Value::Number(next_after.into());
+            }
+            Ok(json_response(response)?)
         }
         _ => Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404))),
     }
@@ -1513,5 +1719,88 @@ mod tests {
         let value = entry.to_value(2_500);
         let last_input = value.get("lastInputSeconds").and_then(|v| v.as_i64());
         assert_eq!(last_input, Some(1));
+    }
+
+    #[test]
+    fn receipts_filter_and_limit() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("clawdex-receipts-{}", Uuid::new_v4()));
+        let state_dir = base.join("state");
+        let workspace_dir = base.join("workspace");
+        std::fs::create_dir_all(&workspace_dir)?;
+        let (_cfg, paths) = crate::config::load_config(Some(state_dir), Some(workspace_dir))?;
+
+        let r1 = build_receipt(
+            "queued",
+            "outgoing",
+            Some("m1"),
+            Some("s1"),
+            Some("channel"),
+            Some("user1"),
+            None,
+            None,
+            Some("k1"),
+            1_000,
+        );
+        let r2 = build_receipt(
+            "sent",
+            "outgoing",
+            Some("m2"),
+            Some("s1"),
+            Some("channel"),
+            Some("user1"),
+            None,
+            None,
+            Some("k2"),
+            2_000,
+        );
+        let r3 = build_receipt(
+            "received",
+            "incoming",
+            Some("m3"),
+            Some("s2"),
+            Some("channel"),
+            None,
+            Some("user2"),
+            None,
+            None,
+            3_000,
+        );
+
+        append_receipt(&paths, &r1)?;
+        append_receipt(&paths, &r2)?;
+        append_receipt(&paths, &r3)?;
+
+        let filtered = list_receipts(
+            &paths,
+            ReceiptQuery {
+                after: Some(1_500),
+                limit: None,
+            },
+        )?;
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].get("tsMs").and_then(|v| v.as_i64()), Some(2_000));
+
+        let limited = list_receipts(
+            &paths,
+            ReceiptQuery {
+                after: Some(1_500),
+                limit: Some(1),
+            },
+        )?;
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].get("tsMs").and_then(|v| v.as_i64()), Some(2_000));
+
+        let tail = list_receipts(
+            &paths,
+            ReceiptQuery {
+                after: None,
+                limit: Some(2),
+            },
+        )?;
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].get("tsMs").and_then(|v| v.as_i64()), Some(2_000));
+
+        let _ = std::fs::remove_dir_all(base);
+        Ok(())
     }
 }
