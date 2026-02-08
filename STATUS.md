@@ -48,7 +48,7 @@ Upstream Sync (Submodules):
 - [x] Track gateway message receipts for queued/sent/incoming events
 - [x] Apply gateway channel order for route resolution + listing
 - [x] Add gateway attachment upload/storage endpoints
-- [ ] Implement gateway auth token issuance/rotation/device flow
+- [x] Implement gateway auth token issuance/rotation/device flow
 - [x] Guard daemon UI polling until daemon startup completes
 - [x] Stop Xcode signing team resets by moving Development Team config to a local override
 - [x] Build and stage prebuilt `clawdexd` universal binary

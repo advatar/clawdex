@@ -82,6 +82,13 @@ The gateway accepts:
 - `GET /v1/attachments/<id>` (attachment metadata)
 - `GET /v1/attachments/<id>/data` (attachment bytes)
 - `GET /v1/receipts` (list message receipts)
+- `POST /v1/auth/tokens` (issue gateway token)
+- `GET /v1/auth/tokens` (list gateway tokens)
+- `POST /v1/auth/tokens/revoke` (revoke token)
+- `POST /v1/auth/rotate` (rotate current token)
+- `POST /v1/auth/device/start` (begin device flow)
+- `POST /v1/auth/device/poll` (poll device flow)
+- `POST /v1/auth/device/approve` (approve device flow)
 
 ---
 
@@ -138,17 +145,19 @@ Default state layout:
 8. `~/.codex/clawdex/gateway/receipts.jsonl`
 9. `~/.codex/clawdex/gateway/attachments.jsonl`
 10. `~/.codex/clawdex/gateway/attachments/`
-11. `~/.codex/clawdex/gateway/routes.json`
-12. `~/.codex/clawdex/gateway/idempotency.json`
-13. `~/.codex/clawdex/tasks.sqlite`
-14. `~/.codex/clawdex/task_events/<runId>.jsonl`
-15. `WORKSPACE/MEMORY.md`
-16. `WORKSPACE/memory/YYYY-MM-DD.md`
-17. `WORKSPACE/HEARTBEAT.md` (optional)
-18. `~/.codex/clawdex/plugins/installs.json`
-19. `~/.codex/clawdex/plugins/<pluginId>/...`
-20. `~/.codex/clawdex/mcp/plugins.json`
-21. `~/.codex/skills/clawdex/plugins/<pluginId>/<skill>/SKILL.md`
+11. `~/.codex/clawdex/gateway/auth_tokens.json`
+12. `~/.codex/clawdex/gateway/device_auth.json`
+13. `~/.codex/clawdex/gateway/routes.json`
+14. `~/.codex/clawdex/gateway/idempotency.json`
+15. `~/.codex/clawdex/tasks.sqlite`
+16. `~/.codex/clawdex/task_events/<runId>.jsonl`
+17. `WORKSPACE/MEMORY.md`
+18. `WORKSPACE/memory/YYYY-MM-DD.md`
+19. `WORKSPACE/HEARTBEAT.md` (optional)
+20. `~/.codex/clawdex/plugins/installs.json`
+21. `~/.codex/clawdex/plugins/<pluginId>/...`
+22. `~/.codex/clawdex/mcp/plugins.json`
+23. `~/.codex/skills/clawdex/plugins/<pluginId>/<skill>/SKILL.md`
 
 Example `config.json5`:
 

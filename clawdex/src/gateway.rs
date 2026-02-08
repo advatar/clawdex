@@ -28,7 +28,10 @@ const ATTACHMENTS_INDEX_FILE: &str = "attachments.jsonl";
 const ROUTES_FILE: &str = "routes.json";
 const IDEMPOTENCY_FILE: &str = "idempotency.json";
 const INBOX_OFFSET_FILE: &str = "inbox_offset.json";
+const AUTH_TOKENS_FILE: &str = "auth_tokens.json";
+const DEVICE_AUTH_FILE: &str = "device_auth.json";
 const DEFAULT_ATTACHMENTS_MAX_BYTES: usize = 5_000_000;
+const DEVICE_CODE_TTL_MS: i64 = 10 * 60 * 1000;
 const DEFAULT_CHANNEL_ORDER: &[&str] = &[
     "telegram",
     "whatsapp",
@@ -141,48 +144,78 @@ fn resolve_gateway_auth(cfg: &GatewayConfig) -> GatewayAuth {
     }
 }
 
-fn authorize_gateway_auth(auth: &GatewayAuth, attempt: &GatewayAuthAttempt) -> Result<(), GatewayAuthFailure> {
+fn authorize_gateway_auth(
+    auth: &GatewayAuth,
+    attempt: &GatewayAuthAttempt,
+    mut token_store: Option<&mut TokenStore>,
+) -> Result<(), GatewayAuthFailure> {
+    let provided_token = attempt
+        .token
+        .as_deref()
+        .or_else(|| attempt.password.as_deref())
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+    let provided_password = attempt
+        .password
+        .as_deref()
+        .or_else(|| attempt.token.as_deref())
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+
+    let check_token_store = |token: &str, store: &mut TokenStore| -> Result<bool, GatewayAuthFailure> {
+        if store.is_valid(token) {
+            let _ = store.mark_used(token);
+            return Ok(true);
+        }
+        Ok(false)
+    };
+
     match auth.mode {
         GatewayAuthMode::None => Ok(()),
         GatewayAuthMode::Token => {
-            let provided = attempt
-                .token
-                .as_deref()
-                .or_else(|| attempt.password.as_deref())
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty());
-            let expected = auth.token.as_deref().unwrap_or("");
-            if provided.is_none() {
+            let Some(provided) = provided_token else {
                 return Err(GatewayAuthFailure {
                     message: "missing gateway token".to_string(),
                 });
+            };
+            if let Some(expected) = auth.token.as_deref() {
+                if provided == expected {
+                    return Ok(());
+                }
             }
-            if provided != Some(expected) {
+            if let Some(store) = token_store.as_deref_mut() {
+                if check_token_store(provided, store)? {
+                    return Ok(());
+                }
+            }
+            if auth.token.is_none() {
                 return Err(GatewayAuthFailure {
-                    message: "invalid gateway token".to_string(),
+                    message: "gateway token not configured".to_string(),
                 });
             }
-            Ok(())
+            Err(GatewayAuthFailure {
+                message: "invalid gateway token".to_string(),
+            })
         }
         GatewayAuthMode::Password => {
-            let provided = attempt
-                .password
-                .as_deref()
-                .or_else(|| attempt.token.as_deref())
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty());
-            let expected = auth.password.as_deref().unwrap_or("");
-            if provided.is_none() {
+            let Some(provided) = provided_password else {
                 return Err(GatewayAuthFailure {
                     message: "missing gateway password".to_string(),
                 });
+            };
+            if let Some(expected) = auth.password.as_deref() {
+                if provided == expected {
+                    return Ok(());
+                }
             }
-            if provided != Some(expected) {
-                return Err(GatewayAuthFailure {
-                    message: "invalid gateway password".to_string(),
-                });
+            if let Some(store) = token_store.as_deref_mut() {
+                if check_token_store(provided, store)? {
+                    return Ok(());
+                }
             }
-            Ok(())
+            Err(GatewayAuthFailure {
+                message: "invalid gateway password".to_string(),
+            })
         }
     }
 }
@@ -496,6 +529,160 @@ impl IdempotencyStore {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TokenEntry {
+    created_at_ms: i64,
+    last_used_at_ms: Option<i64>,
+    revoked_at_ms: Option<i64>,
+    label: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct TokenStore {
+    tokens: HashMap<String, TokenEntry>,
+    path: PathBuf,
+}
+
+impl TokenStore {
+    fn load(paths: &ClawdPaths) -> Result<Self> {
+        let path = gateway_dir(paths).join(AUTH_TOKENS_FILE);
+        let mut store = TokenStore {
+            tokens: HashMap::new(),
+            path,
+        };
+        if let Some(value) = read_json_value(&store.path)? {
+            if let Some(map) = value.get("tokens") {
+                store.tokens = serde_json::from_value(map.clone()).unwrap_or_default();
+            }
+        }
+        Ok(store)
+    }
+
+    fn save(&self) -> Result<()> {
+        let value = json!({ "tokens": self.tokens });
+        write_json_value(&self.path, &value)
+    }
+
+    fn is_valid(&self, token: &str) -> bool {
+        self.tokens
+            .get(token)
+            .map(|entry| entry.revoked_at_ms.is_none())
+            .unwrap_or(false)
+    }
+
+    fn mark_used(&mut self, token: &str) -> Result<()> {
+        if let Some(entry) = self.tokens.get_mut(token) {
+            entry.last_used_at_ms = Some(now_ms());
+            return self.save();
+        }
+        Ok(())
+    }
+
+    fn insert(&mut self, token: String, label: Option<String>) -> Result<TokenEntry> {
+        let entry = TokenEntry {
+            created_at_ms: now_ms(),
+            last_used_at_ms: None,
+            revoked_at_ms: None,
+            label,
+        };
+        self.tokens.insert(token, entry.clone());
+        self.save()?;
+        Ok(entry)
+    }
+
+    fn revoke(&mut self, token: &str) -> Result<Option<TokenEntry>> {
+        if let Some(entry) = self.tokens.get_mut(token) {
+            entry.revoked_at_ms = Some(now_ms());
+            let updated = entry.clone();
+            self.save()?;
+            return Ok(Some(updated));
+        }
+        Ok(None)
+    }
+
+    fn list(&self) -> Vec<Value> {
+        let mut entries = self
+            .tokens
+            .iter()
+            .map(|(token, entry)| {
+                json!({
+                    "token": token,
+                    "createdAtMs": entry.created_at_ms,
+                    "lastUsedAtMs": entry.last_used_at_ms,
+                    "revokedAtMs": entry.revoked_at_ms,
+                    "label": entry.label,
+                })
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|a, b| {
+            let a_ts = a.get("createdAtMs").and_then(|v| v.as_i64()).unwrap_or(0);
+            let b_ts = b.get("createdAtMs").and_then(|v| v.as_i64()).unwrap_or(0);
+            b_ts.cmp(&a_ts)
+        });
+        entries
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeviceAuthRequest {
+    device_code: String,
+    user_code: String,
+    created_at_ms: i64,
+    expires_at_ms: i64,
+    approved_at_ms: Option<i64>,
+    token: Option<String>,
+    label: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct DeviceAuthStore {
+    requests: HashMap<String, DeviceAuthRequest>,
+    path: PathBuf,
+}
+
+impl DeviceAuthStore {
+    fn load(paths: &ClawdPaths) -> Result<Self> {
+        let path = gateway_dir(paths).join(DEVICE_AUTH_FILE);
+        let mut store = DeviceAuthStore {
+            requests: HashMap::new(),
+            path,
+        };
+        if let Some(value) = read_json_value(&store.path)? {
+            if let Some(map) = value.get("requests") {
+                store.requests = serde_json::from_value(map.clone()).unwrap_or_default();
+            }
+        }
+        Ok(store)
+    }
+
+    fn save(&self) -> Result<()> {
+        let value = json!({ "requests": self.requests });
+        write_json_value(&self.path, &value)
+    }
+
+    fn insert_request(&mut self, request: DeviceAuthRequest) -> Result<()> {
+        self.requests.insert(request.device_code.clone(), request);
+        self.save()
+    }
+
+    fn find_by_user_code(&self, user_code: &str) -> Option<DeviceAuthRequest> {
+        self.requests
+            .values()
+            .find(|entry| entry.user_code.eq_ignore_ascii_case(user_code))
+            .cloned()
+    }
+
+    fn update(&mut self, request: DeviceAuthRequest) -> Result<()> {
+        self.requests.insert(request.device_code.clone(), request);
+        self.save()
+    }
+
+    fn remove(&mut self, device_code: &str) -> Result<()> {
+        self.requests.remove(device_code);
+        self.save()
+    }
+}
+
 fn gateway_dir(paths: &ClawdPaths) -> PathBuf {
     paths.state_dir.join(GATEWAY_DIR)
 }
@@ -579,6 +766,19 @@ fn resolve_attachment_max_bytes(cfg: &GatewayConfig) -> usize {
         .and_then(|value| usize::try_from(value).ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_ATTACHMENTS_MAX_BYTES)
+}
+
+fn generate_gateway_token() -> String {
+    format!("gw_{}", Uuid::new_v4())
+}
+
+fn generate_device_code() -> String {
+    Uuid::new_v4().to_string()
+}
+
+fn generate_user_code() -> String {
+    let raw = Uuid::new_v4().to_string().replace('-', "");
+    raw.chars().take(8).collect::<String>().to_uppercase()
 }
 
 fn parse_attachment_query(query: Option<&str>) -> AttachmentQuery {
@@ -758,6 +958,149 @@ fn process_attachments(
         out.push(entry.clone());
     }
     Ok(Some(out))
+}
+
+fn start_device_auth(paths: &ClawdPaths) -> Result<Value> {
+    let mut store = DeviceAuthStore::load(paths)?;
+    let now = now_ms();
+    let request = DeviceAuthRequest {
+        device_code: generate_device_code(),
+        user_code: generate_user_code(),
+        created_at_ms: now,
+        expires_at_ms: now + DEVICE_CODE_TTL_MS,
+        approved_at_ms: None,
+        token: None,
+        label: None,
+    };
+    store.insert_request(request.clone())?;
+    Ok(json!({
+        "ok": true,
+        "deviceCode": request.device_code,
+        "userCode": request.user_code,
+        "expiresAtMs": request.expires_at_ms,
+        "intervalMs": 2000
+    }))
+}
+
+fn poll_device_auth(paths: &ClawdPaths, payload: &Value) -> Result<Value> {
+    let device_code = payload
+        .get("deviceCode")
+        .or_else(|| payload.get("device_code"))
+        .and_then(|v| v.as_str())
+        .context("deviceCode required")?;
+    let mut store = DeviceAuthStore::load(paths)?;
+    let Some(request) = store.requests.get(device_code).cloned() else {
+        return Ok(json!({ "ok": false, "error": "device code not found" }));
+    };
+    let now = now_ms();
+    if now > request.expires_at_ms {
+        let _ = store.remove(&request.device_code);
+        return Ok(json!({ "ok": false, "error": "device code expired" }));
+    }
+    if let Some(token) = request.token.as_ref() {
+        return Ok(json!({
+            "ok": true,
+            "status": "approved",
+            "token": token,
+            "approvedAtMs": request.approved_at_ms,
+            "expiresAtMs": request.expires_at_ms,
+        }));
+    }
+    Ok(json!({
+        "ok": true,
+        "status": "pending",
+        "expiresAtMs": request.expires_at_ms,
+    }))
+}
+
+fn approve_device_auth(
+    paths: &ClawdPaths,
+    token_store: &mut TokenStore,
+    payload: &Value,
+) -> Result<Value> {
+    let device_code = payload.get("deviceCode").and_then(|v| v.as_str());
+    let user_code = payload.get("userCode").and_then(|v| v.as_str());
+    let label = payload
+        .get("label")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let mut store = DeviceAuthStore::load(paths)?;
+    let mut request = if let Some(code) = device_code {
+        store.requests.get(code).cloned()
+    } else if let Some(code) = user_code {
+        store.find_by_user_code(code)
+    } else {
+        None
+    }
+    .context("deviceCode or userCode required")?;
+
+    let now = now_ms();
+    if now > request.expires_at_ms {
+        let _ = store.remove(&request.device_code);
+        return Ok(json!({ "ok": false, "error": "device code expired" }));
+    }
+
+    let token = generate_gateway_token();
+    let token_label = label
+        .clone()
+        .or_else(|| Some(format!("device:{}", request.user_code)));
+    token_store.insert(token.clone(), token_label)?;
+
+    request.approved_at_ms = Some(now);
+    request.token = Some(token.clone());
+    request.label = label.clone();
+    store.update(request.clone())?;
+
+    Ok(json!({
+        "ok": true,
+        "deviceCode": request.device_code,
+        "userCode": request.user_code,
+        "token": token,
+        "approvedAtMs": request.approved_at_ms,
+        "expiresAtMs": request.expires_at_ms,
+    }))
+}
+
+fn create_auth_token(token_store: &mut TokenStore, payload: &Value) -> Result<Value> {
+    let label = payload
+        .get("label")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let token = generate_gateway_token();
+    let entry = token_store.insert(token.clone(), label)?;
+    Ok(json!({
+        "token": token,
+        "createdAtMs": entry.created_at_ms,
+        "label": entry.label,
+    }))
+}
+
+fn rotate_auth_token(
+    token_store: &mut TokenStore,
+    current_token: Option<&str>,
+    payload: &Value,
+) -> Result<Value> {
+    let label = payload
+        .get("label")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let token = generate_gateway_token();
+    let entry = token_store.insert(token.clone(), label)?;
+    let mut revoked = false;
+    if let Some(current) = current_token {
+        if token_store.revoke(current)?.is_some() {
+            revoked = true;
+        }
+    }
+    Ok(json!({
+        "token": token,
+        "createdAtMs": entry.created_at_ms,
+        "revoked": revoked,
+    }))
 }
 
 fn append_receipt(paths: &ClawdPaths, receipt: &Value) -> Result<()> {
@@ -1794,7 +2137,8 @@ fn handle_ws_frame(
         "connect" | "hello" => {
             if auth.required() {
                 let attempt = extract_ws_auth(&params);
-                if let Err(err) = authorize_gateway_auth(auth, &attempt) {
+                let mut token_store = TokenStore::load(paths).unwrap_or_default();
+                if let Err(err) = authorize_gateway_auth(auth, &attempt, Some(&mut token_store)) {
                     return Some(ws_response_err(&id, "unauthorized", &err.message));
                 }
                 *authorized = true;
@@ -1876,13 +2220,19 @@ fn handle_request(
         Some((path, query)) => (path, Some(query)),
         None => (url.as_str(), None),
     };
-    let requires_auth = !matches!((&method, path), (&Method::Get, "/v1/health"));
+    let requires_auth = !matches!(
+        (&method, path),
+        (&Method::Get, "/v1/health")
+            | (&Method::Post, "/v1/auth/device/start")
+            | (&Method::Post, "/v1/auth/device/poll")
+    );
     if requires_auth {
         let cfg = load_gateway_config(paths)?;
         let auth = resolve_gateway_auth(&cfg);
         if auth.required() {
             let attempt = extract_http_auth(request);
-            if let Err(err) = authorize_gateway_auth(&auth, &attempt) {
+            let mut token_store = TokenStore::load(paths).unwrap_or_default();
+            if let Err(err) = authorize_gateway_auth(&auth, &attempt, Some(&mut token_store)) {
                 return Ok(unauthorized_response(&err.message));
             }
         }
@@ -1965,6 +2315,51 @@ fn handle_request(
             }
             Ok(json_response(response)?)
         }
+        (&Method::Post, "/v1/auth/device/start") => Ok(json_response(start_device_auth(paths)?)?),
+        (&Method::Post, "/v1/auth/device/poll") => {
+            let body = read_body(request)?;
+            let payload: Value = serde_json::from_slice(&body).context("invalid json")?;
+            let result = poll_device_auth(paths, &payload)?;
+            Ok(json_response(result)?)
+        }
+        (&Method::Post, "/v1/auth/device/approve") => {
+            let body = read_body(request)?;
+            let payload: Value = serde_json::from_slice(&body).context("invalid json")?;
+            let mut token_store = TokenStore::load(paths)?;
+            let result = approve_device_auth(paths, &mut token_store, &payload)?;
+            Ok(json_response(result)?)
+        }
+        (&Method::Get, "/v1/auth/tokens") => {
+            let token_store = TokenStore::load(paths)?;
+            let tokens = token_store.list();
+            Ok(json_response(json!({ "ok": true, "tokens": tokens, "count": token_store.tokens.len() }))?)
+        }
+        (&Method::Post, "/v1/auth/tokens") => {
+            let body = read_body(request)?;
+            let payload: Value = serde_json::from_slice(&body).context("invalid json")?;
+            let mut token_store = TokenStore::load(paths)?;
+            let result = create_auth_token(&mut token_store, &payload)?;
+            Ok(json_response(json!({ "ok": true, "token": result }))?)
+        }
+        (&Method::Post, "/v1/auth/tokens/revoke") => {
+            let body = read_body(request)?;
+            let payload: Value = serde_json::from_slice(&body).context("invalid json")?;
+            let token = payload
+                .get("token")
+                .and_then(|v| v.as_str())
+                .context("token required")?;
+            let mut token_store = TokenStore::load(paths)?;
+            let revoked = token_store.revoke(token)?;
+            Ok(json_response(json!({ "ok": revoked.is_some(), "revoked": revoked }))?)
+        }
+        (&Method::Post, "/v1/auth/rotate") => {
+            let body = read_body(request)?;
+            let payload: Value = serde_json::from_slice(&body).context("invalid json")?;
+            let current = extract_http_auth(request).token;
+            let mut token_store = TokenStore::load(paths)?;
+            let result = rotate_auth_token(&mut token_store, current.as_deref(), &payload)?;
+            Ok(json_response(json!({ "ok": true, "token": result }))?)
+        }
         (&Method::Get, "/v1/receipts") => {
             let query = parse_receipt_query(query);
             let receipts = list_receipts(paths, query)?;
@@ -2030,45 +2425,67 @@ mod tests {
     fn gateway_auth_none_allows() {
         let auth = GatewayAuth::none();
         let attempt = GatewayAuthAttempt::default();
-        assert!(authorize_gateway_auth(&auth, &attempt).is_ok());
+        assert!(authorize_gateway_auth(&auth, &attempt, None).is_ok());
     }
 
     #[test]
     fn gateway_auth_token_requires_match() {
         let auth = GatewayAuth::token("secret");
         let missing = GatewayAuthAttempt::default();
-        assert!(authorize_gateway_auth(&auth, &missing).is_err());
+        assert!(authorize_gateway_auth(&auth, &missing, None).is_err());
 
         let wrong = GatewayAuthAttempt {
             token: Some("wrong".to_string()),
             password: None,
         };
-        assert!(authorize_gateway_auth(&auth, &wrong).is_err());
+        assert!(authorize_gateway_auth(&auth, &wrong, None).is_err());
 
         let ok = GatewayAuthAttempt {
             token: Some("secret".to_string()),
             password: None,
         };
-        assert!(authorize_gateway_auth(&auth, &ok).is_ok());
+        assert!(authorize_gateway_auth(&auth, &ok, None).is_ok());
     }
 
     #[test]
     fn gateway_auth_password_requires_match() {
         let auth = GatewayAuth::password("secret");
         let missing = GatewayAuthAttempt::default();
-        assert!(authorize_gateway_auth(&auth, &missing).is_err());
+        assert!(authorize_gateway_auth(&auth, &missing, None).is_err());
 
         let wrong = GatewayAuthAttempt {
             token: Some("wrong".to_string()),
             password: None,
         };
-        assert!(authorize_gateway_auth(&auth, &wrong).is_err());
+        assert!(authorize_gateway_auth(&auth, &wrong, None).is_err());
 
         let ok = GatewayAuthAttempt {
             token: None,
             password: Some("secret".to_string()),
         };
-        assert!(authorize_gateway_auth(&auth, &ok).is_ok());
+        assert!(authorize_gateway_auth(&auth, &ok, None).is_ok());
+    }
+
+    #[test]
+    fn gateway_auth_allows_stored_token() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("clawdex-auth-store-{}", Uuid::new_v4()));
+        let state_dir = base.join("state");
+        let workspace_dir = base.join("workspace");
+        std::fs::create_dir_all(&workspace_dir)?;
+        let (_cfg, paths) = crate::config::load_config(Some(state_dir), Some(workspace_dir))?;
+
+        let mut store = TokenStore::load(&paths)?;
+        store.insert("stored-token".to_string(), Some("test".to_string()))?;
+
+        let auth = GatewayAuth::token("secret");
+        let attempt = GatewayAuthAttempt {
+            token: Some("stored-token".to_string()),
+            password: None,
+        };
+        assert!(authorize_gateway_auth(&auth, &attempt, Some(&mut store)).is_ok());
+
+        let _ = std::fs::remove_dir_all(base);
+        Ok(())
     }
 
     #[test]
@@ -2260,6 +2677,43 @@ mod tests {
         let list = list_attachments(&paths, AttachmentQuery::default())?;
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].get("id"), meta.get("id"));
+
+        let _ = std::fs::remove_dir_all(base);
+        Ok(())
+    }
+
+    #[test]
+    fn device_auth_flow_issues_token() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("clawdex-device-auth-{}", Uuid::new_v4()));
+        let state_dir = base.join("state");
+        let workspace_dir = base.join("workspace");
+        std::fs::create_dir_all(&workspace_dir)?;
+
+        let (_cfg, paths) = crate::config::load_config(Some(state_dir), Some(workspace_dir))?;
+
+        let start = start_device_auth(&paths)?;
+        let device_code = start
+            .get("deviceCode")
+            .and_then(|v| v.as_str())
+            .context("deviceCode missing")?
+            .to_string();
+
+        let mut token_store = TokenStore::load(&paths)?;
+        let approve = approve_device_auth(
+            &paths,
+            &mut token_store,
+            &json!({ "deviceCode": device_code }),
+        )?;
+        let token = approve
+            .get("token")
+            .and_then(|v| v.as_str())
+            .context("token missing")?
+            .to_string();
+        assert!(token_store.is_valid(&token));
+
+        let poll = poll_device_auth(&paths, &json!({ "deviceCode": device_code }))?;
+        assert_eq!(poll.get("status").and_then(|v| v.as_str()), Some("approved"));
+        assert_eq!(poll.get("token").and_then(|v| v.as_str()), Some(token.as_str()));
 
         let _ = std::fs::remove_dir_all(base);
         Ok(())
