@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tiny_http::{Method, Response, Server, StatusCode};
 use tungstenite::{accept, Message};
 use uuid::Uuid;
@@ -162,6 +163,210 @@ fn authorize_gateway_auth(auth: &GatewayAuth, attempt: &GatewayAuthAttempt) -> R
             Ok(())
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct PresenceEntry {
+    host: Option<String>,
+    ip: Option<String>,
+    version: Option<String>,
+    platform: Option<String>,
+    device_family: Option<String>,
+    model_identifier: Option<String>,
+    mode: Option<String>,
+    last_input_ms: Option<i64>,
+    reason: Option<String>,
+    tags: Option<Vec<String>>,
+    text: Option<String>,
+    ts_ms: i64,
+    device_id: Option<String>,
+    roles: Option<Vec<String>>,
+    scopes: Option<Vec<String>>,
+    instance_id: Option<String>,
+}
+
+impl PresenceEntry {
+    fn to_value(&self, now_ms: i64) -> Value {
+        let mut map = Map::new();
+        if let Some(value) = self.host.as_ref() {
+            map.insert("host".to_string(), Value::String(value.clone()));
+        }
+        if let Some(value) = self.ip.as_ref() {
+            map.insert("ip".to_string(), Value::String(value.clone()));
+        }
+        if let Some(value) = self.version.as_ref() {
+            map.insert("version".to_string(), Value::String(value.clone()));
+        }
+        if let Some(value) = self.platform.as_ref() {
+            map.insert("platform".to_string(), Value::String(value.clone()));
+        }
+        if let Some(value) = self.device_family.as_ref() {
+            map.insert("deviceFamily".to_string(), Value::String(value.clone()));
+        }
+        if let Some(value) = self.model_identifier.as_ref() {
+            map.insert("modelIdentifier".to_string(), Value::String(value.clone()));
+        }
+        if let Some(value) = self.mode.as_ref() {
+            map.insert("mode".to_string(), Value::String(value.clone()));
+        }
+        if let Some(last_input_ms) = self.last_input_ms {
+            let delta = now_ms.saturating_sub(last_input_ms);
+            map.insert("lastInputSeconds".to_string(), Value::Number((delta / 1000).into()));
+        }
+        if let Some(value) = self.reason.as_ref() {
+            map.insert("reason".to_string(), Value::String(value.clone()));
+        }
+        if let Some(value) = self.tags.as_ref() {
+            map.insert(
+                "tags".to_string(),
+                Value::Array(value.iter().map(|v| Value::String(v.clone())).collect()),
+            );
+        }
+        if let Some(value) = self.text.as_ref() {
+            map.insert("text".to_string(), Value::String(value.clone()));
+        }
+        map.insert("ts".to_string(), Value::Number(self.ts_ms.into()));
+        if let Some(value) = self.device_id.as_ref() {
+            map.insert("deviceId".to_string(), Value::String(value.clone()));
+        }
+        if let Some(value) = self.roles.as_ref() {
+            map.insert(
+                "roles".to_string(),
+                Value::Array(value.iter().map(|v| Value::String(v.clone())).collect()),
+            );
+        }
+        if let Some(value) = self.scopes.as_ref() {
+            map.insert(
+                "scopes".to_string(),
+                Value::Array(value.iter().map(|v| Value::String(v.clone())).collect()),
+            );
+        }
+        if let Some(value) = self.instance_id.as_ref() {
+            map.insert("instanceId".to_string(), Value::String(value.clone()));
+        }
+        Value::Object(map)
+    }
+}
+
+struct PresenceState {
+    started_at: Instant,
+    presence_version: u64,
+    health_version: u64,
+    entries: HashMap<String, PresenceEntry>,
+    self_key: String,
+}
+
+impl PresenceState {
+    fn new() -> Self {
+        let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
+        let platform = match std::env::consts::OS {
+            "macos" => "macos",
+            "windows" => "windows",
+            "linux" => "linux",
+            other => other,
+        }
+        .to_string();
+        let device_family = match std::env::consts::OS {
+            "macos" => Some("Mac".to_string()),
+            "windows" => Some("Windows".to_string()),
+            "linux" => Some("Linux".to_string()),
+            _ => None,
+        };
+        let version = env!("CARGO_PKG_VERSION").to_string();
+        let text = format!("Gateway: {host} · app {version} · mode gateway · reason self");
+        let now = now_ms();
+        let self_entry = PresenceEntry {
+            host: Some(host.clone()),
+            ip: None,
+            version: Some(version.clone()),
+            platform: Some(platform),
+            device_family,
+            model_identifier: Some(std::env::consts::ARCH.to_string()),
+            mode: Some("gateway".to_string()),
+            last_input_ms: None,
+            reason: Some("self".to_string()),
+            tags: None,
+            text: Some(text),
+            ts_ms: now,
+            device_id: None,
+            roles: None,
+            scopes: None,
+            instance_id: None,
+        };
+        let mut entries = HashMap::new();
+        let key = host.to_lowercase();
+        entries.insert(key.clone(), self_entry);
+        Self {
+            started_at: Instant::now(),
+            presence_version: 1,
+            health_version: 0,
+            entries,
+            self_key: key,
+        }
+    }
+
+    fn snapshot(&mut self) -> (Vec<Value>, u64, u64, i64) {
+        let now = now_ms();
+        if let Some(entry) = self.entries.get_mut(&self.self_key) {
+            entry.ts_ms = now;
+        }
+        self.prune(now);
+        let list = self
+            .entries
+            .values()
+            .map(|entry| entry.to_value(now))
+            .collect::<Vec<_>>();
+        let uptime_ms = self.started_at.elapsed().as_millis() as i64;
+        (list, self.presence_version, self.health_version, uptime_ms)
+    }
+
+    fn prune(&mut self, now: i64) {
+        const TTL_MS: i64 = 5 * 60 * 1000;
+        self.entries.retain(|key, entry| {
+            if *key == self.self_key {
+                return true;
+            }
+            now.saturating_sub(entry.ts_ms) <= TTL_MS
+        });
+    }
+
+    fn upsert(&mut self, key: String, entry: PresenceEntry) {
+        self.entries.insert(key, entry);
+        self.presence_version = self.presence_version.saturating_add(1);
+    }
+
+    fn touch(&mut self, key: &str) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            let now = now_ms();
+            entry.last_input_ms = Some(now);
+            entry.ts_ms = now;
+            self.presence_version = self.presence_version.saturating_add(1);
+        }
+    }
+
+    fn mark_disconnect(&mut self, key: &str) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            let now = now_ms();
+            entry.reason = Some("disconnect".to_string());
+            entry.ts_ms = now;
+            self.presence_version = self.presence_version.saturating_add(1);
+        }
+    }
+}
+
+fn presence_state() -> &'static Mutex<PresenceState> {
+    static STATE: OnceLock<Mutex<PresenceState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(PresenceState::new()))
+}
+
+fn with_presence_state<F, T>(f: F) -> T
+where
+    F: FnOnce(&mut PresenceState) -> T,
+{
+    let mut guard = presence_state()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    f(&mut guard)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,6 +579,147 @@ fn extract_ws_auth(params: &Value) -> GatewayAuthAttempt {
         }
     }
     attempt
+}
+
+fn presence_key_from_params(params: &Value, conn_id: &str) -> String {
+    let device_id = params
+        .get("device")
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty());
+    let instance_id = params
+        .get("client")
+        .and_then(|v| v.get("instanceId"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty());
+    device_id
+        .or(instance_id)
+        .unwrap_or_else(|| conn_id.to_string())
+}
+
+fn presence_from_params(params: &Value, conn_id: &str) -> Option<(String, PresenceEntry)> {
+    let client = params.get("client")?.as_object()?;
+    let id = client
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let display_name = client
+        .get("displayName")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let version = client
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let platform = client
+        .get("platform")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let device_family = client
+        .get("deviceFamily")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let model_identifier = client
+        .get("modelIdentifier")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mode = client
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let instance_id = client
+        .get("instanceId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let device_id = params
+        .get("device")
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let role = params
+        .get("role")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|r| vec![r]);
+    let scopes = params
+        .get("scopes")
+        .and_then(|v| v.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty());
+    let now = now_ms();
+    let host = display_name.or_else(|| id.clone());
+    let text = match (&id, &mode) {
+        (Some(id), Some(mode)) => Some(format!("client {id} · mode {mode}")),
+        (Some(id), None) => Some(format!("client {id}")),
+        _ => None,
+    };
+    let entry = PresenceEntry {
+        host,
+        ip: None,
+        version,
+        platform,
+        device_family,
+        model_identifier,
+        mode,
+        last_input_ms: Some(now),
+        reason: Some("connect".to_string()),
+        tags: None,
+        text,
+        ts_ms: now,
+        device_id,
+        roles: role,
+        scopes,
+        instance_id,
+    };
+    let key = presence_key_from_params(params, conn_id);
+    Some((key, entry))
+}
+
+fn resolve_config_path(paths: &ClawdPaths) -> Option<String> {
+    let json5 = paths.state_dir.join("config.json5");
+    if json5.exists() {
+        return Some(json5.display().to_string());
+    }
+    let json = paths.state_dir.join("config.json");
+    if json.exists() {
+        return Some(json.display().to_string());
+    }
+    None
+}
+
+fn gateway_snapshot(paths: &ClawdPaths) -> Value {
+    let (presence, presence_version, health_version, uptime_ms) =
+        with_presence_state(|state| state.snapshot());
+    let mut snapshot = json!({
+        "presence": presence,
+        "health": {},
+        "stateVersion": { "presence": presence_version, "health": health_version },
+        "uptimeMs": uptime_ms,
+        "stateDir": paths.state_dir.display().to_string(),
+    });
+    if let Some(config_path) = resolve_config_path(paths) {
+        snapshot["configPath"] = Value::String(config_path);
+    }
+    snapshot
 }
 
 fn resolve_send_url(base: &str) -> String {
@@ -886,6 +1232,7 @@ pub fn run_gateway_ws(bind: &str, paths: &ClawdPaths) -> Result<()> {
                 }
             };
             let mut authorized = !auth.required();
+            let mut presence_key: Option<String> = None;
             let conn_id = Uuid::new_v4().to_string();
             loop {
                 let msg = match websocket.read() {
@@ -904,10 +1251,20 @@ pub fn run_gateway_ws(bind: &str, paths: &ClawdPaths) -> Result<()> {
                     Ok(frame) => frame,
                     Err(_) => continue,
                 };
-                let response = handle_ws_frame(&frame, &paths, &conn_id, &auth, &mut authorized);
+                let response = handle_ws_frame(
+                    &frame,
+                    &paths,
+                    &conn_id,
+                    &auth,
+                    &mut authorized,
+                    &mut presence_key,
+                );
                 if let Some(response) = response {
                     let _ = websocket.send(Message::Text(response.to_string()));
                 }
+            }
+            if let Some(key) = presence_key.as_deref() {
+                with_presence_state(|state| state.mark_disconnect(key));
             }
         });
     }
@@ -920,6 +1277,7 @@ fn handle_ws_frame(
     conn_id: &str,
     auth: &GatewayAuth,
     authorized: &mut bool,
+    presence_key: &mut Option<String>,
 ) -> Option<Value> {
     if frame.get("type").and_then(|v| v.as_str()) != Some("req") {
         return None;
@@ -927,6 +1285,12 @@ fn handle_ws_frame(
     let id = frame.get("id")?.as_str()?.to_string();
     let method = frame.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let params = frame.get("params").cloned().unwrap_or_else(|| json!({}));
+
+    if let Some(key) = presence_key.as_deref() {
+        if method != "connect" && method != "hello" {
+            with_presence_state(|state| state.touch(key));
+        }
+    }
 
     if auth.required() && !*authorized && method != "connect" && method != "hello" {
         return Some(ws_response_err(
@@ -945,7 +1309,11 @@ fn handle_ws_frame(
                 }
                 *authorized = true;
             }
-            Some(ws_response_ok(&id, hello_ok_payload(conn_id)))
+            if let Some((key, entry)) = presence_from_params(&params, conn_id) {
+                *presence_key = Some(key.clone());
+                with_presence_state(|state| state.upsert(key, entry));
+            }
+            Some(ws_response_ok(&id, hello_ok_payload(paths, conn_id)))
         }
         "send" => {
             let result = send_message_with_mode(paths, &params, SendMode::Queue);
@@ -963,8 +1331,9 @@ fn handle_ws_frame(
     }
 }
 
-fn hello_ok_payload(conn_id: &str) -> Value {
+fn hello_ok_payload(paths: &ClawdPaths, conn_id: &str) -> Value {
     let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
+    let snapshot = gateway_snapshot(paths);
     json!({
         "type": "hello-ok",
         "protocol": 1,
@@ -977,12 +1346,7 @@ fn hello_ok_payload(conn_id: &str) -> Value {
             "methods": ["send", "health"],
             "events": [],
         },
-        "snapshot": {
-            "presence": [],
-            "health": {},
-            "stateVersion": { "presence": 0, "health": 0 },
-            "uptimeMs": 0,
-        },
+        "snapshot": snapshot,
         "policy": {
             "maxPayload": 1048576,
             "maxBufferedBytes": 1048576,
@@ -1124,5 +1488,30 @@ mod tests {
             password: Some("secret".to_string()),
         };
         assert!(authorize_gateway_auth(&auth, &ok).is_ok());
+    }
+
+    #[test]
+    fn presence_entry_reports_last_input() {
+        let entry = PresenceEntry {
+            host: None,
+            ip: None,
+            version: None,
+            platform: None,
+            device_family: None,
+            model_identifier: None,
+            mode: None,
+            last_input_ms: Some(1_000),
+            reason: None,
+            tags: None,
+            text: None,
+            ts_ms: 1_000,
+            device_id: None,
+            roles: None,
+            scopes: None,
+            instance_id: None,
+        };
+        let value = entry.to_value(2_500);
+        let last_input = value.get("lastInputSeconds").and_then(|v| v.as_i64());
+        assert_eq!(last_input, Some(1));
     }
 }
