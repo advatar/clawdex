@@ -70,6 +70,7 @@ All generated or modified code must follow these rules to avoid runtime crashes 
 - Regularly sync the `codex/` and `openclaw/` submodules from upstream and bump their pinned SHAs in this repo (see `STATUS.md` for the porting plan).
 - Update `codex/` from upstream Codex (`openai/main`): `git -C codex checkout main && git -C codex pull --ff-only openai main && git -C codex push origin main`
 - Update `openclaw/` from upstream OpenClaw (`openclaw/main`): `git -C openclaw checkout main && git -C openclaw pull --ff-only openclaw main && git -C openclaw push origin main`
+- OpenClaw fork policy: keep `advatar/openclaw` `main` as a fast-forward mirror of upstream `openclaw/main`; keep fork-only patches on a separate branch (e.g. `clawd-patches`) and cherry-pick as needed.
 - Then bump the submodule SHAs in this repo: `git add codex openclaw && git commit -m "chore(submodules): bump codex + openclaw"`
 - Keep going without pausing for confirmation; only ask when a decision is blocking progress.
 - Never stage, commit, or alter files you did not edit for the task; leave unrelated changes for their owner.

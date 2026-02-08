@@ -2,7 +2,7 @@
 
 Upstream Sync (Submodules):
 - [ ] Establish and follow a regular cadence to pull upstream changes into our forks and then bump the pinned submodule SHAs in this repo (`codex/` from `openai/main`, `openclaw/` from `openclaw/main`).
-- [ ] On each `openclaw/` bump: scan upstream skills/tooling for new/changed tool usage, update `compat/` schemas/specs, and add regression tests before porting required behavior into `clawdex/`.
+- [ ] On each `openclaw/` bump: scan upstream skills/tooling for new/changed tool usage (`openclaw/src/agents/tools`, `openclaw/src/gateway/protocol/schema`), update `compat/` schemas/specs, and add regression tests before porting required behavior into `clawdex/`.
 - [ ] On each `codex/` bump: review upstream Codex changes for new capabilities we should adopt in `clawdex/` (protocol/tool-calling, approvals, ui-bridge/runtime), and capture concrete port tasks here before implementing.
 - [ ] Keep submodule bump commits isolated (one `chore(submodules)` commit), and land parity/feature ports as separate commits with tests.
 
