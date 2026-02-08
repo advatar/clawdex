@@ -31,6 +31,7 @@ docx = "1.1.2"
 printpdf = "0.7"
 sha2 = "0.10"
 hex = "0.4"
+base64 = "0.22"
 codex-app-server-protocol = { path = "../codex/codex-rs/app-server-protocol" }
 codex-protocol = { path = "../codex/codex-rs/protocol" }
 codex-utils-absolute-path = { path = "../codex/codex-rs/utils/absolute-path" }

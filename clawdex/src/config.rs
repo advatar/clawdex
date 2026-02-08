@@ -115,6 +115,8 @@ pub struct GatewayConfig {
     pub route_ttl_ms: Option<u64>,
     #[serde(alias = "channelOrder")]
     pub channel_order: Option<Vec<String>>,
+    #[serde(alias = "attachmentsMaxBytes")]
+    pub attachments_max_bytes: Option<u64>,
     pub url: Option<String>,
     pub token: Option<String>,
     pub password: Option<String>,

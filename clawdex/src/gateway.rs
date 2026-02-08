@@ -6,9 +6,12 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use tiny_http::{Method, Response, Server, StatusCode};
 use tungstenite::{accept, Message};
 use uuid::Uuid;
@@ -20,9 +23,12 @@ const GATEWAY_DIR: &str = "gateway";
 const OUTBOX_FILE: &str = "outbox.jsonl";
 const INBOX_FILE: &str = "inbox.jsonl";
 const RECEIPTS_FILE: &str = "receipts.jsonl";
+const ATTACHMENTS_DIR: &str = "attachments";
+const ATTACHMENTS_INDEX_FILE: &str = "attachments.jsonl";
 const ROUTES_FILE: &str = "routes.json";
 const IDEMPOTENCY_FILE: &str = "idempotency.json";
 const INBOX_OFFSET_FILE: &str = "inbox_offset.json";
+const DEFAULT_ATTACHMENTS_MAX_BYTES: usize = 5_000_000;
 const DEFAULT_CHANNEL_ORDER: &[&str] = &[
     "telegram",
     "whatsapp",
@@ -397,6 +403,12 @@ struct ReceiptQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct AttachmentQuery {
+    after: Option<i64>,
+    limit: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteEntry {
     pub channel: String,
@@ -500,6 +512,14 @@ fn receipts_path(paths: &ClawdPaths) -> PathBuf {
     gateway_dir(paths).join(RECEIPTS_FILE)
 }
 
+fn attachments_dir(paths: &ClawdPaths) -> PathBuf {
+    gateway_dir(paths).join(ATTACHMENTS_DIR)
+}
+
+fn attachments_index_path(paths: &ClawdPaths) -> PathBuf {
+    gateway_dir(paths).join(ATTACHMENTS_INDEX_FILE)
+}
+
 fn inbox_offset_path(paths: &ClawdPaths) -> PathBuf {
     gateway_dir(paths).join(INBOX_OFFSET_FILE)
 }
@@ -552,6 +572,192 @@ fn channel_order_index(order: &[String], channel: &str) -> usize {
         .iter()
         .position(|entry| entry == &normalized)
         .unwrap_or(usize::MAX - 1)
+}
+
+fn resolve_attachment_max_bytes(cfg: &GatewayConfig) -> usize {
+    cfg.attachments_max_bytes
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_ATTACHMENTS_MAX_BYTES)
+}
+
+fn parse_attachment_query(query: Option<&str>) -> AttachmentQuery {
+    let mut parsed = AttachmentQuery::default();
+    let Some(query) = query else {
+        return parsed;
+    };
+    for pair in query.split('&') {
+        if pair.trim().is_empty() {
+            continue;
+        }
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next().unwrap_or("").trim();
+        let value = parts.next().unwrap_or("").trim();
+        if value.is_empty() {
+            continue;
+        }
+        match key {
+            "after" => {
+                parsed.after = value.parse::<i64>().ok();
+            }
+            "limit" => {
+                parsed.limit = value.parse::<usize>().ok();
+            }
+            _ => {}
+        }
+    }
+    parsed
+}
+
+fn list_attachments(paths: &ClawdPaths, query: AttachmentQuery) -> Result<Vec<Value>> {
+    let mut entries = read_json_lines(&attachments_index_path(paths), None)?;
+    if let Some(after) = query.after {
+        entries.retain(|entry| entry.get("createdAtMs").and_then(|v| v.as_i64()).unwrap_or(0) > after);
+    }
+    if let Some(limit) = query.limit {
+        if entries.len() > limit {
+            if query.after.is_some() {
+                entries.truncate(limit);
+            } else {
+                entries = entries.split_off(entries.len() - limit);
+            }
+        }
+    }
+    Ok(entries)
+}
+
+fn find_attachment(paths: &ClawdPaths, attachment_id: &str) -> Result<Option<Value>> {
+    let entries = read_json_lines(&attachments_index_path(paths), None)?;
+    for entry in entries.into_iter().rev() {
+        if entry.get("id").and_then(|v| v.as_str()) == Some(attachment_id) {
+            return Ok(Some(entry));
+        }
+    }
+    Ok(None)
+}
+
+fn decode_attachment_content(content: &str) -> Result<(Vec<u8>, Option<String>)> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow::anyhow!("attachment content empty"));
+    }
+    if let Some(rest) = trimmed.strip_prefix("data:") {
+        let Some((meta, data)) = rest.split_once(',') else {
+            return Err(anyhow::anyhow!("attachment content invalid data url"));
+        };
+        if !meta.to_lowercase().contains(";base64") {
+            return Err(anyhow::anyhow!("attachment content must be base64 data url"));
+        }
+        let mime = meta
+            .split(';')
+            .next()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let bytes = BASE64_STANDARD
+            .decode(data.as_bytes())
+            .context("attachment content invalid base64")?;
+        return Ok((bytes, mime));
+    }
+    let bytes = BASE64_STANDARD
+        .decode(trimmed.as_bytes())
+        .context("attachment content invalid base64")?;
+    Ok((bytes, None))
+}
+
+fn store_attachment(paths: &ClawdPaths, cfg: &GatewayConfig, attachment: &Value) -> Result<Value> {
+    let content = attachment
+        .get("content")
+        .and_then(|v| v.as_str())
+        .context("attachment content missing")?;
+    let file_name = attachment
+        .get("fileName")
+        .or_else(|| attachment.get("filename"))
+        .or_else(|| attachment.get("name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut mime_type = attachment
+        .get("mimeType")
+        .or_else(|| attachment.get("mime_type"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let (bytes, data_mime) = decode_attachment_content(content)?;
+    if mime_type.is_none() {
+        mime_type = data_mime;
+    }
+    if mime_type.is_none() {
+        mime_type = Some("application/octet-stream".to_string());
+    }
+
+    let max_bytes = resolve_attachment_max_bytes(cfg);
+    if bytes.is_empty() {
+        return Err(anyhow::anyhow!("attachment content empty"));
+    }
+    if bytes.len() > max_bytes {
+        return Err(anyhow::anyhow!(
+            "attachment exceeds max size ({} > {})",
+            bytes.len(),
+            max_bytes
+        ));
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let file_name_on_disk = id.clone();
+    let dir = attachments_dir(paths);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create attachments dir {}", dir.display()))?;
+    let path = dir.join(&file_name_on_disk);
+    std::fs::write(&path, &bytes)
+        .with_context(|| format!("write attachment {}", path.display()))?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let sha256 = hex::encode(hasher.finalize());
+    let created_at_ms = now_ms();
+
+    let meta = json!({
+        "id": id,
+        "fileName": file_name,
+        "mimeType": mime_type,
+        "sizeBytes": bytes.len(),
+        "sha256": sha256,
+        "createdAtMs": created_at_ms,
+        "path": format!("{ATTACHMENTS_DIR}/{file_name_on_disk}"),
+    });
+
+    append_json_line(&attachments_index_path(paths), &meta)?;
+    Ok(meta)
+}
+
+fn process_attachments(
+    paths: &ClawdPaths,
+    cfg: &GatewayConfig,
+    attachments: Option<&Value>,
+) -> Result<Option<Vec<Value>>> {
+    let Some(attachments) = attachments else {
+        return Ok(None);
+    };
+    let list = attachments
+        .as_array()
+        .context("attachments must be an array")?;
+    let mut out = Vec::with_capacity(list.len());
+    for entry in list {
+        if entry.get("content").is_some() {
+            out.push(store_attachment(paths, cfg, entry)?);
+            continue;
+        }
+        if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
+            if let Some(found) = find_attachment(paths, id)? {
+                out.push(found);
+                continue;
+            }
+            return Err(anyhow::anyhow!("attachment id not found: {}", id));
+        }
+        out.push(entry.clone());
+    }
+    Ok(Some(out))
 }
 
 fn append_receipt(paths: &ClawdPaths, receipt: &Value) -> Result<()> {
@@ -981,6 +1187,7 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
     let mut route_store = RouteStore::load(paths)?;
     let cfg = load_gateway_config(paths)?;
     let cutoff = route_cutoff_ms(&cfg);
+    let attachments = process_attachments(paths, &cfg, args.get("attachments"))?;
 
     let mut resolved_session_key = session_key.clone();
     let mut route = None;
@@ -1081,7 +1288,7 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
 
     let entry_account_id = account_id.clone().or(route.account_id.clone());
     let created_at_ms = now_ms();
-    let entry = json!({
+    let mut entry = json!({
         "id": Uuid::new_v4().to_string(),
         "sessionKey": session_key,
         "channel": route.channel,
@@ -1092,6 +1299,9 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
         "idempotencyKey": idempotency_key,
         "createdAtMs": created_at_ms,
     });
+    if let Some(attachments) = attachments {
+        entry["attachments"] = Value::Array(attachments);
+    }
     let message_id = entry
         .get("id")
         .and_then(|v| v.as_str())
@@ -1383,6 +1593,7 @@ pub fn resolve_target(paths: &ClawdPaths, args: &Value) -> Result<Value> {
 }
 
 pub fn record_incoming(paths: &ClawdPaths, payload: &Value) -> Result<Value> {
+    let cfg = load_gateway_config(paths)?;
     let channel_raw = payload
         .get("channel")
         .and_then(|v| v.as_str())
@@ -1402,7 +1613,8 @@ pub fn record_incoming(paths: &ClawdPaths, payload: &Value) -> Result<Value> {
 
     let session_key = format!("{channel}:{from}");
     let received_at_ms = now_ms();
-    let entry = json!({
+    let attachments = process_attachments(paths, &cfg, payload.get("attachments"))?;
+    let mut entry = json!({
         "id": Uuid::new_v4().to_string(),
         "sessionKey": session_key,
         "channel": channel,
@@ -1411,6 +1623,9 @@ pub fn record_incoming(paths: &ClawdPaths, payload: &Value) -> Result<Value> {
         "text": text,
         "receivedAtMs": received_at_ms,
     });
+    if let Some(attachments) = attachments {
+        entry["attachments"] = Value::Array(attachments);
+    }
 
     append_json_line(&inbox_path(paths), &entry)?;
     let message_id = payload
@@ -1672,6 +1887,39 @@ fn handle_request(
             }
         }
     }
+    if let Some(rest) = path.strip_prefix("/v1/attachments/") {
+        let rest = rest.trim_matches('/');
+        if rest.is_empty() {
+            return Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)));
+        }
+        let (attachment_id, wants_data) = match rest.strip_suffix("/data") {
+            Some(id) => (id.trim_matches('/'), true),
+            None => (rest, false),
+        };
+        if attachment_id.is_empty() {
+            return Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)));
+        }
+        let meta = find_attachment(paths, attachment_id)?;
+        let Some(meta) = meta else {
+            return Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)));
+        };
+        if wants_data {
+            let stored_path = meta.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let file_path = if stored_path.is_empty() {
+                attachments_dir(paths).join(attachment_id)
+            } else {
+                gateway_dir(paths).join(stored_path)
+            };
+            let data = std::fs::read(&file_path)
+                .with_context(|| format!("read attachment {}", file_path.display()))?;
+            let mime = meta
+                .get("mimeType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("application/octet-stream");
+            return Ok(bytes_response(data, mime)?);
+        }
+        return Ok(json_response(json!({ "ok": true, "attachment": meta }))?);
+    }
     match (&method, path) {
         (&Method::Get, "/v1/health") => Ok(json_response(json!({ "ok": true }))?),
         (&Method::Post, "/v1/send") => {
@@ -1685,6 +1933,37 @@ fn handle_request(
             let payload: Value = serde_json::from_slice(&body).context("invalid json")?;
             let result = record_incoming(paths, &payload)?;
             Ok(json_response(result)?)
+        }
+        (&Method::Post, "/v1/attachments") => {
+            let body = read_body(request)?;
+            let payload: Value = serde_json::from_slice(&body).context("invalid json")?;
+            let cfg = load_gateway_config(paths)?;
+            let mut attachments = Vec::new();
+            if let Some(list) = payload.get("attachments").and_then(|v| v.as_array()) {
+                for entry in list {
+                    attachments.push(store_attachment(paths, &cfg, entry)?);
+                }
+            } else if let Some(entry) = payload.get("attachment") {
+                attachments.push(store_attachment(paths, &cfg, entry)?);
+            } else {
+                attachments.push(store_attachment(paths, &cfg, &payload)?);
+            }
+            let count = attachments.len();
+            Ok(json_response(json!({ "ok": true, "attachments": attachments, "count": count }))?)
+        }
+        (&Method::Get, "/v1/attachments") => {
+            let query = parse_attachment_query(query);
+            let attachments = list_attachments(paths, query)?;
+            let count = attachments.len();
+            let next_after = attachments
+                .last()
+                .and_then(|value| value.get("createdAtMs"))
+                .and_then(|value| value.as_i64());
+            let mut response = json!({ "ok": true, "attachments": attachments, "count": count });
+            if let Some(next_after) = next_after {
+                response["nextAfter"] = Value::Number(next_after.into());
+            }
+            Ok(json_response(response)?)
         }
         (&Method::Get, "/v1/receipts") => {
             let query = parse_receipt_query(query);
@@ -1718,6 +1997,15 @@ fn json_response(value: Value) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
     let header = tiny_http::Header::from_bytes(
         &b"Content-Type"[..],
         &b"application/json"[..],
+    )
+    .map_err(|_| anyhow::anyhow!("invalid content-type header"))?;
+    Ok(Response::from_data(data).with_header(header))
+}
+
+fn bytes_response(data: Vec<u8>, mime: &str) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
+    let header = tiny_http::Header::from_bytes(
+        &b"Content-Type"[..],
+        mime.as_bytes(),
     )
     .map_err(|_| anyhow::anyhow!("invalid content-type header"))?;
     Ok(Response::from_data(data).with_header(header))
@@ -1940,6 +2228,38 @@ mod tests {
 
         let resolved = resolve_target(&paths, &json!({ "channel": "slack" }))?;
         assert_eq!(resolved.get("channel").and_then(|v| v.as_str()), Some("slack"));
+
+        let _ = std::fs::remove_dir_all(base);
+        Ok(())
+    }
+
+    #[test]
+    fn attachments_store_and_list() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("clawdex-attachments-{}", Uuid::new_v4()));
+        let state_dir = base.join("state");
+        let workspace_dir = base.join("workspace");
+        std::fs::create_dir_all(&workspace_dir)?;
+
+        let (_cfg, paths) = crate::config::load_config(Some(state_dir), Some(workspace_dir))?;
+        let cfg = load_gateway_config(&paths)?;
+
+        let attachment = json!({
+            "fileName": "hello.txt",
+            "mimeType": "text/plain",
+            "content": "aGVsbG8=",
+        });
+        let meta = store_attachment(&paths, &cfg, &attachment)?;
+        let stored_path = meta
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(!stored_path.is_empty());
+        let full_path = gateway_dir(&paths).join(stored_path);
+        assert!(full_path.exists());
+
+        let list = list_attachments(&paths, AttachmentQuery::default())?;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].get("id"), meta.get("id"));
 
         let _ = std::fs::remove_dir_all(base);
         Ok(())

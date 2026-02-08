@@ -77,6 +77,10 @@ The gateway accepts:
 - `GET /v1/health`
 - `POST /v1/send` (queue outbound message)
 - `POST /v1/incoming` (record inbound message + update last route)
+- `POST /v1/attachments` (store attachment content)
+- `GET /v1/attachments` (list stored attachments)
+- `GET /v1/attachments/<id>` (attachment metadata)
+- `GET /v1/attachments/<id>/data` (attachment bytes)
 - `GET /v1/receipts` (list message receipts)
 
 ---
@@ -132,17 +136,19 @@ Default state layout:
 6. `~/.codex/clawdex/gateway/outbox.jsonl`
 7. `~/.codex/clawdex/gateway/inbox.jsonl`
 8. `~/.codex/clawdex/gateway/receipts.jsonl`
-9. `~/.codex/clawdex/gateway/routes.json`
-10. `~/.codex/clawdex/gateway/idempotency.json`
-11. `~/.codex/clawdex/tasks.sqlite`
-12. `~/.codex/clawdex/task_events/<runId>.jsonl`
-13. `WORKSPACE/MEMORY.md`
-14. `WORKSPACE/memory/YYYY-MM-DD.md`
-15. `WORKSPACE/HEARTBEAT.md` (optional)
-16. `~/.codex/clawdex/plugins/installs.json`
-17. `~/.codex/clawdex/plugins/<pluginId>/...`
-18. `~/.codex/clawdex/mcp/plugins.json`
-19. `~/.codex/skills/clawdex/plugins/<pluginId>/<skill>/SKILL.md`
+9. `~/.codex/clawdex/gateway/attachments.jsonl`
+10. `~/.codex/clawdex/gateway/attachments/`
+11. `~/.codex/clawdex/gateway/routes.json`
+12. `~/.codex/clawdex/gateway/idempotency.json`
+13. `~/.codex/clawdex/tasks.sqlite`
+14. `~/.codex/clawdex/task_events/<runId>.jsonl`
+15. `WORKSPACE/MEMORY.md`
+16. `WORKSPACE/memory/YYYY-MM-DD.md`
+17. `WORKSPACE/HEARTBEAT.md` (optional)
+18. `~/.codex/clawdex/plugins/installs.json`
+19. `~/.codex/clawdex/plugins/<pluginId>/...`
+20. `~/.codex/clawdex/mcp/plugins.json`
+21. `~/.codex/skills/clawdex/plugins/<pluginId>/<skill>/SKILL.md`
 
 Example `config.json5`:
 
