@@ -68,7 +68,7 @@ Roadmap:
 - [x] Emphasize Rust-first parity and porting OpenClaw TypeScript components where needed.
 
 Parity Execution (from ROADMAP.md):
-- [ ] Phase 0: Enforce MCP response strictness + add response-schema regression tests + update `compat/parity-delta.md`.
+- [x] Phase 0: Enforce MCP response strictness + add response-schema regression tests + update `compat/parity-delta.md`.
 - [x] Phase 1: Plugin parity (packaging layer, lifecycle parity, metadata/deps validation, permissions mapping, skill/MCP sync hooks).
 - [x] Phase 1a: Add OpenClaw plugin manifest support (`openclaw.plugin.json`) + package metadata ingestion.
 - [x] Phase 1b: Add plugin install/update semantics (npm spec/archive/path) with dependency install + recorded install source.

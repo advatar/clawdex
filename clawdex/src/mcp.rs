@@ -1208,6 +1208,86 @@ mod tests {
         }
     }
 
+    fn tool_response_schemas() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("cron.add", CRON_ADD_RESPONSE_SCHEMA),
+            ("cron.update", CRON_UPDATE_RESPONSE_SCHEMA),
+            ("cron.list", CRON_LIST_RESPONSE_SCHEMA),
+            ("cron.remove", CRON_REMOVE_RESPONSE_SCHEMA),
+            ("cron.run", CRON_RUN_RESPONSE_SCHEMA),
+            ("cron.runs", CRON_RUNS_RESPONSE_SCHEMA),
+            ("cron.status", CRON_STATUS_RESPONSE_SCHEMA),
+            ("memory_search", MEMORY_SEARCH_RESPONSE_SCHEMA),
+            ("memory_get", MEMORY_GET_RESPONSE_SCHEMA),
+            ("message.send", MESSAGE_SEND_RESPONSE_SCHEMA),
+            ("channels.list", CHANNELS_LIST_RESPONSE_SCHEMA),
+            ("channels.resolve_target", CHANNELS_RESOLVE_RESPONSE_SCHEMA),
+            ("heartbeat.wake", HEARTBEAT_WAKE_RESPONSE_SCHEMA),
+            ("artifact.create_xlsx", ARTIFACT_CREATE_XLSX_RESPONSE_SCHEMA),
+            ("artifact.create_pptx", ARTIFACT_CREATE_PPTX_RESPONSE_SCHEMA),
+            ("artifact.create_docx", ARTIFACT_CREATE_DOCX_RESPONSE_SCHEMA),
+            ("artifact.create_pdf", ARTIFACT_CREATE_PDF_RESPONSE_SCHEMA),
+        ]
+    }
+
+    fn schema_properties(schema: &str) -> Map<String, Value> {
+        let parsed: Value = serde_json::from_str(schema).expect("schema json");
+        parsed
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn placeholder_for_schema(schema: &Value) -> Value {
+        if let Some(const_value) = schema.get("const") {
+            return const_value.clone();
+        }
+        if let Some(enum_values) = schema.get("enum").and_then(|v| v.as_array()) {
+            if let Some(first) = enum_values.first() {
+                return first.clone();
+            }
+        }
+        if let Some(any_of) = schema.get("anyOf").and_then(|v| v.as_array()) {
+            if let Some(first) = any_of.first() {
+                return placeholder_for_schema(first);
+            }
+        }
+        if let Some(one_of) = schema.get("oneOf").and_then(|v| v.as_array()) {
+            if let Some(first) = one_of.first() {
+                return placeholder_for_schema(first);
+            }
+        }
+        if let Some(all_of) = schema.get("allOf").and_then(|v| v.as_array()) {
+            if let Some(first) = all_of.first() {
+                return placeholder_for_schema(first);
+            }
+        }
+        if let Some(type_value) = schema.get("type") {
+            if let Some(type_str) = type_value.as_str() {
+                return placeholder_for_type(type_str);
+            }
+            if let Some(types) = type_value.as_array() {
+                if let Some(Value::String(type_str)) = types.first() {
+                    return placeholder_for_type(type_str);
+                }
+            }
+        }
+        Value::String("x".to_string())
+    }
+
+    fn placeholder_for_type(type_str: &str) -> Value {
+        match type_str {
+            "object" => Value::Object(Map::new()),
+            "array" => Value::Array(Vec::new()),
+            "boolean" => Value::Bool(true),
+            "integer" | "number" => Value::Number(1.into()),
+            "string" => Value::String("x".to_string()),
+            "null" => Value::Null,
+            _ => Value::String("x".to_string()),
+        }
+    }
+
     #[test]
     fn validates_sample_tool_responses() {
         assert_response_ok("cron.list", json!({ "jobs": [sample_cron_job()] }));
@@ -1305,6 +1385,38 @@ mod tests {
         };
         assert!(map.get("deduped").is_none());
         assert!(map.get("extra").is_none());
+    }
+
+    #[test]
+    fn sanitizer_tracks_schema_keys() {
+        for (tool, schema) in tool_response_schemas() {
+            let properties = schema_properties(schema);
+            assert!(
+                !properties.is_empty(),
+                "schema for {tool} does not define properties"
+            );
+            let mut input = Map::new();
+            for (key, prop_schema) in &properties {
+                input.insert(key.clone(), placeholder_for_schema(prop_schema));
+            }
+            input.insert("extra".to_string(), Value::String("nope".to_string()));
+
+            let sanitized = sanitize_tool_response(tool, Value::Object(input));
+            let Value::Object(map) = sanitized else {
+                panic!("sanitized response for {tool} is not an object");
+            };
+
+            for key in properties.keys() {
+                assert!(
+                    map.contains_key(key),
+                    "sanitize dropped schema key {key} for {tool}"
+                );
+            }
+            assert!(
+                !map.contains_key("extra"),
+                "sanitize kept extra key for {tool}"
+            );
+        }
     }
 }
 
