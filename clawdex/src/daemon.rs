@@ -18,6 +18,7 @@ use crate::cron::{
 };
 use crate::gateway;
 use crate::heartbeat;
+use crate::memory;
 use crate::sessions;
 use crate::runner::{CodexRunner, CodexRunnerConfig};
 use crate::util::now_ms;
@@ -85,6 +86,15 @@ pub fn run_daemon_loop(
     let interval = resolve_heartbeat_interval_ms(&cfg);
     let mut next_heartbeat = now_ms() + interval as i64;
 
+    let memory_sync_minutes = cfg
+        .memory
+        .as_ref()
+        .and_then(|m| m.sync.as_ref())
+        .and_then(|s| s.interval_minutes)
+        .unwrap_or(0);
+    let memory_sync_interval_ms = memory_sync_minutes.saturating_mul(60_000);
+    let mut next_memory_sync = now_ms() + memory_sync_interval_ms as i64;
+
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
@@ -137,6 +147,13 @@ pub fn run_daemon_loop(
         if heartbeat_enabled && now >= next_heartbeat {
             execute_heartbeat(&mut runner, &cfg, &paths)?;
             next_heartbeat = now + interval as i64;
+        }
+
+        if memory_sync_interval_ms > 0 && now >= next_memory_sync {
+            if let Err(err) = memory::sync_memory_index(&paths, None) {
+                eprintln!("[clawdex][memory] sync failed: {err}");
+            }
+            next_memory_sync = now + memory_sync_interval_ms as i64;
         }
 
         thread::sleep(Duration::from_millis(500));

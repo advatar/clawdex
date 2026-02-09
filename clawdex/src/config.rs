@@ -76,6 +76,7 @@ pub struct MemoryConfig {
     pub enabled: Option<bool>,
     pub citations: Option<String>,
     pub embeddings: Option<EmbeddingsConfig>,
+    pub sync: Option<MemorySyncConfig>,
     #[serde(alias = "extraPaths")]
     #[serde(alias = "extra_paths")]
     pub extra_paths: Option<Vec<String>>,
@@ -88,6 +89,13 @@ pub struct MemoryConfig {
     #[serde(alias = "sessionMemory")]
     #[serde(alias = "session_memory")]
     pub session_memory: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MemorySyncConfig {
+    #[serde(alias = "intervalMinutes")]
+    #[serde(alias = "interval_minutes")]
+    pub interval_minutes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

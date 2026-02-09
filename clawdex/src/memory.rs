@@ -293,6 +293,35 @@ pub fn memory_search(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     Ok(response)
 }
 
+pub fn sync_memory_index(paths: &ClawdPaths, session_key: Option<&str>) -> Result<()> {
+    let cfg = paths_config(paths)?;
+    if !resolve_memory_enabled(&cfg) {
+        return Ok(());
+    }
+
+    let (chunk_tokens, chunk_overlap) = resolve_chunking(&cfg);
+    let extra_paths = normalize_extra_paths(&paths.workspace_dir, cfg.memory.as_ref());
+    let include_sessions = cfg
+        .memory
+        .as_ref()
+        .and_then(|m| m.session_memory)
+        .unwrap_or(false)
+        || session_key.is_some();
+    let embeddings_cfg = resolve_embeddings_config(&cfg);
+
+    ensure_index(
+        paths,
+        &embeddings_cfg,
+        &extra_paths,
+        include_sessions,
+        session_key,
+        chunk_tokens,
+        chunk_overlap,
+    )?;
+
+    Ok(())
+}
+
 fn ensure_index(
     paths: &ClawdPaths,
     embeddings_cfg: &EmbeddingsConfig,

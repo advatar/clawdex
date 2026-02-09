@@ -185,6 +185,9 @@ Example `config.json5`:
   memory: {
     enabled: true,
     citations: "auto",
+    sync: {
+      interval_minutes: 10
+    },
     embeddings: {
       enabled: true,
       provider: "openai",
