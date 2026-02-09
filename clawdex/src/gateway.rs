@@ -1,8 +1,8 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::TcpListener;
-use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -17,6 +17,7 @@ use tungstenite::{accept, Message};
 use uuid::Uuid;
 
 use crate::config::{ClawdPaths, GatewayConfig};
+use crate::task_db::TaskStore;
 use crate::util::{append_json_line, now_ms, read_json_lines, read_json_value, write_json_value};
 
 const GATEWAY_DIR: &str = "gateway";
@@ -430,6 +431,83 @@ enum SendMode {
     Queue,
 }
 
+#[derive(Debug)]
+enum GatewayMethodError {
+    InvalidRequest(String),
+    NotImplemented(String),
+    Internal(String),
+}
+
+impl GatewayMethodError {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidRequest(_) => "invalid_request",
+            Self::NotImplemented(_) => "not_implemented",
+            Self::Internal(_) => "internal_error",
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::InvalidRequest(message)
+            | Self::NotImplemented(message)
+            | Self::Internal(message) => message,
+        }
+    }
+}
+
+type GatewayMethodResult = std::result::Result<Value, GatewayMethodError>;
+type GatewayMethodHandler = Box<dyn Fn(&ClawdPaths, &Value) -> GatewayMethodResult + Send + Sync>;
+
+struct GatewayMethodDefinition {
+    version: u32,
+    handler: GatewayMethodHandler,
+}
+
+#[derive(Default)]
+struct GatewayMethodRegistry {
+    methods: HashMap<String, GatewayMethodDefinition>,
+}
+
+impl GatewayMethodRegistry {
+    fn register(&mut self, name: &str, version: u32, handler: GatewayMethodHandler) {
+        let key = name.trim().to_string();
+        if key.is_empty() {
+            return;
+        }
+        self.methods.insert(
+            key,
+            GatewayMethodDefinition {
+                version,
+                handler,
+            },
+        );
+    }
+
+    fn handle(&self, name: &str, paths: &ClawdPaths, params: &Value) -> GatewayMethodResult {
+        let Some(def) = self.methods.get(name) else {
+            return Err(GatewayMethodError::NotImplemented(format!(
+                "unsupported method: {name}"
+            )));
+        };
+        (def.handler)(paths, params)
+    }
+
+    fn list_versions(&self) -> Vec<Value> {
+        let mut entries = self
+            .methods
+            .iter()
+            .map(|(name, def)| json!({ "name": name, "version": def.version }))
+            .collect::<Vec<_>>();
+        entries.sort_by(|a, b| {
+            let a_name = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let b_name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            a_name.cmp(b_name)
+        });
+        entries
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct ReceiptQuery {
     after: Option<i64>,
@@ -779,6 +857,166 @@ fn generate_device_code() -> String {
 fn generate_user_code() -> String {
     let raw = Uuid::new_v4().to_string().replace('-', "");
     raw.chars().take(8).collect::<String>().to_uppercase()
+}
+
+fn load_manifest_value(path: &Path) -> Option<Value> {
+    if !path.exists() {
+        return None;
+    }
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<Value>(&raw).ok()
+}
+
+fn collect_gateway_methods_from_value(value: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let methods = value
+        .get("gatewayMethods")
+        .or_else(|| value.get("gateway_methods"))
+        .and_then(|v| v.as_array());
+    if let Some(methods) = methods {
+        for entry in methods {
+            if let Some(name) = entry.as_str() {
+                let trimmed = name.trim();
+                if !trimmed.is_empty() {
+                    out.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+fn plugin_gateway_methods_for_root(root: &Path) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let candidates = [
+        root.join("openclaw.plugin.json"),
+        root.join(".claude-plugin").join("plugin.json"),
+        root.join("plugin.json"),
+    ];
+    for path in candidates {
+        let Some(value) = load_manifest_value(&path) else {
+            continue;
+        };
+        for method in collect_gateway_methods_from_value(&value) {
+            if seen.insert(method.clone()) {
+                out.push(method);
+            }
+        }
+    }
+    out
+}
+
+fn load_plugin_gateway_methods(paths: &ClawdPaths) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let Ok(store) = TaskStore::open(paths) else {
+        return out;
+    };
+    let plugins = store.list_plugins(false).unwrap_or_default();
+    for plugin in plugins {
+        let root = Path::new(&plugin.path);
+        for method in plugin_gateway_methods_for_root(root) {
+            if seen.insert(method.clone()) {
+                out.push(method);
+            }
+        }
+    }
+    out
+}
+
+fn build_gateway_registry(paths: &ClawdPaths) -> GatewayMethodRegistry {
+    let mut registry = GatewayMethodRegistry::default();
+    registry.register(
+        "send",
+        1,
+        Box::new(|paths, params| {
+            send_message_with_mode(paths, params, SendMode::Queue)
+                .map_err(|err| GatewayMethodError::InvalidRequest(err.to_string()))
+        }),
+    );
+    registry.register(
+        "health",
+        1,
+        Box::new(|_paths, _params| Ok(json!({ "ok": true }))),
+    );
+
+    for method in load_plugin_gateway_methods(paths) {
+        let name = method.clone();
+        registry.register(
+            &method,
+            1,
+            Box::new(move |_paths, _params| {
+                Err(GatewayMethodError::NotImplemented(format!(
+                    "method not implemented: {name}"
+                )))
+            }),
+        );
+    }
+
+    registry
+}
+
+type GatewayRegistryHandle = Arc<RwLock<GatewayMethodRegistry>>;
+
+fn gateway_registry_handle(paths: &ClawdPaths) -> GatewayRegistryHandle {
+    static REGISTRIES: OnceLock<RwLock<HashMap<PathBuf, GatewayRegistryHandle>>> = OnceLock::new();
+    let registries = REGISTRIES.get_or_init(|| RwLock::new(HashMap::new()));
+
+    {
+        let guard = registries.read().unwrap_or_else(|err| err.into_inner());
+        if let Some(handle) = guard.get(&paths.state_dir) {
+            return handle.clone();
+        }
+    }
+
+    let mut guard = registries
+        .write()
+        .unwrap_or_else(|err| err.into_inner());
+    guard
+        .entry(paths.state_dir.clone())
+        .or_insert_with(|| Arc::new(RwLock::new(build_gateway_registry(paths))))
+        .clone()
+}
+
+fn reload_gateway_registry(paths: &ClawdPaths) {
+    let handle = gateway_registry_handle(paths);
+    let mut guard = handle
+        .write()
+        .unwrap_or_else(|err| err.into_inner());
+    *guard = build_gateway_registry(paths);
+}
+
+fn list_gateway_method_versions(paths: &ClawdPaths) -> Vec<Value> {
+    let handle = gateway_registry_handle(paths);
+    let guard = handle
+        .read()
+        .unwrap_or_else(|err| err.into_inner());
+    let mut entries = guard.list_versions();
+    let mut names: HashSet<String> = entries
+        .iter()
+        .filter_map(|entry| entry.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect();
+    for extra in ["methods.list", "gateway.reload"] {
+        if names.insert(extra.to_string()) {
+            entries.push(json!({ "name": extra, "version": 1 }));
+        }
+    }
+    entries.sort_by(|a, b| {
+        let a_name = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let b_name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        a_name.cmp(b_name)
+    });
+    entries
+}
+
+fn list_gateway_methods(paths: &ClawdPaths) -> Vec<String> {
+    let mut entries = list_gateway_method_versions(paths)
+        .into_iter()
+        .filter_map(|entry| entry.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
 }
 
 fn parse_attachment_query(query: Option<&str>) -> AttachmentQuery {
@@ -2149,25 +2387,32 @@ fn handle_ws_frame(
             }
             Some(ws_response_ok(&id, hello_ok_payload(paths, conn_id)))
         }
-        "send" => {
-            let result = send_message_with_mode(paths, &params, SendMode::Queue);
-            match result {
+        "methods.list" => {
+            let methods = list_gateway_method_versions(paths);
+            Some(ws_response_ok(&id, json!({ "methods": methods })))
+        }
+        "gateway.reload" => {
+            reload_gateway_registry(paths);
+            let methods = list_gateway_method_versions(paths);
+            Some(ws_response_ok(&id, json!({ "methods": methods, "reloaded": true })))
+        }
+        _ => {
+            let handle = gateway_registry_handle(paths);
+            let registry = handle
+                .read()
+                .unwrap_or_else(|err| err.into_inner());
+            match registry.handle(method, paths, &params) {
                 Ok(payload) => Some(ws_response_ok(&id, payload)),
-                Err(err) => Some(ws_response_err(&id, "invalid_request", &err.to_string())),
+                Err(err) => Some(ws_response_err(&id, err.code(), err.message())),
             }
         }
-        "health" => Some(ws_response_ok(&id, json!({ "ok": true }))),
-        _ => Some(ws_response_err(
-            &id,
-            "method_not_found",
-            &format!("unsupported method: {method}"),
-        )),
     }
 }
 
 fn hello_ok_payload(paths: &ClawdPaths, conn_id: &str) -> Value {
     let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
     let snapshot = gateway_snapshot(paths);
+    let methods = list_gateway_methods(paths);
     json!({
         "type": "hello-ok",
         "protocol": 1,
@@ -2177,7 +2422,7 @@ fn hello_ok_payload(paths: &ClawdPaths, conn_id: &str) -> Value {
             "connId": conn_id,
         },
         "features": {
-            "methods": ["send", "health"],
+            "methods": methods,
             "events": [],
         },
         "snapshot": snapshot,
@@ -2420,6 +2665,11 @@ fn unauthorized_response(message: &str) -> Response<std::io::Cursor<Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gateway_registry_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn gateway_auth_none_allows() {
@@ -2714,6 +2964,105 @@ mod tests {
         let poll = poll_device_auth(&paths, &json!({ "deviceCode": device_code }))?;
         assert_eq!(poll.get("status").and_then(|v| v.as_str()), Some("approved"));
         assert_eq!(poll.get("token").and_then(|v| v.as_str()), Some(token.as_str()));
+
+        let _ = std::fs::remove_dir_all(base);
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_methods_registry_discovers_plugin_methods() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("clawdex-methods-{}", Uuid::new_v4()));
+        let state_dir = base.join("state");
+        let workspace_dir = base.join("workspace");
+        let plugin_dir = base.join("plugin-a");
+        std::fs::create_dir_all(&workspace_dir)?;
+        std::fs::create_dir_all(&plugin_dir)?;
+
+        let manifest = json!({
+            "id": "plugin-a",
+            "gatewayMethods": ["plugin.foo", "plugin.bar"],
+            "configSchema": {}
+        });
+        std::fs::write(
+            plugin_dir.join("openclaw.plugin.json"),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+
+        let (_cfg, paths) = crate::config::load_config(Some(state_dir), Some(workspace_dir))?;
+        let store = TaskStore::open(&paths)?;
+        let plugin = crate::task_db::PluginRecord {
+            id: "plugin-a".to_string(),
+            name: "Plugin A".to_string(),
+            version: None,
+            description: None,
+            source: None,
+            path: plugin_dir.to_string_lossy().to_string(),
+            enabled: true,
+            installed_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+        };
+        store.upsert_plugin(&plugin)?;
+
+        let registry = build_gateway_registry(&paths);
+        assert!(registry.methods.contains_key("plugin.foo"));
+        assert!(registry.methods.contains_key("plugin.bar"));
+
+        let _ = std::fs::remove_dir_all(base);
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_methods_reload_refreshes_manifest() -> Result<()> {
+        let _guard = gateway_registry_test_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let base = std::env::temp_dir().join(format!("clawdex-methods-reload-{}", Uuid::new_v4()));
+        let state_dir = base.join("state");
+        let workspace_dir = base.join("workspace");
+        let plugin_dir = base.join("plugin-b");
+        std::fs::create_dir_all(&workspace_dir)?;
+        std::fs::create_dir_all(&plugin_dir)?;
+
+        let (_cfg, paths) = crate::config::load_config(Some(state_dir), Some(workspace_dir))?;
+        let store = TaskStore::open(&paths)?;
+        let plugin = crate::task_db::PluginRecord {
+            id: "plugin-b".to_string(),
+            name: "Plugin B".to_string(),
+            version: None,
+            description: None,
+            source: None,
+            path: plugin_dir.to_string_lossy().to_string(),
+            enabled: true,
+            installed_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+        };
+        store.upsert_plugin(&plugin)?;
+
+        let manifest_a = json!({
+            "id": "plugin-b",
+            "gatewayMethods": ["plugin.b.one"],
+            "configSchema": {}
+        });
+        std::fs::write(
+            plugin_dir.join("openclaw.plugin.json"),
+            serde_json::to_vec_pretty(&manifest_a)?,
+        )?;
+        reload_gateway_registry(&paths);
+        let methods = list_gateway_methods(&paths);
+        assert!(methods.contains(&"plugin.b.one".to_string()));
+
+        let manifest_b = json!({
+            "id": "plugin-b",
+            "gatewayMethods": ["plugin.b.two"],
+            "configSchema": {}
+        });
+        std::fs::write(
+            plugin_dir.join("openclaw.plugin.json"),
+            serde_json::to_vec_pretty(&manifest_b)?,
+        )?;
+        reload_gateway_registry(&paths);
+        let methods = list_gateway_methods(&paths);
+        assert!(methods.contains(&"plugin.b.two".to_string()));
 
         let _ = std::fs::remove_dir_all(base);
         Ok(())

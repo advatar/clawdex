@@ -80,8 +80,11 @@ Parity Execution (from ROADMAP.md):
 - [x] Phase 1b: Add plugin install/update semantics (npm spec/archive/path) with dependency install + recorded install source.
 - [x] Phase 1c: Align enable/disable/remove flows with OpenClaw semantics + wire skill/MCP sync hooks.
 - [x] Phase 1d: Map plugin permission hints into MCP allow/deny + workspace policy overrides (if present).
-- [ ] Phase 2: Gateway core parity (auth flows, presence/last-seen, message lifecycle/receipts, channel stack order, attachments).
-- [ ] Phase 3: Server methods + lifecycle parity (registry, versioned handlers, plugin method discovery/reload, compat tests).
+- [x] Phase 2: Gateway core parity (auth flows, presence/last-seen, message lifecycle/receipts, channel stack order, attachments).
+- [x] Phase 3: Server methods + lifecycle parity (registry, versioned handlers, plugin method discovery/reload, compat tests).
+- [x] Phase 3a: Add gateway method registry with versioned handlers + methods.list
+- [x] Phase 3b: Discover plugin gateway methods from manifests and support reload
+- [x] Phase 3c: Add basic compat tests for method registry + reload
 - [ ] Phase 4: Advanced memory pipeline parity (watchers, batch embeddings queue/retry, cache/eviction, local backend).
 - [ ] Phase 5: mac app functional parity (timeline, approvals UI, plugin management UI, connectors, attachments, config UI).
 - [ ] Phase 6: Web/admin parity (dashboards + admin workflows where implemented).

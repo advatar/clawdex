@@ -13,6 +13,7 @@ use clawdex::cron;
 use clawdex::daemon::deliver_heartbeat_response_for_test;
 use clawdex::gateway;
 use clawdex::memory;
+use clawdex::task_db::{PluginRecord, TaskStore};
 use clawdex::util::{now_ms, read_json_lines};
 
 fn temp_paths() -> Result<(PathBuf, clawdex::config::ClawdPaths)> {
@@ -321,5 +322,106 @@ fn gateway_ws_send_enqueues_outbox() -> Result<()> {
     let entry = &entries[0];
     assert_eq!(entry["channel"].as_str().unwrap_or(""), "slack");
     assert_eq!(entry["to"].as_str().unwrap_or(""), "U123");
+    Ok(())
+}
+
+#[test]
+fn gateway_ws_methods_list_and_reload() -> Result<()> {
+    let (base, paths) = temp_paths()?;
+    let plugin_dir = base.join("plugin-methods");
+    fs::create_dir_all(&plugin_dir)?;
+
+    let store = TaskStore::open(&paths)?;
+    let plugin = PluginRecord {
+        id: "plugin-methods".to_string(),
+        name: "Plugin Methods".to_string(),
+        version: None,
+        description: None,
+        source: None,
+        path: plugin_dir.to_string_lossy().to_string(),
+        enabled: true,
+        installed_at_ms: now_ms(),
+        updated_at_ms: now_ms(),
+    };
+    store.upsert_plugin(&plugin)?;
+
+    let manifest_a = json!({
+        "id": "plugin-methods",
+        "gatewayMethods": ["plugin.foo"],
+        "configSchema": {}
+    });
+    fs::write(
+        plugin_dir.join("openclaw.plugin.json"),
+        serde_json::to_vec_pretty(&manifest_a)?,
+    )?;
+
+    let ws_url = start_gateway_ws(&paths)?;
+    let (mut socket, _) = connect(ws_url.as_str())?;
+
+    let hello = json!({
+        "type": "req",
+        "id": "1",
+        "method": "hello",
+        "params": {}
+    });
+    socket.send(Message::Text(hello.to_string()))?;
+    let msg = socket.read()?;
+    let resp: serde_json::Value = serde_json::from_str(msg.to_text()?)?;
+    assert_eq!(resp["ok"].as_bool(), Some(true));
+    let methods = resp["payload"]["features"]["methods"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(methods.iter().any(|m| m.as_str() == Some("plugin.foo")));
+
+    let list = json!({
+        "type": "req",
+        "id": "2",
+        "method": "methods.list",
+        "params": {}
+    });
+    socket.send(Message::Text(list.to_string()))?;
+    let msg = socket.read()?;
+    let resp: serde_json::Value = serde_json::from_str(msg.to_text()?)?;
+    assert_eq!(resp["ok"].as_bool(), Some(true));
+    let listed = resp["payload"]["methods"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(listed.iter().any(|entry| {
+        entry.get("name").and_then(|v| v.as_str()) == Some("plugin.foo")
+            && entry.get("version").and_then(|v| v.as_u64()) == Some(1)
+    }));
+
+    let manifest_b = json!({
+        "id": "plugin-methods",
+        "gatewayMethods": ["plugin.bar"],
+        "configSchema": {}
+    });
+    fs::write(
+        plugin_dir.join("openclaw.plugin.json"),
+        serde_json::to_vec_pretty(&manifest_b)?,
+    )?;
+
+    let reload = json!({
+        "type": "req",
+        "id": "3",
+        "method": "gateway.reload",
+        "params": {}
+    });
+    socket.send(Message::Text(reload.to_string()))?;
+    let msg = socket.read()?;
+    let resp: serde_json::Value = serde_json::from_str(msg.to_text()?)?;
+    assert_eq!(resp["ok"].as_bool(), Some(true));
+    assert_eq!(resp["payload"]["reloaded"].as_bool(), Some(true));
+    let listed = resp["payload"]["methods"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(listed
+        .iter()
+        .any(|entry| entry.get("name").and_then(|v| v.as_str()) == Some("plugin.bar")));
+
+    let _ = fs::remove_dir_all(base);
     Ok(())
 }
