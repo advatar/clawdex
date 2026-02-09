@@ -86,6 +86,11 @@ Parity Execution (from ROADMAP.md):
 - [x] Phase 3b: Discover plugin gateway methods from manifests and support reload
 - [x] Phase 3c: Add basic compat tests for method registry + reload
 - [ ] Phase 4: Advanced memory pipeline parity (watchers, batch embeddings queue/retry, cache/eviction, local backend).
+- [x] Phase 4a: Use stored embeddings vectors for hybrid scoring (no per-query chunk re-embedding)
+- [x] Phase 4b: Backfill embeddings for unchanged files when embeddings config becomes available
+- [ ] Phase 4c: Add optional memory sync/watch loop (configurable) to keep index warm
+- [ ] Phase 4d: Batch embeddings queue with retries/backoff + persistent failure metadata
+- [ ] Phase 4e: Local embeddings backend option (offline / no network)
 - [ ] Phase 5: mac app functional parity (timeline, approvals UI, plugin management UI, connectors, attachments, config UI).
 - [ ] Phase 6: Web/admin parity (dashboards + admin workflows where implemented).
 

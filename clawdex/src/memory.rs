@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -237,23 +237,10 @@ pub fn memory_search(paths: &ClawdPaths, args: &Value) -> Result<Value> {
         if !rows.is_empty() {
             let query_vec = provider.embed(&[query.clone()])?;
             if let Some(query_embedding) = query_vec.first() {
-                let mut embed_scores: HashMap<String, f64> = HashMap::new();
-                for chunk in rows.chunks(provider.batch_size) {
-                    let mut inputs = Vec::new();
-                    for row in chunk {
-                        inputs.push(row.text.clone());
-                    }
-                    let vectors = provider.embed(&inputs)?;
-                    for (idx, vec) in vectors.into_iter().enumerate() {
-                        let row = &chunk[idx];
-                        let score = cosine_similarity(query_embedding, &vec);
-                        embed_scores.insert(row_key(row), score);
-                    }
-                }
-
                 for row in &mut rows {
-                    if let Some(score) = embed_scores.get(&row_key(row)) {
-                        row.embed_score = Some(*score);
+                    if let Some(vector) = load_row_embedding(&conn, row)? {
+                        let score = cosine_similarity(query_embedding, &vector);
+                        row.embed_score = Some(score);
                         row.final_score = 0.6 * row.fts_score + 0.4 * score;
                     }
                 }
@@ -399,6 +386,16 @@ fn index_file(
 
     if let Some((mtime, size)) = existing {
         if mtime == entry.mtime && size == entry.size {
+            if let Some(provider) = provider {
+                let embedded: i64 = conn.query_row(
+                    "SELECT COUNT(1) FROM memory_embeddings WHERE path = ? AND source = ?",
+                    params![&rel_path, &source],
+                    |row| row.get(0),
+                )?;
+                if embedded <= 0 {
+                    backfill_embeddings(conn, &rel_path, &source, provider)?;
+                }
+            }
             return Ok(());
         }
     }
@@ -459,6 +456,65 @@ fn index_file(
         }
     }
 
+    Ok(())
+}
+
+fn load_row_embedding(conn: &Connection, row: &SearchRow) -> Result<Option<Vec<f32>>> {
+    let vector_json: Option<String> = conn
+        .query_row(
+            "SELECT vector FROM memory_embeddings WHERE path = ? AND start_line = ? AND end_line = ? AND source = ?",
+            params![&row.path, row.start_line, row.end_line, &row.source],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(vector_json) = vector_json else {
+        return Ok(None);
+    };
+    let parsed = serde_json::from_str::<Vec<f32>>(&vector_json).ok();
+    Ok(parsed)
+}
+
+fn backfill_embeddings(
+    conn: &mut Connection,
+    rel_path: &str,
+    source: &str,
+    provider: &EmbeddingProvider,
+) -> Result<()> {
+    let chunks: Vec<(i64, i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT start_line, end_line, text FROM memory_fts WHERE path = ? AND source = ? ORDER BY start_line ASC",
+        )?;
+        let mut rows = stmt.query(params![rel_path, source])?;
+        let mut chunks: Vec<(i64, i64, String)> = Vec::new();
+        while let Some(row) = rows.next()? {
+            let start_line: i64 = row.get(0)?;
+            let end_line: i64 = row.get(1)?;
+            let text: String = row.get(2)?;
+            if text.trim().is_empty() {
+                continue;
+            }
+            chunks.push((start_line, end_line, text));
+        }
+        chunks
+    };
+
+    for batch in chunks.chunks(provider.batch_size) {
+        let inputs = batch
+            .iter()
+            .map(|chunk| chunk.2.clone())
+            .collect::<Vec<_>>();
+        let vectors = provider.embed(&inputs)?;
+        let tx = conn.transaction()?;
+        for (idx, vector) in vectors.into_iter().enumerate() {
+            let (start_line, end_line, _) = &batch[idx];
+            let vec_json = serde_json::to_string(&vector)?;
+            tx.execute(
+                "INSERT OR REPLACE INTO memory_embeddings(path, start_line, end_line, source, vector) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![rel_path, start_line, end_line, source, vec_json],
+            )?;
+        }
+        tx.commit()?;
+    }
     Ok(())
 }
 
@@ -853,13 +909,6 @@ fn parse_agent_session_key(value: &str) -> Option<String> {
     } else {
         Some(rest)
     }
-}
-
-fn row_key(row: &SearchRow) -> String {
-    format!(
-        "{}:{}:{}:{}",
-        row.path, row.start_line, row.end_line, row.source
-    )
 }
 
 fn resolve_sources(include_sessions: bool) -> Vec<String> {
