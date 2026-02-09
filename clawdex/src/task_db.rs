@@ -283,6 +283,9 @@ impl TaskStore {
             params![now, task_id],
         )?;
 
+        let plugins = self.list_plugins(true).unwrap_or_default();
+        audit::append_plugins_snapshot(&self.audit_dir, &id, &plugins)?;
+
         Ok(TaskRun {
             id,
             task_id: task_id.to_string(),
@@ -329,6 +332,11 @@ impl TaskStore {
         };
         self.append_event_log(run_id, &event)?;
         audit::append_event(&self.audit_dir, &event)?;
+        if kind == "item_completed" {
+            if let Some((tool, arguments)) = extract_mcp_tool_call(payload) {
+                audit::append_tool_call(&self.audit_dir, run_id, &tool, &arguments)?;
+            }
+        }
         Ok(event)
     }
 
@@ -568,4 +576,22 @@ impl TaskStore {
         let value = serde_json::to_value(event).unwrap_or(Value::Null);
         append_json_line(&path, &value)
     }
+}
+
+fn extract_mcp_tool_call(payload: &Value) -> Option<(String, Value)> {
+    let method = payload.get("method").and_then(|v| v.as_str())?;
+    if method != "item/completed" {
+        return None;
+    }
+    let params = payload.get("params")?.as_object()?;
+    let item = params.get("item")?.as_object()?;
+    if item.get("type").and_then(|v| v.as_str()) != Some("mcpToolCall") {
+        return None;
+    }
+    let tool = item.get("tool").and_then(|v| v.as_str())?.trim();
+    if tool.is_empty() {
+        return None;
+    }
+    let arguments = item.get("arguments").cloned().unwrap_or(Value::Null);
+    Some((tool.to_string(), arguments))
 }

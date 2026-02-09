@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::ClawdPaths;
-use crate::task_db::TaskEvent;
+use crate::task_db::{PluginRecord, TaskEvent};
 use crate::util::{append_json_line, now_ms, read_json_lines};
 
 const AUDIT_DIR: &str = "audit";
@@ -76,6 +76,15 @@ pub fn append_tool_call(
     });
     let intent = action_intent_for_tool_call(tool, arguments);
     append_entry(audit_dir, run_id, "tool_call", &payload, Some(intent))
+}
+
+pub fn append_plugins_snapshot(
+    audit_dir: &Path,
+    run_id: &str,
+    plugins: &[PluginRecord],
+) -> Result<()> {
+    let payload = json!({ "plugins": plugins });
+    append_entry(audit_dir, run_id, "plugins_snapshot", &payload, None)
 }
 
 pub fn read_audit_log(audit_dir: &Path, run_id: &str, limit: Option<usize>) -> Result<Vec<Value>> {
@@ -151,8 +160,7 @@ fn action_intent_for_event(event_kind: &str, payload: &Value) -> Option<Value> {
     if event_kind == "mcp_tool_call_progress" {
         let message = payload
             .get("payload")
-            .and_then(|p| p.get("message"))
-            .and_then(|v| v.as_str())
+            .and_then(|p| extract_message(p))
             .unwrap_or("");
         if !message.trim().is_empty() {
             let assessment = RiskAssessment {
@@ -170,6 +178,16 @@ fn action_intent_for_event(event_kind: &str, payload: &Value) -> Option<Value> {
         }
     }
     None
+}
+
+fn extract_message(payload: &Value) -> Option<&str> {
+    if let Some(message) = payload.get("message").and_then(|v| v.as_str()) {
+        return Some(message);
+    }
+    payload
+        .get("params")
+        .and_then(|params| params.get("message"))
+        .and_then(|v| v.as_str())
 }
 
 fn action_intent_for_tool_call(tool: &str, _args: &Value) -> Value {

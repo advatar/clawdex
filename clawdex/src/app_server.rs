@@ -479,6 +479,7 @@ impl CodexClient {
 }
 
 fn notification_kind(notification: &ServerNotification) -> &'static str {
+    #[allow(unreachable_patterns)]
     match notification {
         ServerNotification::Error(_) => "error",
         ServerNotification::ThreadStarted(_) => "thread_started",

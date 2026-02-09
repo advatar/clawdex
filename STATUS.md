@@ -9,9 +9,9 @@ Upstream Sync (Submodules):
 - [x] Add artifact service tools (xlsx/pptx/docx/pdf) with schema validation + hashing
 - [x] Record artifact events and list outputs at end of task runs
 - [x] Add builder skills plugin for spreadsheet/slide/report outputs
-- [ ] Add tamper-evident audit log with hash chain for task events/approvals/artifacts
-- [ ] Add ActionIntent + risk scoring + checkpoint metadata for approvals/tool calls
-- [ ] Add audit export command (events/approvals/artifacts/plugins + audit log)
+- [x] Add tamper-evident audit log with hash chain for task events/approvals/artifacts/plugins
+- [x] Add ActionIntent + risk scoring + checkpoint metadata for approvals/tool calls
+- [x] Add audit export command (events/approvals/artifacts/plugins + audit log)
 
 - [x] Validate MCP tool arguments against OpenClaw JSON schemas
 - [x] Expose OpenClaw JSON Schemas in MCP tool definitions

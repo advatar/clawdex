@@ -166,6 +166,17 @@ enum TasksCommand {
         #[arg(long)]
         workspace: Option<PathBuf>,
     },
+    /// Export an audit packet for a task run (events/approvals/artifacts/plugins + audit log)
+    AuditExport {
+        #[arg(long = "run-id")]
+        run_id: String,
+        #[arg(long = "output")]
+        output: Option<PathBuf>,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -434,6 +445,16 @@ fn main() -> Result<()> {
                 state_dir,
                 workspace,
             } => tasks::run_task_server(&bind, state_dir, workspace),
+            TasksCommand::AuditExport {
+                run_id,
+                output,
+                state_dir,
+                workspace,
+            } => {
+                let value = tasks::export_audit_packet_command(&run_id, output, state_dir, workspace)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
         },
         Commands::Plugins { command } => match command {
             PluginsCommand::List {
