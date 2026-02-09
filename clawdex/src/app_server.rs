@@ -482,6 +482,7 @@ fn notification_kind(notification: &ServerNotification) -> &'static str {
     match notification {
         ServerNotification::Error(_) => "error",
         ServerNotification::ThreadStarted(_) => "thread_started",
+        ServerNotification::AppListUpdated(_) => "app_list_updated",
         ServerNotification::ThreadNameUpdated(_) => "thread_name_updated",
         ServerNotification::ThreadTokenUsageUpdated(_) => "thread_token_usage_updated",
         ServerNotification::TurnStarted(_) => "turn_started",
@@ -511,6 +512,7 @@ fn notification_kind(notification: &ServerNotification) -> &'static str {
         ServerNotification::AuthStatusChange(_) => "auth_status_change",
         ServerNotification::LoginChatGptComplete(_) => "login_chatgpt_complete",
         ServerNotification::SessionConfigured(_) => "session_configured",
+        _ => "unknown",
     }
 }
 
