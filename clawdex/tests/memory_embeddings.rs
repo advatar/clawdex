@@ -36,6 +36,10 @@ impl EmbeddingsServer {
         Self::start_with_handler(handle_embeddings_request_failing)
     }
 
+    fn start_rejecting_empty() -> Result<Self> {
+        Self::start_with_handler(handle_embeddings_request_reject_empty)
+    }
+
     fn start_with_handler(handler: fn(tiny_http::Request) -> Result<()>) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
@@ -108,6 +112,62 @@ fn handle_embeddings_request(mut request: tiny_http::Request) -> Result<()> {
         }
     } else if let Some(text) = parsed.get("input").and_then(|v| v.as_str()) {
         inputs.push(text.to_string());
+    }
+
+    let data = inputs
+        .iter()
+        .enumerate()
+        .map(|(idx, text)| {
+            let lower = text.to_lowercase();
+            let embedding = if lower.contains("needle") {
+                vec![1.0_f32, 0.0_f32, 0.0_f32]
+            } else {
+                vec![0.0_f32, 1.0_f32, 0.0_f32]
+            };
+            json!({ "index": idx, "embedding": embedding })
+        })
+        .collect::<Vec<_>>();
+
+    let response = json!({ "data": data });
+    let bytes = serde_json::to_vec(&response)?;
+    let header = tiny_http::Header::from_bytes(
+        &b"Content-Type"[..],
+        &b"application/json"[..],
+    )
+    .expect("content-type header");
+    let _ = request.respond(Response::from_data(bytes).with_header(header));
+    Ok(())
+}
+
+fn handle_embeddings_request_reject_empty(mut request: tiny_http::Request) -> Result<()> {
+    if request.method() != &Method::Post {
+        let _ = request.respond(Response::empty(StatusCode(405)));
+        return Ok(());
+    }
+    let url = request.url().to_string();
+    if url != "/v1/embeddings" && url != "/embeddings" {
+        let _ = request.respond(Response::empty(StatusCode(404)));
+        return Ok(());
+    }
+
+    let mut body = String::new();
+    request.as_reader().read_to_string(&mut body)?;
+    let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+
+    let mut inputs = Vec::new();
+    if let Some(array) = parsed.get("input").and_then(|v| v.as_array()) {
+        for item in array {
+            if let Some(text) = item.as_str() {
+                inputs.push(text.to_string());
+            }
+        }
+    } else if let Some(text) = parsed.get("input").and_then(|v| v.as_str()) {
+        inputs.push(text.to_string());
+    }
+
+    if inputs.iter().any(|text| text.trim().is_empty()) {
+        let _ = request.respond(Response::from_string("empty input").with_status_code(StatusCode(400)));
+        return Ok(());
     }
 
     let data = inputs
@@ -308,16 +368,60 @@ fn memory_search_falls_back_when_embeddings_fail_and_uses_backoff() -> Result<()
         .get("embeddingScore")
         .and_then(|v| v.as_f64())
         .is_none());
-    assert_eq!(server.count(), 2);
+    let count_after_first = server.count();
+    assert!(count_after_first > 0);
 
     let res2 = memory::memory_search(&paths, &json!({ "query": "needle" }))?;
     let results2 = res2.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     assert!(!results2.is_empty());
 
     // Second search should not retry embeddings immediately (query + file chunks are in backoff).
-    assert_eq!(server.count(), 2);
+    assert_eq!(server.count(), count_after_first);
 
     std::env::remove_var("CLAWDEX_TEST_API_KEY_3");
+    let _ = fs::remove_dir_all(base);
+    Ok(())
+}
+
+#[test]
+fn memory_index_skips_empty_chunks_for_embeddings() -> Result<()> {
+    let _guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let server = EmbeddingsServer::start_rejecting_empty()?;
+    std::env::set_var("CLAWDEX_TEST_API_KEY_4", "ok");
+
+    let (base, paths) = temp_paths()?;
+    let memory_dir = paths.workspace_dir.join("memory");
+    fs::create_dir_all(&memory_dir)?;
+    fs::write(memory_dir.join("2026-02-01.md"), "\n\n\n")?;
+
+    write_config(
+        &paths,
+        &json!({
+            "memory": {
+                "enabled": true,
+                "session_memory": false,
+                "embeddings": {
+                    "enabled": true,
+                    "provider": "openai",
+                    "model": "test",
+                    "api_base": server.api_base(),
+                    "api_key_env": "CLAWDEX_TEST_API_KEY_4",
+                    "batch_size": 32
+                }
+            }
+        }),
+    )?;
+
+    let res = memory::memory_search(&paths, &json!({ "query": "needle" }))?;
+    let results = res.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    assert!(results.is_empty());
+
+    // Indexing should skip whitespace-only chunks (no embedding requests should be made).
+    assert_eq!(server.count(), 0);
+
+    std::env::remove_var("CLAWDEX_TEST_API_KEY_4");
     let _ = fs::remove_dir_all(base);
     Ok(())
 }

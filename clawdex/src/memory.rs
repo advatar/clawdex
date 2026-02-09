@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
@@ -584,18 +584,27 @@ fn index_embeddings_for_chunks(
     provider: &EmbeddingProvider,
 ) -> Result<()> {
     for batch in chunks.chunks(provider.batch_size) {
-        let inputs = batch.iter().map(|chunk| chunk.text.clone()).collect::<Vec<_>>();
+        let filtered = batch
+            .iter()
+            .filter(|chunk| !chunk.text.trim().is_empty())
+            .collect::<Vec<_>>();
+        if filtered.is_empty() {
+            continue;
+        }
+        let inputs = filtered
+            .iter()
+            .map(|chunk| chunk.text.clone())
+            .collect::<Vec<_>>();
         let vectors = provider.embed(&inputs)?;
-        if vectors.len() != inputs.len() {
+        if vectors.len() != filtered.len() {
             anyhow::bail!(
                 "embeddings provider returned {} vectors for {} inputs",
                 vectors.len(),
-                inputs.len()
+                filtered.len()
             );
         }
         let tx = conn.transaction()?;
-        for (idx, vector) in vectors.into_iter().enumerate() {
-            let chunk = &batch[idx];
+        for (chunk, vector) in filtered.into_iter().zip(vectors.into_iter()) {
             let vec_json = serde_json::to_string(&vector)?;
             tx.execute(
                 "INSERT INTO memory_embeddings(path, start_line, end_line, source, vector) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1243,6 +1252,9 @@ fn default_api_key_env(provider: &str) -> String {
 
 impl EmbeddingProvider {
     fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
         let url = if self.api_base.trim_end_matches('/').ends_with("/v1") {
             format!("{}/embeddings", self.api_base.trim_end_matches('/'))
         } else {
@@ -1252,22 +1264,55 @@ impl EmbeddingProvider {
             "model": self.model,
             "input": inputs,
         });
-        let resp = self
-            .client
-            .post(url)
-            .bearer_auth(&self.api_key)
-            .json(&payload)
-            .send()
-            .context("embeddings request")?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().unwrap_or_default();
-            anyhow::bail!("embeddings request failed ({status}): {body}");
+
+        let retry_delay = |attempt: usize| {
+            let exp = attempt.saturating_sub(1).min(10) as u32;
+            let multiplier = 1_u64.checked_shl(exp).unwrap_or(u64::MAX);
+            let delay_ms = 200_u64.saturating_mul(multiplier).min(2_000);
+            Duration::from_millis(delay_ms)
+        };
+
+        let max_attempts = 3usize;
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 1..=max_attempts {
+            let resp = self
+                .client
+                .post(&url)
+                .bearer_auth(&self.api_key)
+                .json(&payload)
+                .send()
+                .context("embeddings request");
+            match resp {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        let data: EmbeddingResponse =
+                            resp.json().context("parse embeddings response")?;
+                        let mut out = data.data;
+                        out.sort_by_key(|d| d.index);
+                        return Ok(out.into_iter().map(|d| d.embedding).collect());
+                    }
+                    let status = resp.status();
+                    let body = resp.text().unwrap_or_default();
+                    let err = anyhow::anyhow!("embeddings request failed ({status}): {body}");
+                    last_err = Some(err);
+                    let retryable = status.as_u16() == 429 || status.is_server_error();
+                    if retryable && attempt < max_attempts {
+                        std::thread::sleep(retry_delay(attempt));
+                        continue;
+                    }
+                    break;
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    if attempt < max_attempts {
+                        std::thread::sleep(retry_delay(attempt));
+                        continue;
+                    }
+                    break;
+                }
+            }
         }
-        let data: EmbeddingResponse = resp.json().context("parse embeddings response")?;
-        let mut out = data.data;
-        out.sort_by_key(|d| d.index);
-        Ok(out.into_iter().map(|d| d.embedding).collect())
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("embeddings request failed")))
     }
 }
 
