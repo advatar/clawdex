@@ -5,11 +5,11 @@ meta:
   upstreams:
     codex:
       repo: "https://github.com/openai/codex"
-      commit: "74ecd6e3b23f2b43fd5e455a4c3de4e545557d14"
+      commit: "cca13fb03a00d5b109ae396b2256c32a786339eb"
       integration_mode: "app_server"
     openclaw:
       repo: "https://github.com/openclaw/openclaw"
-      commit: "65dae9a088976949650c60ce759960733dcc0485"
+      commit: "1cee5135e47228a8b196f546239b538db3bd60fe"
   constraints:
     - "Prefer extension mechanisms (MCP + Skills) over patching Codex core"
     - "Any naming mismatch resolved in clawdex tool aliasing"
