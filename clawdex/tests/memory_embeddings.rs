@@ -29,6 +29,14 @@ struct EmbeddingsServer {
 
 impl EmbeddingsServer {
     fn start() -> Result<Self> {
+        Self::start_with_handler(handle_embeddings_request)
+    }
+
+    fn start_failing() -> Result<Self> {
+        Self::start_with_handler(handle_embeddings_request_failing)
+    }
+
+    fn start_with_handler(handler: fn(tiny_http::Request) -> Result<()>) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
         let server = Server::from_listener(listener, None).expect("tiny_http server");
@@ -46,7 +54,7 @@ impl EmbeddingsServer {
                     Err(_) => break,
                 };
                 requests_thread.fetch_add(1, Ordering::SeqCst);
-                let _ = handle_embeddings_request(req);
+                let _ = handler(req);
             }
         });
 
@@ -124,6 +132,20 @@ fn handle_embeddings_request(mut request: tiny_http::Request) -> Result<()> {
     )
     .expect("content-type header");
     let _ = request.respond(Response::from_data(bytes).with_header(header));
+    Ok(())
+}
+
+fn handle_embeddings_request_failing(request: tiny_http::Request) -> Result<()> {
+    if request.method() != &Method::Post {
+        let _ = request.respond(Response::empty(StatusCode(405)));
+        return Ok(());
+    }
+    let url = request.url().to_string();
+    if url != "/v1/embeddings" && url != "/embeddings" {
+        let _ = request.respond(Response::empty(StatusCode(404)));
+        return Ok(());
+    }
+    let _ = request.respond(Response::from_string("boom").with_status_code(StatusCode(500)));
     Ok(())
 }
 
@@ -244,6 +266,58 @@ fn memory_search_backfills_embeddings_when_enabled_later() -> Result<()> {
     assert_eq!(server.count(), 2);
 
     std::env::remove_var("CLAWDEX_TEST_API_KEY_2");
+    let _ = fs::remove_dir_all(base);
+    Ok(())
+}
+
+#[test]
+fn memory_search_falls_back_when_embeddings_fail_and_uses_backoff() -> Result<()> {
+    let _guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let server = EmbeddingsServer::start_failing()?;
+    std::env::set_var("CLAWDEX_TEST_API_KEY_3", "ok");
+
+    let (base, paths) = temp_paths()?;
+    let memory_dir = paths.workspace_dir.join("memory");
+    fs::create_dir_all(&memory_dir)?;
+    fs::write(memory_dir.join("2026-02-01.md"), "alpha\nneedle here\nbeta\n")?;
+
+    write_config(
+        &paths,
+        &json!({
+            "memory": {
+                "enabled": true,
+                "session_memory": false,
+                "embeddings": {
+                    "enabled": true,
+                    "provider": "openai",
+                    "model": "test",
+                    "api_base": server.api_base(),
+                    "api_key_env": "CLAWDEX_TEST_API_KEY_3",
+                    "batch_size": 32
+                }
+            }
+        }),
+    )?;
+
+    let res1 = memory::memory_search(&paths, &json!({ "query": "needle" }))?;
+    let results1 = res1.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    assert!(!results1.is_empty());
+    assert!(results1[0]
+        .get("embeddingScore")
+        .and_then(|v| v.as_f64())
+        .is_none());
+    assert_eq!(server.count(), 2);
+
+    let res2 = memory::memory_search(&paths, &json!({ "query": "needle" }))?;
+    let results2 = res2.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    assert!(!results2.is_empty());
+
+    // Second search should not retry embeddings immediately (query + file chunks are in backoff).
+    assert_eq!(server.count(), 2);
+
+    std::env::remove_var("CLAWDEX_TEST_API_KEY_3");
     let _ = fs::remove_dir_all(base);
     Ok(())
 }

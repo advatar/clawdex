@@ -13,12 +13,14 @@ use walkdir::WalkDir;
 use crate::config::{
     resolve_embeddings_config, resolve_memory_enabled, ClawdConfig, ClawdPaths, EmbeddingsConfig,
 };
-use crate::util::read_to_string;
+use crate::util::{now_ms, read_to_string};
 
 const DB_FILE: &str = "fts.sqlite";
 const DEFAULT_CHUNK_TOKENS: usize = 400;
 const DEFAULT_CHUNK_OVERLAP: usize = 80;
 const SCHEMA_VERSION: i64 = 2;
+const EMBEDDINGS_QUERY_FAILURE_PATH: &str = "__query__";
+const EMBEDDINGS_QUERY_FAILURE_SOURCE: &str = "__query__";
 
 #[derive(Debug, Clone)]
 struct SearchRow {
@@ -234,15 +236,38 @@ pub fn memory_search(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     }
 
     if let Some(provider) = build_embedding_provider(&embeddings_cfg)? {
-        if !rows.is_empty() {
-            let query_vec = provider.embed(&[query.clone()])?;
-            if let Some(query_embedding) = query_vec.first() {
-                for row in &mut rows {
-                    if let Some(vector) = load_row_embedding(&conn, row)? {
-                        let score = cosine_similarity(query_embedding, &vector);
-                        row.embed_score = Some(score);
-                        row.final_score = 0.6 * row.fts_score + 0.4 * score;
+        if !rows.is_empty()
+            && should_attempt_embeddings(
+                &conn,
+                EMBEDDINGS_QUERY_FAILURE_PATH,
+                EMBEDDINGS_QUERY_FAILURE_SOURCE,
+            )?
+        {
+            match provider.embed(&[query.clone()]) {
+                Ok(query_vec) => {
+                    let _ = clear_embedding_failure(
+                        &conn,
+                        EMBEDDINGS_QUERY_FAILURE_PATH,
+                        EMBEDDINGS_QUERY_FAILURE_SOURCE,
+                    );
+                    if let Some(query_embedding) = query_vec.first() {
+                        for row in &mut rows {
+                            if let Some(vector) = load_row_embedding(&conn, row)? {
+                                let score = cosine_similarity(query_embedding, &vector);
+                                row.embed_score = Some(score);
+                                row.final_score = 0.6 * row.fts_score + 0.4 * score;
+                            }
+                        }
                     }
+                }
+                Err(err) => {
+                    // Best-effort: fall back to FTS-only scoring on embeddings failure.
+                    let _ = record_embedding_failure(
+                        &conn,
+                        EMBEDDINGS_QUERY_FAILURE_PATH,
+                        EMBEDDINGS_QUERY_FAILURE_SOURCE,
+                        &err.to_string(),
+                    );
                 }
             }
         }
@@ -388,6 +413,10 @@ fn ensure_index(
             params![path, source],
         )?;
         conn.execute(
+            "DELETE FROM memory_embedding_failures WHERE path = ? AND source = ?",
+            params![path, source],
+        )?;
+        conn.execute(
             "DELETE FROM memory_files WHERE path = ? AND source = ?",
             params![path, source],
         )?;
@@ -422,7 +451,17 @@ fn index_file(
                     |row| row.get(0),
                 )?;
                 if embedded <= 0 {
-                    backfill_embeddings(conn, &rel_path, &source, provider)?;
+                    if should_attempt_embeddings(conn, &rel_path, &source)? {
+                        match backfill_embeddings(conn, &rel_path, &source, provider) {
+                            Ok(()) => {
+                                let _ = clear_embedding_failure(conn, &rel_path, &source);
+                            }
+                            Err(err) => {
+                                let _ =
+                                    record_embedding_failure(conn, &rel_path, &source, &err.to_string());
+                            }
+                        }
+                    }
                 }
             }
             return Ok(());
@@ -463,25 +502,15 @@ fn index_file(
     tx.commit()?;
 
     if let Some(provider) = provider {
-        for batch in chunks.chunks(provider.batch_size) {
-            let inputs = batch.iter().map(|chunk| chunk.text.clone()).collect::<Vec<_>>();
-            let vectors = provider.embed(&inputs)?;
-            let tx = conn.transaction()?;
-            for (idx, vector) in vectors.into_iter().enumerate() {
-                let chunk = &batch[idx];
-                let vec_json = serde_json::to_string(&vector)?;
-                tx.execute(
-                    "INSERT INTO memory_embeddings(path, start_line, end_line, source, vector) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        &rel_path,
-                        chunk.start_line,
-                        chunk.end_line,
-                        &source,
-                        vec_json
-                    ],
-                )?;
+        if should_attempt_embeddings(conn, &rel_path, &source)? {
+            match index_embeddings_for_chunks(conn, &rel_path, &source, &chunks, provider) {
+                Ok(()) => {
+                    let _ = clear_embedding_failure(conn, &rel_path, &source);
+                }
+                Err(err) => {
+                    let _ = record_embedding_failure(conn, &rel_path, &source, &err.to_string());
+                }
             }
-            tx.commit()?;
         }
     }
 
@@ -547,6 +576,37 @@ fn backfill_embeddings(
     Ok(())
 }
 
+fn index_embeddings_for_chunks(
+    conn: &mut Connection,
+    rel_path: &str,
+    source: &str,
+    chunks: &[MemoryChunk],
+    provider: &EmbeddingProvider,
+) -> Result<()> {
+    for batch in chunks.chunks(provider.batch_size) {
+        let inputs = batch.iter().map(|chunk| chunk.text.clone()).collect::<Vec<_>>();
+        let vectors = provider.embed(&inputs)?;
+        if vectors.len() != inputs.len() {
+            anyhow::bail!(
+                "embeddings provider returned {} vectors for {} inputs",
+                vectors.len(),
+                inputs.len()
+            );
+        }
+        let tx = conn.transaction()?;
+        for (idx, vector) in vectors.into_iter().enumerate() {
+            let chunk = &batch[idx];
+            let vec_json = serde_json::to_string(&vector)?;
+            tx.execute(
+                "INSERT INTO memory_embeddings(path, start_line, end_line, source, vector) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![rel_path, chunk.start_line, chunk.end_line, source, vec_json],
+            )?;
+        }
+        tx.commit()?;
+    }
+    Ok(())
+}
+
 fn open_db(paths: &ClawdPaths) -> Result<Connection> {
     let db_path = paths.memory_dir.join(DB_FILE);
     std::fs::create_dir_all(&paths.memory_dir)
@@ -560,6 +620,7 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
         conn.execute("DROP TABLE IF EXISTS memory_fts", [])?;
         conn.execute("DROP TABLE IF EXISTS memory_embeddings", [])?;
         conn.execute("DROP TABLE IF EXISTS memory_files", [])?;
+        conn.execute("DROP TABLE IF EXISTS memory_embedding_failures", [])?;
         conn.execute(&format!("PRAGMA user_version = {}", SCHEMA_VERSION), [])?;
     }
     conn.execute(
@@ -574,7 +635,68 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS memory_embeddings (path TEXT, start_line INTEGER, end_line INTEGER, source TEXT, vector TEXT, PRIMARY KEY(path, start_line, end_line, source))",
         [],
     )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS memory_embedding_failures (path TEXT, source TEXT, attempts INTEGER, last_attempt_ms INTEGER, next_retry_ms INTEGER, last_error TEXT, PRIMARY KEY(path, source))",
+        [],
+    )?;
     Ok(())
+}
+
+fn should_attempt_embeddings(conn: &Connection, rel_path: &str, source: &str) -> Result<bool> {
+    let next_retry_ms: Option<i64> = conn
+        .query_row(
+            "SELECT next_retry_ms FROM memory_embedding_failures WHERE path = ? AND source = ?",
+            params![rel_path, source],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(next_retry_ms) = next_retry_ms else {
+        return Ok(true);
+    };
+    Ok(now_ms() >= next_retry_ms)
+}
+
+fn clear_embedding_failure(conn: &Connection, rel_path: &str, source: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM memory_embedding_failures WHERE path = ? AND source = ?",
+        params![rel_path, source],
+    )?;
+    Ok(())
+}
+
+fn record_embedding_failure(conn: &Connection, rel_path: &str, source: &str, error: &str) -> Result<()> {
+    let attempts: Option<i64> = conn
+        .query_row(
+            "SELECT attempts FROM memory_embedding_failures WHERE path = ? AND source = ?",
+            params![rel_path, source],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let attempts = attempts.unwrap_or(0).saturating_add(1).max(1);
+    let now = now_ms();
+    let backoff_ms = embedding_backoff_ms(attempts);
+    let next_retry_ms = now.saturating_add(backoff_ms);
+    conn.execute(
+        r#"
+        INSERT INTO memory_embedding_failures(path, source, attempts, last_attempt_ms, next_retry_ms, last_error)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        ON CONFLICT(path, source) DO UPDATE SET
+          attempts = excluded.attempts,
+          last_attempt_ms = excluded.last_attempt_ms,
+          next_retry_ms = excluded.next_retry_ms,
+          last_error = excluded.last_error
+        "#,
+        params![rel_path, source, attempts, now, next_retry_ms, error],
+    )?;
+    Ok(())
+}
+
+fn embedding_backoff_ms(attempts: i64) -> i64 {
+    // Exponential backoff (1m, 2m, 4m, ...), capped at 1h.
+    let exp = attempts.saturating_sub(1).min(10) as u32;
+    let multiplier = 1_i64.checked_shl(exp).unwrap_or(i64::MAX);
+    let delay = 60_000_i64.saturating_mul(multiplier);
+    delay.min(3_600_000)
 }
 
 fn normalize_rel_path(value: &str) -> String {

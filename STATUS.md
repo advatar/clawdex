@@ -5,6 +5,7 @@ Upstream Sync (Submodules):
 - [ ] On each `openclaw/` bump: scan upstream skills/tooling for new/changed tool usage (`openclaw/src/agents/tools`, `openclaw/src/gateway/protocol/schema`), update `compat/` schemas/specs, and add regression tests before porting required behavior into `clawdex/`.
 - [ ] On each `codex/` bump: review upstream Codex changes for new capabilities we should adopt in `clawdex/` (protocol/tool-calling, approvals, ui-bridge/runtime), and capture concrete port tasks here before implementing.
 - [ ] Keep submodule bump commits isolated (one `chore(submodules)` commit), and land parity/feature ports as separate commits with tests.
+  - Latest bump: 2026-02-09 (codex `cca13fb03`, openclaw `1cee5135e`)
 
 - [x] Add artifact service tools (xlsx/pptx/docx/pdf) with schema validation + hashing
 - [x] Record artifact events and list outputs at end of task runs
@@ -89,7 +90,7 @@ Parity Execution (from ROADMAP.md):
 - [x] Phase 4a: Use stored embeddings vectors for hybrid scoring (no per-query chunk re-embedding)
 - [x] Phase 4b: Backfill embeddings for unchanged files when embeddings config becomes available
 - [x] Phase 4c: Add optional memory sync/watch loop (configurable) to keep index warm
-- [ ] Phase 4d: Batch embeddings queue with retries/backoff + persistent failure metadata
+- [x] Phase 4d: Batch embeddings queue with retries/backoff + persistent failure metadata
 - [ ] Phase 4e: Local embeddings backend option (offline / no network)
 - [ ] Phase 5: mac app functional parity (timeline, approvals UI, plugin management UI, connectors, attachments, config UI).
 - [ ] Phase 6: Web/admin parity (dashboards + admin workflows where implemented).
