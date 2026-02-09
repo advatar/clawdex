@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::audit;
 use crate::config::ClawdPaths;
 use crate::util::{append_json_line, now_ms};
 
@@ -54,6 +55,17 @@ pub struct ArtifactRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRecord {
+    pub id: String,
+    pub task_run_id: String,
+    pub ts_ms: i64,
+    pub kind: String,
+    pub request: Value,
+    pub decision: Option<String>,
+    pub decided_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginRecord {
     pub id: String,
     pub name: String,
@@ -69,6 +81,7 @@ pub struct PluginRecord {
 pub struct TaskStore {
     conn: Connection,
     events_dir: PathBuf,
+    audit_dir: PathBuf,
 }
 
 impl TaskStore {
@@ -79,6 +92,9 @@ impl TaskStore {
         let events_dir = paths.state_dir.join(EVENTS_DIR);
         std::fs::create_dir_all(&events_dir)
             .with_context(|| format!("create events dir {}", events_dir.display()))?;
+        let audit_dir = audit::audit_dir(paths);
+        std::fs::create_dir_all(&audit_dir)
+            .with_context(|| format!("create audit dir {}", audit_dir.display()))?;
 
         let conn = Connection::open(db_path).context("open tasks database")?;
         conn.pragma_update(None, "journal_mode", "WAL")
@@ -86,7 +102,11 @@ impl TaskStore {
         conn.pragma_update(None, "synchronous", "NORMAL")
             .ok();
 
-        let store = TaskStore { conn, events_dir };
+        let store = TaskStore {
+            conn,
+            events_dir,
+            audit_dir,
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -308,6 +328,7 @@ impl TaskStore {
             payload: payload.clone(),
         };
         self.append_event_log(run_id, &event)?;
+        audit::append_event(&self.audit_dir, &event)?;
         Ok(event)
     }
 
@@ -325,6 +346,7 @@ impl TaskStore {
             "INSERT INTO approvals(id, task_run_id, ts_ms, kind, request_json, decision, decided_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![id, run_id, now, kind, request_json, decision, decision.map(|_| now)],
         )?;
+        audit::append_approval(&self.audit_dir, run_id, kind, request, decision)?;
         Ok(())
     }
 
@@ -340,6 +362,13 @@ impl TaskStore {
         self.conn.execute(
             "INSERT INTO artifacts(id, task_run_id, path, mime, sha256, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![id, run_id, path, mime, sha256, now],
+        )?;
+        audit::append_artifact(
+            &self.audit_dir,
+            run_id,
+            path,
+            mime.as_deref(),
+            sha256.as_deref(),
         )?;
         Ok(())
     }
@@ -363,6 +392,30 @@ impl TaskStore {
             artifacts.push(row?);
         }
         Ok(artifacts)
+    }
+
+    pub fn list_approvals(&self, run_id: &str) -> Result<Vec<ApprovalRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_run_id, ts_ms, kind, request_json, decision, decided_at_ms FROM approvals WHERE task_run_id = ? ORDER BY ts_ms ASC",
+        )?;
+        let rows = stmt.query_map(params![run_id], |row| {
+            let request_json: String = row.get(4)?;
+            let request: Value = serde_json::from_str(&request_json).unwrap_or(Value::Null);
+            Ok(ApprovalRecord {
+                id: row.get(0)?,
+                task_run_id: row.get(1)?,
+                ts_ms: row.get(2)?,
+                kind: row.get(3)?,
+                request,
+                decision: row.get(5)?,
+                decided_at_ms: row.get(6)?,
+            })
+        })?;
+        let mut approvals = Vec::new();
+        for row in rows {
+            approvals.push(row?);
+        }
+        Ok(approvals)
     }
 
     pub fn list_events(&self, run_id: &str, limit: Option<usize>) -> Result<Vec<TaskEvent>> {

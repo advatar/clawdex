@@ -19,7 +19,9 @@ use crate::app_server::{ApprovalHandler, ApprovalMode, CodexClient, EventSink, U
 use crate::config::{load_config, ClawdConfig, ClawdPaths};
 use crate::runner::workspace_sandbox_policy;
 use crate::approvals::{ApprovalBroker, BrokerApprovalHandler, BrokerUserInputHandler};
+use crate::audit;
 use crate::task_db::{Task, TaskRun, TaskStore};
+use crate::util::{now_ms, write_json_value};
 
 pub struct TaskEngine {
     cfg: ClawdConfig,
@@ -78,6 +80,38 @@ pub fn list_events_command(
     let store = TaskStore::open(&paths)?;
     let events = store.list_events(run_id, limit)?;
     Ok(json!({ "events": events }))
+}
+
+pub fn export_audit_packet_command(
+    run_id: &str,
+    output: Option<PathBuf>,
+    state_dir: Option<PathBuf>,
+    workspace: Option<PathBuf>,
+) -> Result<Value> {
+    let (_cfg, paths) = load_config(state_dir, workspace)?;
+    let store = TaskStore::open(&paths)?;
+    let events = store.list_events(run_id, None)?;
+    let approvals = store.list_approvals(run_id)?;
+    let artifacts = store.list_artifacts(run_id)?;
+    let plugins = store.list_plugins(true)?;
+    let audit_log = audit::read_audit_log(&audit::audit_dir(&paths), run_id, None)?;
+
+    let packet = json!({
+        "runId": run_id,
+        "exportedAtMs": now_ms(),
+        "events": events,
+        "approvals": approvals,
+        "artifacts": artifacts,
+        "plugins": plugins,
+        "auditLog": audit_log,
+        "connectors": [],
+    });
+
+    if let Some(path) = output {
+        write_json_value(&path, &packet)?;
+    }
+
+    Ok(packet)
 }
 
 pub fn run_task_server(bind: &str, state_dir: Option<PathBuf>, workspace: Option<PathBuf>) -> Result<()> {
