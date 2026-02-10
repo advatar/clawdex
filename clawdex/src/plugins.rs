@@ -26,6 +26,7 @@ const INSTALLS_FILE: &str = "installs.json";
 const BUNDLED_CLAUDE_PLUGINS_DIR_ENV: &str = "CLAWDEX_BUNDLED_CLAUDE_PLUGINS_DIR";
 const DISABLE_BUNDLED_CLAUDE_PLUGINS_ENV: &str = "CLAWDEX_DISABLE_DEFAULT_CLAUDE_PLUGINS";
 const BUNDLED_CLAUDE_PLUGINS_SOURCE_LABEL: &str = "bundled-claude";
+const CLAWDEX_PLUGIN_ID_FRONTMATTER_KEY: &str = "clawdex-plugin-id";
 
 pub fn ensure_default_claude_plugins_installed(cfg: &ClawdConfig, paths: &ClawdPaths) -> Result<()> {
     if std::env::var(DISABLE_BUNDLED_CLAUDE_PLUGINS_ENV)
@@ -1704,7 +1705,7 @@ fn sync_plugin_skills(paths: &ClawdPaths, plugin: &PluginRecord, policy: &McpPol
             }
         }
         let skill_md = dest.join("SKILL.md");
-        ensure_namespaced_frontmatter(&skill_md, &namespaced)?;
+        ensure_namespaced_frontmatter(&skill_md, &namespaced, &plugin.id)?;
     }
 
     let mut command_names = HashSet::new();
@@ -1730,7 +1731,7 @@ fn sync_plugin_skills(paths: &ClawdPaths, plugin: &PluginRecord, policy: &McpPol
                 .with_context(|| format!("remove {}", dest.display()))?;
         }
         ensure_dir(&dest)?;
-        let yaml = render_command_frontmatter(&namespaced, template.description.as_deref())?;
+        let yaml = render_command_frontmatter(&plugin.id, &namespaced, template.description.as_deref())?;
         let mut rendered_template = rewrite_claude_code_paths(&template.template);
         if rendered_template.contains("${CLAUDE_PLUGIN_ROOT}") {
             rendered_template = rendered_template.replace("${CLAUDE_PLUGIN_ROOT}", &root.to_string_lossy());
@@ -1745,32 +1746,131 @@ fn sync_plugin_skills(paths: &ClawdPaths, plugin: &PluginRecord, policy: &McpPol
 }
 
 fn remove_plugin_skills(paths: &ClawdPaths, plugin_id: &str) -> Result<()> {
-    let overlay_root = plugin_overlay_root(paths);
+    remove_plugin_skills_in_state_dir(&paths.state_dir, plugin_id)
+}
+
+fn collect_plugin_overlay_skill_names(plugin_root: &Path, plugin_id: &str) -> Result<HashSet<String>> {
+    let component_paths = resolve_plugin_component_paths(plugin_root)?;
+    let skill_sources = collect_skill_sources(&component_paths.skills)?;
+    let command_sources = collect_command_sources(&component_paths.commands)?;
+
+    let mut names = HashSet::new();
+    let mut skill_names = HashSet::new();
+    for skill in skill_sources {
+        let namespaced = format!("{}:{}", plugin_id, skill.name());
+        if skill_names.insert(namespaced.clone()) {
+            names.insert(namespaced);
+        }
+    }
+
+    let mut command_names = HashSet::new();
+    for path in command_sources {
+        let template = load_command_template(&path)?;
+        if template.template.trim().is_empty() {
+            continue;
+        }
+        let namespaced = if template.name.contains(':') {
+            template.name.clone()
+        } else {
+            format!("{}:{}", plugin_id, template.name)
+        };
+        if skill_names.contains(&namespaced) {
+            continue;
+        }
+        if command_names.insert(namespaced.clone()) {
+            names.insert(namespaced);
+        }
+    }
+
+    Ok(names)
+}
+
+fn skill_dir_owned_by_plugin(skill_dir: &Path, plugin_id: &str, plugin_root_str: &str) -> bool {
+    let skill_md = skill_dir.join("SKILL.md");
+    let Ok(contents) = read_to_string(&skill_md) else {
+        return false;
+    };
+
+    let (frontmatter, _body) = split_frontmatter(&contents);
+    if let Some(mapping) = frontmatter {
+        let key = YamlValue::String(CLAWDEX_PLUGIN_ID_FRONTMATTER_KEY.to_string());
+        if let Some(YamlValue::String(existing)) = mapping.get(&key) {
+            if existing.trim() == plugin_id {
+                return true;
+            }
+        }
+    }
+
+    // Back-compat: older generated skills may not have the plugin marker, but may still contain
+    // the install root when rewriting Claude Code `~/.claude/...` references.
+    if !plugin_root_str.is_empty() && contents.contains(plugin_root_str) {
+        return true;
+    }
+
+    false
+}
+
+fn remove_plugin_skills_in_state_dir(state_dir: &Path, plugin_id: &str) -> Result<()> {
+    let overlay_root = state_dir
+        .join("codex")
+        .join("skills")
+        .join("_clawdex_plugins");
+
+    let plugin_root = state_dir.join("plugins").join(plugin_id);
+    let plugin_root_str = plugin_root.to_string_lossy().to_string();
+
+    let expected_names = if plugin_root.exists() {
+        collect_plugin_overlay_skill_names(&plugin_root, plugin_id).unwrap_or_default()
+    } else {
+        HashSet::new()
+    };
+
     if overlay_root.exists() {
         let prefix = format!("{plugin_id}:");
         for entry in fs::read_dir(&overlay_root)
             .with_context(|| format!("read {}", overlay_root.display()))?
         {
             let entry = entry?;
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
-            if !name.starts_with(&prefix) {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+
+            let owned = name.starts_with(&prefix)
+                || expected_names.contains(name)
+                || skill_dir_owned_by_plugin(&path, plugin_id, &plugin_root_str);
+            if !owned {
+                continue;
+            }
+
             fs::remove_dir_all(&path)
                 .with_context(|| format!("remove {}", path.display()))?;
         }
     }
-    let legacy_root = legacy_plugin_skill_root(paths, plugin_id);
+
+    let legacy_root = state_dir
+        .join("codex")
+        .join("skills")
+        .join("clawdex")
+        .join("plugins")
+        .join(plugin_id);
     if legacy_root.exists() {
         fs::remove_dir_all(&legacy_root)
             .with_context(|| format!("remove {}", legacy_root.display()))?;
     }
-    let mcp_path = paths.state_dir.join("mcp").join(format!("{plugin_id}.json"));
+
+    let mcp_path = state_dir.join("mcp").join(format!("{plugin_id}.json"));
     if mcp_path.exists() {
         fs::remove_file(&mcp_path)
             .with_context(|| format!("remove {}", mcp_path.display()))?;
     }
+
     Ok(())
 }
 
@@ -1849,7 +1949,7 @@ fn collect_skills_from_dir(dir: &Path, out: &mut Vec<SkillSource>) -> Result<()>
     Ok(())
 }
 
-fn ensure_namespaced_frontmatter(path: &Path, namespaced: &str) -> Result<()> {
+fn ensure_namespaced_frontmatter(path: &Path, namespaced: &str, plugin_id: &str) -> Result<()> {
     let contents = read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let (frontmatter, body) = split_frontmatter(&contents);
     let mut mapping = frontmatter.unwrap_or_else(Mapping::new);
@@ -1863,6 +1963,17 @@ fn ensure_namespaced_frontmatter(path: &Path, namespaced: &str) -> Result<()> {
     }
     if needs_update {
         mapping.insert(name_key, YamlValue::String(namespaced.to_string()));
+    }
+
+    let plugin_key = YamlValue::String(CLAWDEX_PLUGIN_ID_FRONTMATTER_KEY.to_string());
+    let mut plugin_needs_update = true;
+    if let Some(YamlValue::String(existing)) = mapping.get(&plugin_key) {
+        if existing == plugin_id {
+            plugin_needs_update = false;
+        }
+    }
+    if plugin_needs_update {
+        mapping.insert(plugin_key, YamlValue::String(plugin_id.to_string()));
     }
 
     let yaml = serde_yaml::to_string(&mapping).context("serialize skill frontmatter")?;
@@ -1890,11 +2001,15 @@ fn split_frontmatter(contents: &str) -> (Option<Mapping>, String) {
     (mapping, rest)
 }
 
-fn render_command_frontmatter(name: &str, description: Option<&str>) -> Result<String> {
+fn render_command_frontmatter(plugin_id: &str, name: &str, description: Option<&str>) -> Result<String> {
     let mut mapping = Mapping::new();
     mapping.insert(
         YamlValue::String("name".to_string()),
         YamlValue::String(name.to_string()),
+    );
+    mapping.insert(
+        YamlValue::String(CLAWDEX_PLUGIN_ID_FRONTMATTER_KEY.to_string()),
+        YamlValue::String(plugin_id.to_string()),
     );
     mapping.insert(
         YamlValue::String("disable-model-invocation".to_string()),
@@ -2581,5 +2696,92 @@ Do the thing.
 
         let plugins = list_bundled_claude_plugins(&root).expect("list plugins");
         assert_eq!(plugins, vec![plugin_dir]);
+    }
+
+    #[test]
+    fn remove_plugin_skills_removes_colon_named_command_skill_dirs() {
+        let tmp = TempDir::new("clawdex-test-");
+        let state_dir = tmp.path.as_path();
+
+        let overlay_root = state_dir
+            .join("codex")
+            .join("skills")
+            .join("_clawdex_plugins");
+        ensure_dir(&overlay_root).expect("mkdir overlay");
+
+        let legacy_colon_skill = overlay_root.join("gsd:join-discord");
+        ensure_dir(&legacy_colon_skill).expect("mkdir gsd skill");
+        fs::write(
+            legacy_colon_skill.join("SKILL.md"),
+            "---\nname: gsd:join-discord\ndescription: Join the GSD Discord community\n---\nbody\n",
+        )
+        .expect("write legacy skill");
+
+        let namespaced_skill = overlay_root.join("get-shit-done:some-skill");
+        ensure_dir(&namespaced_skill).expect("mkdir namespaced skill");
+        fs::write(
+            namespaced_skill.join("SKILL.md"),
+            "---\nname: get-shit-done:some-skill\ndescription: Some skill\n---\n",
+        )
+        .expect("write namespaced skill");
+
+        let other_skill = overlay_root.join("other:skill");
+        ensure_dir(&other_skill).expect("mkdir other skill");
+        fs::write(
+            other_skill.join("SKILL.md"),
+            "---\nname: other:skill\ndescription: Other\n---\n",
+        )
+        .expect("write other skill");
+
+        // Mirror the on-disk layout used by clawdex installs (`$STATE_DIR/plugins/<id>/commands/...`).
+        let plugin_root = state_dir.join("plugins").join("get-shit-done");
+        let commands_dir = plugin_root.join("commands").join("gsd");
+        ensure_dir(&commands_dir).expect("mkdir commands");
+        fs::write(
+            commands_dir.join("join-discord.md"),
+            "---\nname: gsd:join-discord\ndescription: Join the GSD Discord community\n---\nHello\n",
+        )
+        .expect("write command template");
+
+        remove_plugin_skills_in_state_dir(state_dir, "get-shit-done").expect("remove skills");
+
+        assert!(
+            !legacy_colon_skill.exists(),
+            "expected legacy colon-named skill dir to be removed"
+        );
+        assert!(
+            !namespaced_skill.exists(),
+            "expected namespaced skill dir to be removed"
+        );
+        assert!(other_skill.exists(), "expected other skill to remain");
+    }
+
+    #[test]
+    fn remove_plugin_skills_removes_marker_owned_skill_dirs_without_plugin_root() {
+        let tmp = TempDir::new("clawdex-test-");
+        let state_dir = tmp.path.as_path();
+
+        let overlay_root = state_dir
+            .join("codex")
+            .join("skills")
+            .join("_clawdex_plugins");
+        ensure_dir(&overlay_root).expect("mkdir overlay");
+
+        let marker_skill = overlay_root.join("gsd:join-discord");
+        ensure_dir(&marker_skill).expect("mkdir skill");
+        fs::write(
+            marker_skill.join("SKILL.md"),
+            format!(
+                "---\nname: gsd:join-discord\n{CLAWDEX_PLUGIN_ID_FRONTMATTER_KEY}: get-shit-done\ndescription: Join the GSD Discord community\n---\n"
+            ),
+        )
+        .expect("write skill");
+
+        remove_plugin_skills_in_state_dir(state_dir, "get-shit-done").expect("remove skills");
+
+        assert!(
+            !marker_skill.exists(),
+            "expected marker-owned skill dir to be removed"
+        );
     }
 }
