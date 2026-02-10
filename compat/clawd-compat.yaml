@@ -1,7 +1,7 @@
 meta:
   spec_version: "0.1.0"
   goal: "Codex runtime with OpenClaw/ClawdBot tool & behavior parity via MCP + sidecar daemon"
-  updated: "2026-02-09"
+  updated: "2026-02-10"
   upstreams:
     codex:
       repo: "https://github.com/openai/codex"
@@ -9,7 +9,7 @@ meta:
       integration_mode: "app_server"
     openclaw:
       repo: "https://github.com/openclaw/openclaw"
-      commit: "a172ff9ed27a7549e57df551080b86462e58835c"
+      commit: "31f616d45b14dd7d92a532867cd37164c39864c3"
   constraints:
     - "Prefer extension mechanisms (MCP + Skills) over patching Codex core"
     - "Any naming mismatch resolved in clawdex tool aliasing"
