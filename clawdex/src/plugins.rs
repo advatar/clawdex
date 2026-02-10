@@ -118,9 +118,9 @@ fn list_bundled_claude_plugins(root: &Path) -> Result<Vec<PathBuf>> {
         {
             continue;
         }
-
-        // Claude plugins are rooted at a directory that contains `.claude-plugin/`.
-        if path.join(".claude-plugin").is_dir() {
+        // Support both "formal" Claude plugins (with `.claude-plugin/plugin.json`) and
+        // lightweight bundles that only ship `commands/` and/or `skills/` (e.g. command packs).
+        if load_plugin_manifest(&path).is_ok() {
             plugins.push(path);
         }
     }
@@ -1469,6 +1469,13 @@ fn install_plugin(
             }
             return Err(err);
         }
+        if let Err(err) = maybe_rewrite_claude_code_install_paths(&root, &plugin_id) {
+            if let Some(backup_path) = backup.take() {
+                let _ = fs::remove_dir_all(&root);
+                let _ = fs::rename(&backup_path, &root);
+            }
+            return Err(err);
+        }
         if let Some(backup_path) = backup.take() {
             let _ = fs::remove_dir_all(&backup_path);
         }
@@ -1551,6 +1558,62 @@ fn install_plugin(
         remove_plugin_skills(paths, &plugin.id)?;
     }
     Ok(plugin)
+}
+
+fn maybe_rewrite_claude_code_install_paths(root: &Path, plugin_id: &str) -> Result<()> {
+    // `get-shit-done` (GSD) is primarily distributed as a Claude Code install under `~/.claude/`.
+    // When we install it as a Clawdex plugin, its internal references should resolve relative to
+    // the plugin install directory instead.
+    if plugin_id != "get-shit-done" {
+        return Ok(());
+    }
+
+    let root_str = root.to_string_lossy().to_string();
+    let replacement_with_slash = format!("{}/", root_str);
+
+    for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if !is_claude_code_rewrite_candidate(path) {
+            continue;
+        }
+
+        let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        let Ok(raw) = String::from_utf8(bytes) else { continue };
+        if !raw.contains("~/.claude") {
+            continue;
+        }
+
+        let updated = raw
+            .replace("~/.claude/", &replacement_with_slash)
+            .replace("~/.claude", &root_str);
+        if updated == raw {
+            continue;
+        }
+        fs::write(path, updated).with_context(|| format!("write {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn is_claude_code_rewrite_candidate(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|s| s.to_str()).unwrap_or(""),
+        "md" | "txt"
+            | "json"
+            | "json5"
+            | "js"
+            | "mjs"
+            | "cjs"
+            | "ts"
+            | "tsx"
+            | "sh"
+            | "yml"
+            | "yaml"
+            | "toml"
+    )
 }
 
 fn plugin_root(paths: &ClawdPaths, plugin_id: &str) -> PathBuf {
@@ -1650,7 +1713,11 @@ fn sync_plugin_skills(paths: &ClawdPaths, plugin: &PluginRecord, policy: &McpPol
         if template.template.trim().is_empty() {
             continue;
         }
-        let namespaced = format!("{}:{}", plugin.id, template.name);
+        let namespaced = if template.name.contains(':') {
+            template.name.clone()
+        } else {
+            format!("{}:{}", plugin.id, template.name)
+        };
         if skill_names.contains(&namespaced) {
             continue;
         }
@@ -1664,7 +1731,11 @@ fn sync_plugin_skills(paths: &ClawdPaths, plugin: &PluginRecord, policy: &McpPol
         }
         ensure_dir(&dest)?;
         let yaml = render_command_frontmatter(&namespaced, template.description.as_deref())?;
-        let contents = format!("---\n{}---\n{}", yaml, template.template);
+        let mut rendered_template = rewrite_claude_code_paths(&template.template);
+        if rendered_template.contains("${CLAUDE_PLUGIN_ROOT}") {
+            rendered_template = rendered_template.replace("${CLAUDE_PLUGIN_ROOT}", &root.to_string_lossy());
+        }
+        let contents = format!("---\n{}---\n{}", yaml, rendered_template);
         fs::write(dest.join("SKILL.md"), contents)
             .with_context(|| format!("write {}", dest.display()))?;
     }
@@ -1902,10 +1973,47 @@ fn load_command_template(path: &Path) -> Result<CommandTemplate> {
             template,
         });
     }
-    let template = read_to_string(path)?;
+    let raw = read_to_string(path)?;
+    let (frontmatter, body) = split_frontmatter(&raw);
+
+    let fm_name = frontmatter.as_ref().and_then(|mapping| {
+        mapping
+            .get(&YamlValue::String("name".to_string()))
+            .and_then(|value| match value {
+                YamlValue::String(s) => Some(s.clone()),
+                _ => None,
+            })
+    });
+    let fm_description = frontmatter.as_ref().and_then(|mapping| {
+        mapping
+            .get(&YamlValue::String("description".to_string()))
+            .and_then(|value| match value {
+                YamlValue::String(s) => Some(s.clone()),
+                _ => None,
+            })
+    });
+
+    let command_name = fm_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| name("command"));
+
+    let description = fm_description
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| extract_description_from_text(if frontmatter.is_some() { &body } else { &raw }));
+
+    // If the file has valid YAML frontmatter, strip it: Codex skills/commands have their own
+    // frontmatter and we don't want nested `---` blocks in the rendered prompt.
+    let template = if frontmatter.is_some() { body } else { raw };
+
     Ok(CommandTemplate {
-        name: name("command"),
-        description: extract_description(path).ok(),
+        name: command_name,
+        description,
         template,
     })
 }
@@ -2094,6 +2202,11 @@ fn render_command_prompt(
         anyhow::bail!("preprocess commands are disabled");
     }
 
+    // Claude Code command packs commonly refer to assets under `~/.claude/...` because that's the
+    // default install root. When we run them as Clawdex plugins, the plugin install directory is
+    // the equivalent root, so rewrite those references onto `${CLAUDE_PLUGIN_ROOT}`.
+    rendered = rewrite_claude_code_paths(&rendered);
+
     if !used_args && !args_str.is_empty() {
         if !rendered.trim().is_empty() {
             rendered.push_str("\n\n");
@@ -2107,6 +2220,12 @@ fn render_command_prompt(
     }
 
     Ok(rendered)
+}
+
+fn rewrite_claude_code_paths(template: &str) -> String {
+    template
+        .replace("~/.claude/", "${CLAUDE_PLUGIN_ROOT}/")
+        .replace("~/.claude", "${CLAUDE_PLUGIN_ROOT}")
 }
 
 fn apply_argument_substitutions(template: &str, args_str: &str) -> (String, bool) {
@@ -2302,16 +2421,15 @@ fn read_command_json(path: &Path) -> Result<CommandSpec> {
     }
 }
 
-fn extract_description(path: &Path) -> Result<String> {
-    let raw = read_to_string(path)?;
+fn extract_description_from_text(raw: &str) -> Option<String> {
     for line in raw.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() || trimmed == "---" {
             continue;
         }
-        return Ok(trimmed.to_string());
+        return Some(trimmed.to_string());
     }
-    Ok("".to_string())
+    None
 }
 
 fn copy_dir(src: &Path, dest: &Path) -> Result<()> {
@@ -2372,4 +2490,96 @@ fn resolve_codex_path(cfg: &crate::config::ClawdConfig, override_path: Option<Pa
         return Ok(PathBuf::from(codex));
     }
     Ok(PathBuf::from("codex"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            let path = create_temp_dir(prefix).expect("create temp dir");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn load_command_template_parses_yaml_frontmatter_and_strips_it() {
+        let tmp = TempDir::new("clawdex-test-");
+        let path = tmp.path.join("new-project.md");
+        fs::write(
+            &path,
+            r#"---
+name: gsd:new-project
+description: Initialize a new project
+allowed-tools:
+  - Read
+---
+<objective>
+Do the thing.
+</objective>
+"#,
+        )
+        .expect("write template");
+
+        let template = load_command_template(&path).expect("load template");
+        assert_eq!(template.name, "gsd:new-project");
+        assert_eq!(template.description.as_deref(), Some("Initialize a new project"));
+        assert!(
+            !template.template.contains("name: gsd:new-project"),
+            "expected command frontmatter to be stripped"
+        );
+        assert!(template.template.contains("<objective>"));
+    }
+
+    #[test]
+    fn rewrite_claude_code_paths_maps_tilde_claude_to_plugin_root_placeholder() {
+        let input = "A @~/.claude/get-shit-done/workflows/new-project.md B ~/.claude/agents/x.md";
+        let output = rewrite_claude_code_paths(input);
+        assert!(output.contains("@${CLAUDE_PLUGIN_ROOT}/get-shit-done/workflows/new-project.md"));
+        assert!(output.contains("${CLAUDE_PLUGIN_ROOT}/agents/x.md"));
+    }
+
+    #[test]
+    fn maybe_rewrite_claude_code_install_paths_rewrites_files_in_tree() {
+        let tmp = TempDir::new("clawdex-test-");
+        let file = tmp.path.join("example.md");
+        fs::write(
+            &file,
+            "node ~/.claude/get-shit-done/bin/gsd-tools.js init new-project\n",
+        )
+        .expect("write");
+
+        maybe_rewrite_claude_code_install_paths(&tmp.path, "get-shit-done").expect("rewrite");
+        let updated = read_to_string(&file).expect("read updated");
+        let expected_prefix = format!("node {}/get-shit-done/bin/gsd-tools.js", tmp.path.display());
+        assert!(
+            updated.contains(&expected_prefix),
+            "expected rewrite to substitute plugin root: {updated}"
+        );
+    }
+
+    #[test]
+    fn list_bundled_claude_plugins_includes_command_only_bundle() {
+        let tmp = TempDir::new("clawdex-test-");
+        let root = tmp.path.join("root");
+        ensure_dir(&root).expect("mkdir root");
+
+        let plugin_dir = root.join("cmd-pack");
+        ensure_dir(plugin_dir.join("commands").as_path()).expect("mkdir commands");
+        fs::write(plugin_dir.join("commands").join("hello.md"), "hello").expect("write command");
+
+        let plugins = list_bundled_claude_plugins(&root).expect("list plugins");
+        assert_eq!(plugins, vec![plugin_dir]);
+    }
 }

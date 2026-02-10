@@ -17,6 +17,7 @@ This README focuses on local development and the `clawdex` CLI surface.
 2. `codex/` is the Codex submodule (used by `clawdex ui-bridge`).
 3. `openclaw/` is the OpenClaw submodule (optional; used as a skills source).
 4. `macClawdex/` is the macOS menu‑bar app starter that embeds `codex` + `clawdex`.
+5. `plugins/` contains bundled Claude-style plugin/content packs that Clawdex can auto-install on first run (including `plugins/get-shit-done/`).
 
 ---
 

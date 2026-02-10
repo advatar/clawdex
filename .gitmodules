@@ -4,3 +4,6 @@
 [submodule "openclaw"]
 	path = openclaw
 	url = git@github.com:advatar/openclaw.git
+[submodule "get-shit-done"]
+	path = plugins/get-shit-done
+	url = git@github.com:advatar/get-shit-done.git

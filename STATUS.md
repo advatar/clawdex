@@ -6,6 +6,7 @@ Upstream Sync (Submodules):
 - [ ] On each `codex/` bump: review upstream Codex changes for new capabilities we should adopt in `clawdex/` (protocol/tool-calling, approvals, ui-bridge/runtime), and capture concrete port tasks here before implementing.
 - [ ] Keep submodule bump commits isolated (one `chore(submodules)` commit), and land parity/feature ports as separate commits with tests.
   - Latest bump: 2026-02-09 (codex `ffd4bd345`, openclaw `a172ff9ed`)
+  - [x] Add `plugins/get-shit-done/` submodule support to the bundled-plugin flow (auto-install + Codex skills sync), including parsing Claude Code-style command frontmatter and rewriting `~/.claude/...` paths to `${CLAUDE_PLUGIN_ROOT}/...` for portability.
 
 - [x] Add artifact service tools (xlsx/pptx/docx/pdf) with schema validation + hashing
 - [x] Record artifact events and list outputs at end of task runs
