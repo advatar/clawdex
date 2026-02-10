@@ -20,3 +20,4 @@ pub mod tasks;
 pub mod ui_bridge;
 pub mod util;
 pub mod daemon_server;
+pub mod text_sanitize;

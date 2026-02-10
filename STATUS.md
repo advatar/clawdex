@@ -32,6 +32,7 @@ Upstream Sync (Submodules):
 - [x] Update docs for gateway/daemon/memory/approval options + prebuilt binaries flow
 - [x] Track `macClawdex/Resources/prebuilt` binaries in Git LFS
 - [x] Implement non-stub channel tools (`channels.list`, `channels.resolve_target`) and complete `message.send` options
+- [x] Strip reasoning tags (`<think>...</think>`, `<final>...</final>`) from outbound `message.send` text
 - [x] Implement WORK.md Phase 0-2 foundations (task DB + task engine + streaming events)
 - [x] Implement interactive approvals + tool user input broker for task runs
 - [x] Add task CLI (`tasks.*`) and daemon IPC stub for future UI

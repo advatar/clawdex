@@ -15,6 +15,7 @@ use crate::daemon_client;
 use crate::gateway;
 use crate::heartbeat;
 use crate::memory;
+use crate::text_sanitize::strip_reasoning_tags_from_text;
 
 const CRON_ADD_REQUEST_SCHEMA: &str =
     include_str!("../../compat/tool-schemas/cron.add.request.schema.json");
@@ -423,7 +424,7 @@ fn handle_tool_call(
         .get("name")
         .and_then(|v| v.as_str())
         .ok_or_else(|| JsonRpcError::invalid_params("tools/call requires name"))?;
-    let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let mut arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
     if !arguments.is_object() {
         return Err(JsonRpcError::invalid_params("arguments must be an object"));
     }
@@ -510,6 +511,13 @@ fn handle_tool_call(
                 .map_err(|err| JsonRpcError::internal(err.to_string()))?
         }
         "message.send" => {
+            if let Some(map) = arguments.as_object_mut() {
+                for field in ["text", "message"] {
+                    if let Some(Value::String(raw)) = map.get_mut(field) {
+                        *raw = strip_reasoning_tags_from_text(raw);
+                    }
+                }
+            }
             let text = arguments
                 .get("text")
                 .or_else(|| arguments.get("message"))

@@ -40,6 +40,7 @@ Legend:
 - [x] `channels.list` disabled flag parity (OpenClaw returns `disabled: true` when gateway not configured).
 - [x] Resolve target parity for `channel: "last"` semantics.
 - [x] Gateway protocol parity (WebSocket framing / server-methods behavior).
+- [x] Strip reasoning tags (`<think>...</think>`, `<final>...</final>`) from outbound `message.send` text fields.
 
 ## MCP Tool Shapes
 - [x] Tool request schemas aligned and validated against OpenClaw JSON schemas.

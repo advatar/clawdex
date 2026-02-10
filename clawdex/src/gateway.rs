@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use crate::config::{ClawdPaths, GatewayConfig};
 use crate::task_db::TaskStore;
+use crate::text_sanitize::strip_reasoning_tags_from_text;
 use crate::util::{append_json_line, now_ms, read_json_lines, read_json_value, write_json_value};
 
 const GATEWAY_DIR: &str = "gateway";
@@ -1713,11 +1714,15 @@ pub fn send_message(paths: &ClawdPaths, args: &Value) -> Result<Value> {
 }
 
 fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> Result<Value> {
-    let text = args
+    let raw_text = args
         .get("text")
         .or_else(|| args.get("message"))
         .and_then(|v| v.as_str())
         .context("message.send requires text or message")?;
+    let text = strip_reasoning_tags_from_text(raw_text);
+    if text.trim().is_empty() {
+        return Err(anyhow::anyhow!("message.send requires non-empty text"));
+    }
 
     let best_effort = args
         .get("bestEffort")
@@ -1869,6 +1874,7 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
 
     let entry_account_id = account_id.clone().or(route.account_id.clone());
     let created_at_ms = now_ms();
+    let message_text = text.clone();
     let mut entry = json!({
         "id": Uuid::new_v4().to_string(),
         "sessionKey": session_key,
@@ -1876,7 +1882,7 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
         "to": route.to,
         "accountId": entry_account_id,
         "text": text,
-        "message": text,
+        "message": message_text,
         "idempotencyKey": idempotency_key,
         "createdAtMs": created_at_ms,
     });
