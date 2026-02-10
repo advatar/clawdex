@@ -7,6 +7,8 @@ struct PluginsView: View {
     @State private var selectedPluginId: String?
     @State private var npmSpec: String = ""
     @State private var linkInstall: Bool = false
+    @State private var removePluginId: String?
+    @State private var showRemoveConfirm: Bool = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -16,6 +18,23 @@ struct PluginsView: View {
         }
         .onAppear {
             runtime.refreshPluginsSnapshot()
+        }
+        .alert("Remove plugin?", isPresented: $showRemoveConfirm) {
+            Button("Remove", role: .destructive) {
+                guard let removePluginId else { return }
+                runtime.removePlugin(id: removePluginId, keepFiles: false)
+                self.removePluginId = nil
+            }
+            Button("Cancel", role: .cancel) {
+                removePluginId = nil
+            }
+        } message: {
+            if let removePluginId,
+               let plugin = runtime.plugins.first(where: { $0.id == removePluginId }) {
+                Text("This will remove \"\(plugin.name)\" from Clawdex.")
+            } else {
+                Text("This will remove the plugin from Clawdex.")
+            }
         }
     }
 
@@ -147,6 +166,17 @@ struct PluginsView: View {
                         runtime.updatePlugin(id: plugin.id)
                     }
                     .disabled(runtime.pluginOperationInFlight || !pluginSupportsUpdate(plugin))
+
+                    Button(plugin.enabled ? "Disable" : "Enable") {
+                        runtime.setPluginEnabled(id: plugin.id, enabled: !plugin.enabled)
+                    }
+                    .disabled(runtime.pluginOperationInFlight)
+
+                    Button("Remove") {
+                        removePluginId = plugin.id
+                        showRemoveConfirm = true
+                    }
+                    .disabled(runtime.pluginOperationInFlight)
                 }
 
                 Group {

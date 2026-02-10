@@ -99,6 +99,7 @@ Parity Execution (from ROADMAP.md):
   - [x] Key embeddings cache + backoff metadata by provider/model to avoid cross-provider poisoning.
 - [ ] Phase 5: mac app functional parity (timeline, approvals UI, plugin management UI, connectors, attachments, config UI).
   - [x] Add plugin install/update UI (npm spec + local folder/link) and wire into main navigation.
+  - [x] Add plugin enable/disable/remove actions to the Plugins UI.
   - [x] Add gateway UI for routes (session keys), receipts, and attachments (upload/list/download).
   - [x] Add chat attachment UX (image picker/preview + send as local image inputs) where supported.
 - [ ] Phase 6: Web/admin parity (dashboards + admin workflows where implemented).

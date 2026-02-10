@@ -308,6 +308,33 @@ final class RuntimeManager: ObservableObject {
         runPluginManagerCommand(args: args, label: "Updating all plugins")
     }
 
+    func setPluginEnabled(id: String, enabled: Bool) {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let args = [
+            "plugins",
+            enabled ? "enable" : "disable",
+            "--id",
+            trimmed,
+        ]
+        runPluginManagerCommand(
+            args: args,
+            label: enabled ? "Enabling plugin \(trimmed)" : "Disabling plugin \(trimmed)"
+        )
+    }
+
+    func removePlugin(id: String, keepFiles: Bool) {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let args = [
+            "plugins",
+            "remove",
+            "--id",
+            trimmed,
+        ] + (keepFiles ? ["--keep-files"] : [])
+        runPluginManagerCommand(args: args, label: "Removing plugin \(trimmed)")
+    }
+
     func updatePermissions() {
         let allow = appState?.mcpAllowlist
             .split(separator: ",")
