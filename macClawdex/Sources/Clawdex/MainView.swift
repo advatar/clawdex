@@ -19,6 +19,14 @@ struct MainView: View {
                 .tabItem {
                     Label("Schedule", systemImage: "calendar")
                 }
+            GatewayView()
+                .tabItem {
+                    Label("Gateway", systemImage: "antenna.radiowaves.left.and.right")
+                }
+            PluginsView()
+                .tabItem {
+                    Label("Plugins", systemImage: "puzzlepiece.extension")
+                }
         }
     }
 }

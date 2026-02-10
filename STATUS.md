@@ -98,6 +98,9 @@ Parity Execution (from ROADMAP.md):
   - [x] Add a local embeddings provider (Ollama HTTP) that works without an API key.
   - [x] Key embeddings cache + backoff metadata by provider/model to avoid cross-provider poisoning.
 - [ ] Phase 5: mac app functional parity (timeline, approvals UI, plugin management UI, connectors, attachments, config UI).
+  - [x] Add plugin install/update UI (npm spec + local folder/link) and wire into main navigation.
+  - [x] Add gateway UI for routes (session keys), receipts, and attachments (upload/list/download).
+  - [ ] Add chat attachment UX (image picker/preview + gateway upload) where supported.
 - [ ] Phase 6: Web/admin parity (dashboards + admin workflows where implemented).
 
 Notes:

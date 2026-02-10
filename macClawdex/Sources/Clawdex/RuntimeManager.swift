@@ -8,15 +8,21 @@ final class RuntimeManager: ObservableObject {
     @Published private(set) var plugins: [PluginInfo] = []
     @Published private(set) var pluginCommands: [PluginCommand] = []
     @Published private(set) var daemonRunning: Bool = false
+    @Published private(set) var gatewayRunning: Bool = false
+    @Published private(set) var pluginOperationInFlight: Bool = false
+    @Published private(set) var pluginOperationStatus: String = ""
 
     private var appState: AppState?
     private var process: Process?
     private var daemonProcess: Process?
+    private var gatewayProcess: Process?
     private var stdinPipe: Pipe?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
     private var daemonStdoutPipe: Pipe?
     private var daemonStderrPipe: Pipe?
+    private var gatewayStdoutPipe: Pipe?
+    private var gatewayStderrPipe: Pipe?
     private var workspaceURL: URL?
 
     private var cancellables = Set<AnyCancellable>()
@@ -82,6 +88,10 @@ final class RuntimeManager: ObservableObject {
             try startDaemonProcess(
                 clawdexdURL: clawdexdURL,
                 codexURL: codexURL,
+                stateDir: stateDir
+            )
+            try startGatewayProcess(
+                clawdexURL: clawdexURL,
                 stateDir: stateDir
             )
 
@@ -156,15 +166,23 @@ final class RuntimeManager: ObservableObject {
             appendLog("[app] Stopping clawdexd (pid \(p.processIdentifier))…")
             p.terminate()
         }
+        if let p = gatewayProcess {
+            appendLog("[app] Stopping clawdex gateway (pid \(p.processIdentifier))…")
+            p.terminate()
+        }
         process = nil
         daemonProcess = nil
+        gatewayProcess = nil
         stdinPipe = nil
         stdoutPipe = nil
         stderrPipe = nil
         daemonStdoutPipe = nil
         daemonStderrPipe = nil
+        gatewayStdoutPipe = nil
+        gatewayStderrPipe = nil
         isRunning = false
         daemonRunning = false
+        gatewayRunning = false
     }
 
     func sendUserMessage(_ text: String) {
@@ -211,6 +229,75 @@ final class RuntimeManager: ObservableObject {
         sendControlMessage(payload)
     }
 
+    func refreshPluginsSnapshot() {
+        if isRunning {
+            requestPlugins()
+            return
+        }
+        refreshPluginsViaCli()
+    }
+
+    func ensureGatewayRunning() {
+        guard gatewayProcess == nil else { return }
+        do {
+            try installToolsIfNeeded(force: false)
+            let toolPaths = try toolInstallPaths()
+            let stateDir = try ensureStateDir()
+            try startGatewayProcess(clawdexURL: toolPaths.clawdex, stateDir: stateDir)
+        } catch {
+            appendLog("[app] Gateway start failed: \(error.localizedDescription)")
+            errorPublisher.send("Gateway start failed: \(error.localizedDescription)")
+        }
+    }
+
+    func installPluginFromFolder(_ url: URL, link: Bool) {
+        let args = [
+            "plugins",
+            "add",
+            "--path",
+            url.path,
+        ] + (link ? ["--link"] : []) + [
+            "--source",
+            "mac-app",
+        ]
+        runPluginManagerCommand(args: args, label: "Installing plugin from folder")
+    }
+
+    func installPluginFromNpm(spec: String) {
+        let trimmed = spec.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let args = [
+            "plugins",
+            "add",
+            "--npm",
+            trimmed,
+            "--source",
+            "mac-app",
+        ]
+        runPluginManagerCommand(args: args, label: "Installing plugin from npm")
+    }
+
+    func updatePlugin(id: String) {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let args = [
+            "plugins",
+            "update",
+            "--id",
+            trimmed,
+        ]
+        runPluginManagerCommand(args: args, label: "Updating plugin \(trimmed)")
+    }
+
+    func updateAllPlugins() {
+        let args = [
+            "plugins",
+            "update",
+            "--all",
+        ]
+        runPluginManagerCommand(args: args, label: "Updating all plugins")
+    }
+
     func updatePermissions() {
         let allow = appState?.mcpAllowlist
             .split(separator: ",")
@@ -237,6 +324,82 @@ final class RuntimeManager: ObservableObject {
             ]
         ]
         sendControlMessage(payload)
+    }
+
+    private func refreshPluginsViaCli() {
+        let weakSelf = WeakRuntimeManager(self)
+        DispatchQueue.global(qos: .utility).async {
+            guard let self = weakSelf.value else { return }
+            do {
+                try self.installToolsIfNeeded(force: false)
+                let toolPaths = try self.toolInstallPaths()
+                let stateDir = try self.ensureStateDir()
+                var args = [
+                    "plugins",
+                    "list",
+                    "--include-disabled",
+                    "--state-dir",
+                    stateDir.path,
+                ]
+                if let workspaceURL = self.workspaceURL {
+                    args += ["--workspace", workspaceURL.path]
+                }
+                let result = try self.runClawdexCommand(clawdexURL: toolPaths.clawdex, args: args)
+                guard let data = result.stdout.data(using: .utf8),
+                      let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let plugins = obj["plugins"] as? [[String: Any]] else {
+                    return
+                }
+                Task { @MainActor in
+                    weakSelf.value?.applyPlugins(plugins)
+                }
+            } catch {
+                Task { @MainActor in
+                    weakSelf.value?.appendLog("[app] Plugin list failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func runPluginManagerCommand(args: [String], label: String) {
+        guard !pluginOperationInFlight else { return }
+        pluginOperationInFlight = true
+        pluginOperationStatus = "\(label)…"
+
+        let weakSelf = WeakRuntimeManager(self)
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let self = weakSelf.value else { return }
+            do {
+                try self.installToolsIfNeeded(force: false)
+                let toolPaths = try self.toolInstallPaths()
+                let stateDir = try self.ensureStateDir()
+
+                var fullArgs = args
+                fullArgs += ["--state-dir", stateDir.path]
+                if let workspaceURL = self.workspaceURL {
+                    fullArgs += ["--workspace", workspaceURL.path]
+                }
+
+                let result = try self.runClawdexCommand(clawdexURL: toolPaths.clawdex, args: fullArgs)
+                if !result.stdout.isEmpty { self.appendLog(result.stdout) }
+                if !result.stderr.isEmpty { self.appendLog(result.stderr) }
+
+                Task { @MainActor in
+                    weakSelf.value?.pluginOperationInFlight = false
+                    weakSelf.value?.pluginOperationStatus = "\(label) complete."
+                    weakSelf.value?.refreshPluginsSnapshot()
+                    if weakSelf.value?.isRunning == true {
+                        weakSelf.value?.requestPluginCommands()
+                    }
+                }
+            } catch {
+                Task { @MainActor in
+                    weakSelf.value?.pluginOperationInFlight = false
+                    weakSelf.value?.pluginOperationStatus = "\(label) failed."
+                    weakSelf.value?.appendLog("[app] \(label) failed: \(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     func setPluginMcpEnabled(pluginId: String, enabled: Bool) {
@@ -547,6 +710,24 @@ final class RuntimeManager: ObservableObject {
         }
     }
 
+    private func attachGatewayReaders(stdout: Pipe, stderr: Pipe) {
+        let weakSelf = WeakRuntimeManager(self)
+        stdout.fileHandleForReading.readabilityHandler = { h in
+            let data = h.availableData
+            if data.isEmpty { return }
+            Task { @MainActor in
+                weakSelf.value?.handleGatewayOutput(data: data, stream: "stdout")
+            }
+        }
+        stderr.fileHandleForReading.readabilityHandler = { h in
+            let data = h.availableData
+            if data.isEmpty { return }
+            Task { @MainActor in
+                weakSelf.value?.handleGatewayOutput(data: data, stream: "stderr")
+            }
+        }
+    }
+
     private func handleOutput(data: Data, stream: String) {
         guard let s = String(data: data, encoding: .utf8) else { return }
         for line in s.split(separator: "\n", omittingEmptySubsequences: true) {
@@ -576,6 +757,14 @@ final class RuntimeManager: ObservableObject {
         for line in s.split(separator: "\n", omittingEmptySubsequences: true) {
             let text = String(line)
             appendLog("[clawdexd][\(stream)] \(text)")
+        }
+    }
+
+    private func handleGatewayOutput(data: Data, stream: String) {
+        guard let s = String(data: data, encoding: .utf8) else { return }
+        for line in s.split(separator: "\n", omittingEmptySubsequences: true) {
+            let text = String(line)
+            appendLog("[clawdex-gateway][\(stream)] \(text)")
         }
     }
 
@@ -612,6 +801,41 @@ final class RuntimeManager: ObservableObject {
         daemonProcess = p
         daemonRunning = true
         appendLog("[app] Started clawdexd (pid \(p.processIdentifier))")
+    }
+
+    private func startGatewayProcess(clawdexURL: URL, stateDir: URL) throws {
+        guard gatewayProcess == nil else { return }
+        let p = Process()
+        p.executableURL = clawdexURL
+
+        var args: [String] = []
+        args += ["gateway"]
+        args += ["--bind", "127.0.0.1:18789"]
+        args += ["--state-dir", stateDir.path]
+        if let workspaceURL {
+            args += ["--workspace", workspaceURL.path]
+        }
+        p.arguments = args
+
+        var env = ProcessInfo.processInfo.environment
+        if let openAIKey = try? Keychain.loadOpenAIKey(), !openAIKey.isEmpty {
+            env["OPENAI_API_KEY"] = openAIKey
+        }
+        env["CLAWDEX_APP"] = "1"
+        p.environment = env
+
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        p.standardOutput = outPipe
+        p.standardError = errPipe
+        gatewayStdoutPipe = outPipe
+        gatewayStderrPipe = errPipe
+        attachGatewayReaders(stdout: outPipe, stderr: errPipe)
+
+        try p.run()
+        gatewayProcess = p
+        gatewayRunning = true
+        appendLog("[app] Started clawdex gateway (pid \(p.processIdentifier))")
     }
 
     private func parseAssistantMessage(from line: String) -> String? {
@@ -680,9 +904,39 @@ final class RuntimeManager: ObservableObject {
         let mapped = entries.compactMap { entry -> PluginInfo? in
             guard let id = entry["id"] as? String,
                   let name = entry["name"] as? String else { return nil }
+            let version = entry["version"] as? String
+            let description = entry["description"] as? String
+            let source = entry["source"] as? String
+            let path = entry["path"] as? String
+            let enabled = entry["enabled"] as? Bool ?? true
+            let installedAtMs = int64FromAny(entry["installedAtMs"])
+            let updatedAtMs = int64FromAny(entry["updatedAtMs"])
+            let skills = intFromAny(entry["skills"]) ?? 0
+            let commands = intFromAny(entry["commands"]) ?? 0
             let hasMcp = entry["hasMcp"] as? Bool ?? false
             let mcpEnabled = entry["mcpEnabled"] as? Bool ?? false
-            return PluginInfo(id: id, name: name, hasMcp: hasMcp, mcpEnabled: mcpEnabled)
+            let manifestType = entry["manifestType"] as? String
+            let manifestPath = entry["manifestPath"] as? String
+            let install = parseInstallInfo(entry["install"])
+
+            return PluginInfo(
+                id: id,
+                name: name,
+                version: version,
+                description: description,
+                source: source,
+                path: path,
+                enabled: enabled,
+                installedAtMs: installedAtMs,
+                updatedAtMs: updatedAtMs,
+                skills: skills,
+                commands: commands,
+                hasMcp: hasMcp,
+                mcpEnabled: mcpEnabled,
+                manifestType: manifestType,
+                manifestPath: manifestPath,
+                install: install
+            )
         }
         plugins = mapped.sorted { $0.name.lowercased() < $1.name.lowercased() }
     }
@@ -715,6 +969,59 @@ final class RuntimeManager: ObservableObject {
         if let idx = plugins.firstIndex(where: { $0.id == pluginId }) {
             plugins[idx].mcpEnabled = enabled
         }
+    }
+
+    private func int64FromAny(_ any: Any?) -> Int64? {
+        if let value = any as? Int64 {
+            return value
+        }
+        if let value = any as? Int {
+            return Int64(value)
+        }
+        if let value = any as? NSNumber {
+            return value.int64Value
+        }
+        if let value = any as? String {
+            return Int64(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
+    }
+
+    private func intFromAny(_ any: Any?) -> Int? {
+        if let value = any as? Int {
+            return value
+        }
+        if let value = any as? Int64 {
+            return Int(value)
+        }
+        if let value = any as? NSNumber {
+            return value.intValue
+        }
+        if let value = any as? String {
+            return Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
+    }
+
+    private func parseInstallInfo(_ any: Any?) -> PluginInstallInfo? {
+        guard let dict = any as? [String: Any] else { return nil }
+        guard let source = dict["source"] as? String else { return nil }
+        let spec = dict["spec"] as? String
+        let sourcePath = (dict["sourcePath"] as? String) ?? (dict["source_path"] as? String)
+        let installPath = (dict["installPath"] as? String) ?? (dict["install_path"] as? String)
+        let version = dict["version"] as? String
+        let installedAtMs = int64FromAny(dict["installedAtMs"] ?? dict["installed_at_ms"])
+        let updatedAtMs = int64FromAny(dict["updatedAtMs"] ?? dict["updated_at_ms"])
+
+        return PluginInstallInfo(
+            source: source,
+            spec: spec,
+            sourcePath: sourcePath,
+            installPath: installPath,
+            version: version,
+            installedAtMs: installedAtMs,
+            updatedAtMs: updatedAtMs
+        )
     }
 
     private func parsePluginCommand(_ text: String) -> (pluginId: String, command: String, input: String?)? {
