@@ -363,6 +363,59 @@ final class RuntimeManager: ObservableObject {
         sendControlMessage(payload)
     }
 
+    func updateMemorySettings() {
+        guard isRunning else { return }
+        let citations = normalizeCitationsMode(appState?.memoryCitations ?? "auto")
+
+        let provider = (appState?.embeddingsProvider ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = (appState?.embeddingsModel ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let apiBase = (appState?.embeddingsApiBase ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let apiKeyEnv = (appState?.embeddingsApiKeyEnv ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let batchSize = max(0, appState?.embeddingsBatchSize ?? 0)
+
+        let extraPaths = splitList(appState?.memoryExtraPaths ?? "")
+        let extraPathsValue: Any = extraPaths.isEmpty ? NSNull() : extraPaths
+
+        let chunkTokens = max(1, appState?.memoryChunkTokens ?? 400)
+        let rawOverlap = max(0, appState?.memoryChunkOverlap ?? 80)
+        let chunkOverlap = min(rawOverlap, chunkTokens)
+
+        let syncMinutes = max(0, appState?.memorySyncIntervalMinutes ?? 0)
+        let syncValue: Any = syncMinutes > 0 ? ["interval_minutes": syncMinutes] : NSNull()
+
+        let providerValue: Any = provider.isEmpty ? NSNull() : provider
+        let modelValue: Any = model.isEmpty ? NSNull() : model
+        let apiBaseValue: Any = apiBase.isEmpty ? NSNull() : apiBase
+        let apiKeyEnvValue: Any = apiKeyEnv.isEmpty ? NSNull() : apiKeyEnv
+        let batchSizeValue: Any = batchSize > 0 ? batchSize : NSNull()
+
+        let memory: [String: Any] = [
+            "enabled": appState?.memoryEnabled ?? true,
+            "citations": citations,
+            "session_memory": appState?.memorySessionMemory ?? false,
+            "extra_paths": extraPathsValue,
+            "chunk_tokens": chunkTokens,
+            "chunk_overlap": chunkOverlap,
+            "sync": syncValue,
+            "embeddings": [
+                "enabled": appState?.embeddingsEnabled ?? true,
+                "provider": providerValue,
+                "model": modelValue,
+                "api_base": apiBaseValue,
+                "api_key_env": apiKeyEnvValue,
+                "batch_size": batchSizeValue,
+            ]
+        ]
+
+        let payload: [String: Any] = [
+            "type": "update_config",
+            "config": [
+                "memory": memory
+            ]
+        ]
+        sendControlMessage(payload)
+    }
+
     private func refreshPluginsViaCli() {
         let weakSelf = WeakRuntimeManager(self)
         DispatchQueue.global(qos: .utility).async {
@@ -437,6 +490,23 @@ final class RuntimeManager: ObservableObject {
                 }
             }
         }
+    }
+
+    private func normalizeCitationsMode(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if trimmed == "on" {
+            return "on"
+        }
+        if trimmed == "off" {
+            return "off"
+        }
+        return "auto"
+    }
+
+    private func splitList(_ raw: String) -> [String] {
+        raw.split { $0 == "," || $0 == "\n" }
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     func setPluginMcpEnabled(pluginId: String, enabled: Bool) {
@@ -933,6 +1003,111 @@ final class RuntimeManager: ObservableObject {
         if let workspacePolicy = config["workspace_policy"] as? [String: Any],
            let readOnly = workspacePolicy["read_only"] as? Bool {
             appState?.workspaceReadOnly = readOnly
+        }
+
+        if let memory = config["memory"] as? [String: Any] {
+            if let enabled = memory["enabled"] as? Bool {
+                appState?.memoryEnabled = enabled
+            }
+
+            let citationsAny = memory["citations"]
+            if let citations = citationsAny as? String {
+                appState?.memoryCitations = normalizeCitationsMode(citations)
+            } else if citationsAny is NSNull {
+                appState?.memoryCitations = "auto"
+            }
+
+            let sessionAny = memory["session_memory"] ?? memory["sessionMemory"]
+            if let enabled = sessionAny as? Bool {
+                appState?.memorySessionMemory = enabled
+            } else if sessionAny is NSNull {
+                appState?.memorySessionMemory = false
+            }
+
+            let extraAny = memory["extra_paths"] ?? memory["extraPaths"]
+            if let list = extraAny as? [String] {
+                appState?.memoryExtraPaths = list.joined(separator: ", ")
+            } else if let list = extraAny as? [Any] {
+                let strings = list.compactMap { $0 as? String }
+                appState?.memoryExtraPaths = strings.joined(separator: ", ")
+            } else if extraAny is NSNull {
+                appState?.memoryExtraPaths = ""
+            }
+
+            let chunkTokensAny = memory["chunk_tokens"] ?? memory["chunkTokens"]
+            if let tokens = intFromAny(chunkTokensAny) {
+                appState?.memoryChunkTokens = tokens
+            } else if chunkTokensAny is NSNull {
+                appState?.memoryChunkTokens = 400
+            }
+
+            let chunkOverlapAny = memory["chunk_overlap"] ?? memory["chunkOverlap"]
+            if let overlap = intFromAny(chunkOverlapAny) {
+                appState?.memoryChunkOverlap = overlap
+            } else if chunkOverlapAny is NSNull {
+                appState?.memoryChunkOverlap = 80
+            }
+
+            let syncAny = memory["sync"]
+            if let sync = syncAny as? [String: Any] {
+                let intervalAny = sync["interval_minutes"] ?? sync["intervalMinutes"]
+                if let interval = intFromAny(intervalAny) {
+                    appState?.memorySyncIntervalMinutes = max(0, interval)
+                } else if intervalAny is NSNull {
+                    appState?.memorySyncIntervalMinutes = 0
+                }
+            } else if syncAny is NSNull {
+                appState?.memorySyncIntervalMinutes = 0
+            }
+
+            let embeddingsAny = memory["embeddings"]
+            if let embeddings = embeddingsAny as? [String: Any] {
+                if let enabled = embeddings["enabled"] as? Bool {
+                    appState?.embeddingsEnabled = enabled
+                }
+
+                let providerAny = embeddings["provider"]
+                if let provider = providerAny as? String {
+                    appState?.embeddingsProvider = provider
+                } else if providerAny is NSNull {
+                    appState?.embeddingsProvider = ""
+                }
+
+                let modelAny = embeddings["model"]
+                if let model = modelAny as? String {
+                    appState?.embeddingsModel = model
+                } else if modelAny is NSNull {
+                    appState?.embeddingsModel = ""
+                }
+
+                let apiBaseAny = embeddings["api_base"] ?? embeddings["apiBase"]
+                if let apiBase = apiBaseAny as? String {
+                    appState?.embeddingsApiBase = apiBase
+                } else if apiBaseAny is NSNull {
+                    appState?.embeddingsApiBase = ""
+                }
+
+                let apiKeyEnvAny = embeddings["api_key_env"] ?? embeddings["apiKeyEnv"]
+                if let apiKeyEnv = apiKeyEnvAny as? String {
+                    appState?.embeddingsApiKeyEnv = apiKeyEnv
+                } else if apiKeyEnvAny is NSNull {
+                    appState?.embeddingsApiKeyEnv = ""
+                }
+
+                let batchAny = embeddings["batch_size"] ?? embeddings["batchSize"]
+                if let batch = intFromAny(batchAny) {
+                    appState?.embeddingsBatchSize = max(0, batch)
+                } else if batchAny is NSNull {
+                    appState?.embeddingsBatchSize = 0
+                }
+            } else if embeddingsAny is NSNull {
+                appState?.embeddingsEnabled = true
+                appState?.embeddingsProvider = ""
+                appState?.embeddingsModel = ""
+                appState?.embeddingsApiBase = ""
+                appState?.embeddingsApiKeyEnv = ""
+                appState?.embeddingsBatchSize = 0
+            }
         }
         requestPlugins()
     }

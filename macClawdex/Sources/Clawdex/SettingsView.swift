@@ -134,6 +134,73 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Memory") {
+                Toggle("Enable memory", isOn: $appState.memoryEnabled)
+
+                Picker("Citations", selection: $appState.memoryCitations) {
+                    Text("Auto").tag("auto")
+                    Text("On").tag("on")
+                    Text("Off").tag("off")
+                }
+                .pickerStyle(.segmented)
+
+                Toggle("Include session memory", isOn: $appState.memorySessionMemory)
+
+                Divider()
+
+                Toggle("Enable embeddings", isOn: $appState.embeddingsEnabled)
+                    .disabled(!appState.memoryEnabled)
+
+                TextField("Embeddings provider (optional)", text: $appState.embeddingsProvider)
+                    .disabled(!appState.memoryEnabled)
+                TextField("Embeddings model (optional)", text: $appState.embeddingsModel)
+                    .disabled(!appState.memoryEnabled)
+                TextField("Embeddings API base (optional)", text: $appState.embeddingsApiBase)
+                    .disabled(!appState.memoryEnabled)
+                TextField("Embeddings API key env (optional)", text: $appState.embeddingsApiKeyEnv)
+                    .disabled(!appState.memoryEnabled)
+
+                Stepper(value: $appState.embeddingsBatchSize, in: 0...256) {
+                    let label = appState.embeddingsBatchSize == 0 ? "Default" : "\(appState.embeddingsBatchSize)"
+                    Text("Embeddings batch size: \(label)")
+                }
+                .disabled(!appState.memoryEnabled)
+
+                Divider()
+
+                TextField("Extra paths (comma-separated)", text: $appState.memoryExtraPaths)
+                    .disabled(!appState.memoryEnabled)
+
+                Stepper(value: $appState.memoryChunkTokens, in: 1...2000) {
+                    Text("Chunk tokens: \(appState.memoryChunkTokens)")
+                }
+                .disabled(!appState.memoryEnabled)
+                .onChange(of: appState.memoryChunkTokens) { _, newValue in
+                    if appState.memoryChunkOverlap > newValue {
+                        appState.memoryChunkOverlap = newValue
+                    }
+                }
+
+                Stepper(value: $appState.memoryChunkOverlap, in: 0...2000) {
+                    Text("Chunk overlap: \(appState.memoryChunkOverlap)")
+                }
+                .disabled(!appState.memoryEnabled)
+
+                Stepper(value: $appState.memorySyncIntervalMinutes, in: 0...1440) {
+                    Text("Index sync (minutes): \(appState.memorySyncIntervalMinutes)")
+                }
+                .disabled(!appState.memoryEnabled)
+
+                Button("Apply memory settings") {
+                    runtime.updateMemorySettings()
+                }
+                .disabled(!runtime.isRunning)
+
+                Text("Changes are applied via the running Clawdex runtime.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Embedded runtime") {
                 Text("This app expects `codex` and `clawdex` to be embedded in Resources/bin by the build script.")
                     .font(.caption)

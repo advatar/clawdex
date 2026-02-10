@@ -102,7 +102,7 @@ Parity Execution (from ROADMAP.md):
   - [x] Add plugin enable/disable/remove actions to the Plugins UI.
   - [x] Add gateway UI for routes (session keys), receipts, and attachments (upload/list/download).
   - [x] Add chat attachment UX (image picker/preview + send as local image inputs) where supported.
-  - [ ] Add memory settings controls (enable + embeddings provider/model/sync) to the Settings UI.
+  - [x] Add memory settings controls (enable + embeddings provider/model/sync) to the Settings UI.
 - [ ] Phase 6: Web/admin parity (dashboards + admin workflows where implemented).
 
 Notes:
