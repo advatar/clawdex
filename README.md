@@ -213,6 +213,24 @@ Example `config.json5`:
 Memory embeddings defaults:
 - If `memory.embeddings` is omitted, Clawdex derives the provider from `codex.config_overrides` (falls back to `openai`) and defaults the model to `text-embedding-3-small`, with `enabled: true` (unless memory is disabled).
 
+Local embeddings (offline):
+- Clawdex supports `memory.embeddings.provider: "ollama"` (or `"local"`) to use a local Ollama server for embeddings.
+- Example:
+
+```json5
+{
+  memory: {
+    embeddings: {
+      enabled: true,
+      provider: "ollama",
+      model: "nomic-embed-text",
+      api_base: "http://127.0.0.1:11434"
+      // No API key required.
+    }
+  }
+}
+```
+
 Workspace policy notes:
 - `workspace_policy.allowed_roots` expands writable roots for Codex sandbox.
 - `workspace_policy.deny_patterns` blocks tool access via `resolve_workspace_path`.

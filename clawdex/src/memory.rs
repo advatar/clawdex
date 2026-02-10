@@ -18,7 +18,7 @@ use crate::util::{now_ms, read_to_string};
 const DB_FILE: &str = "fts.sqlite";
 const DEFAULT_CHUNK_TOKENS: usize = 400;
 const DEFAULT_CHUNK_OVERLAP: usize = 80;
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const EMBEDDINGS_QUERY_FAILURE_PATH: &str = "__query__";
 const EMBEDDINGS_QUERY_FAILURE_SOURCE: &str = "__query__";
 
@@ -37,10 +37,18 @@ struct SearchRow {
 #[derive(Debug, Clone)]
 struct EmbeddingProvider {
     client: Client,
+    kind: EmbeddingProviderKind,
+    provider_key: String,
     api_base: String,
     model: String,
     api_key: String,
     batch_size: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmbeddingProviderKind {
+    OpenAICompatible,
+    Ollama,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +60,11 @@ struct EmbeddingResponse {
 struct EmbeddingData {
     embedding: Vec<f32>,
     index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaEmbeddingResponse {
+    embedding: Vec<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +254,8 @@ pub fn memory_search(paths: &ClawdPaths, args: &Value) -> Result<Value> {
                 &conn,
                 EMBEDDINGS_QUERY_FAILURE_PATH,
                 EMBEDDINGS_QUERY_FAILURE_SOURCE,
+                provider.cache_provider(),
+                provider.model.as_str(),
             )?
         {
             match provider.embed(&[query.clone()]) {
@@ -249,10 +264,17 @@ pub fn memory_search(paths: &ClawdPaths, args: &Value) -> Result<Value> {
                         &conn,
                         EMBEDDINGS_QUERY_FAILURE_PATH,
                         EMBEDDINGS_QUERY_FAILURE_SOURCE,
+                        provider.cache_provider(),
+                        provider.model.as_str(),
                     );
                     if let Some(query_embedding) = query_vec.first() {
                         for row in &mut rows {
-                            if let Some(vector) = load_row_embedding(&conn, row)? {
+                            if let Some(vector) = load_row_embedding(
+                                &conn,
+                                row,
+                                provider.cache_provider(),
+                                provider.model.as_str(),
+                            )? {
                                 let score = cosine_similarity(query_embedding, &vector);
                                 row.embed_score = Some(score);
                                 row.final_score = 0.6 * row.fts_score + 0.4 * score;
@@ -266,6 +288,8 @@ pub fn memory_search(paths: &ClawdPaths, args: &Value) -> Result<Value> {
                         &conn,
                         EMBEDDINGS_QUERY_FAILURE_PATH,
                         EMBEDDINGS_QUERY_FAILURE_SOURCE,
+                        provider.cache_provider(),
+                        provider.model.as_str(),
                         &err.to_string(),
                     );
                 }
@@ -446,19 +470,42 @@ fn index_file(
         if mtime == entry.mtime && size == entry.size {
             if let Some(provider) = provider {
                 let embedded: i64 = conn.query_row(
-                    "SELECT COUNT(1) FROM memory_embeddings WHERE path = ? AND source = ?",
-                    params![&rel_path, &source],
+                    "SELECT COUNT(1) FROM memory_embeddings WHERE path = ? AND source = ? AND provider = ? AND model = ?",
+                    params![
+                        &rel_path,
+                        &source,
+                        provider.cache_provider(),
+                        provider.model.as_str()
+                    ],
                     |row| row.get(0),
                 )?;
                 if embedded <= 0 {
-                    if should_attempt_embeddings(conn, &rel_path, &source)? {
+                    if should_attempt_embeddings(
+                        conn,
+                        &rel_path,
+                        &source,
+                        provider.cache_provider(),
+                        provider.model.as_str(),
+                    )? {
                         match backfill_embeddings(conn, &rel_path, &source, provider) {
                             Ok(()) => {
-                                let _ = clear_embedding_failure(conn, &rel_path, &source);
+                                let _ = clear_embedding_failure(
+                                    conn,
+                                    &rel_path,
+                                    &source,
+                                    provider.cache_provider(),
+                                    provider.model.as_str(),
+                                );
                             }
                             Err(err) => {
-                                let _ =
-                                    record_embedding_failure(conn, &rel_path, &source, &err.to_string());
+                                let _ = record_embedding_failure(
+                                    conn,
+                                    &rel_path,
+                                    &source,
+                                    provider.cache_provider(),
+                                    provider.model.as_str(),
+                                    &err.to_string(),
+                                );
                             }
                         }
                     }
@@ -502,13 +549,32 @@ fn index_file(
     tx.commit()?;
 
     if let Some(provider) = provider {
-        if should_attempt_embeddings(conn, &rel_path, &source)? {
+        if should_attempt_embeddings(
+            conn,
+            &rel_path,
+            &source,
+            provider.cache_provider(),
+            provider.model.as_str(),
+        )? {
             match index_embeddings_for_chunks(conn, &rel_path, &source, &chunks, provider) {
                 Ok(()) => {
-                    let _ = clear_embedding_failure(conn, &rel_path, &source);
+                    let _ = clear_embedding_failure(
+                        conn,
+                        &rel_path,
+                        &source,
+                        provider.cache_provider(),
+                        provider.model.as_str(),
+                    );
                 }
                 Err(err) => {
-                    let _ = record_embedding_failure(conn, &rel_path, &source, &err.to_string());
+                    let _ = record_embedding_failure(
+                        conn,
+                        &rel_path,
+                        &source,
+                        provider.cache_provider(),
+                        provider.model.as_str(),
+                        &err.to_string(),
+                    );
                 }
             }
         }
@@ -517,11 +583,23 @@ fn index_file(
     Ok(())
 }
 
-fn load_row_embedding(conn: &Connection, row: &SearchRow) -> Result<Option<Vec<f32>>> {
+fn load_row_embedding(
+    conn: &Connection,
+    row: &SearchRow,
+    provider: &str,
+    model: &str,
+) -> Result<Option<Vec<f32>>> {
     let vector_json: Option<String> = conn
         .query_row(
-            "SELECT vector FROM memory_embeddings WHERE path = ? AND start_line = ? AND end_line = ? AND source = ?",
-            params![&row.path, row.start_line, row.end_line, &row.source],
+            "SELECT vector FROM memory_embeddings WHERE path = ? AND start_line = ? AND end_line = ? AND source = ? AND provider = ? AND model = ?",
+            params![
+                &row.path,
+                row.start_line,
+                row.end_line,
+                &row.source,
+                provider,
+                model
+            ],
             |row| row.get(0),
         )
         .optional()?;
@@ -529,7 +607,7 @@ fn load_row_embedding(conn: &Connection, row: &SearchRow) -> Result<Option<Vec<f
         return Ok(None);
     };
     let parsed = serde_json::from_str::<Vec<f32>>(&vector_json).ok();
-    Ok(parsed)
+    Ok(parsed.map(sanitize_and_normalize_embedding))
 }
 
 fn backfill_embeddings(
@@ -565,10 +643,19 @@ fn backfill_embeddings(
         let tx = conn.transaction()?;
         for (idx, vector) in vectors.into_iter().enumerate() {
             let (start_line, end_line, _) = &batch[idx];
-            let vec_json = serde_json::to_string(&vector)?;
+            let vec = sanitize_and_normalize_embedding(vector);
+            let vec_json = serde_json::to_string(&vec)?;
             tx.execute(
-                "INSERT OR REPLACE INTO memory_embeddings(path, start_line, end_line, source, vector) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![rel_path, start_line, end_line, source, vec_json],
+                "INSERT OR REPLACE INTO memory_embeddings(path, start_line, end_line, source, provider, model, vector) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    rel_path,
+                    start_line,
+                    end_line,
+                    source,
+                    provider.cache_provider(),
+                    provider.model.as_str(),
+                    vec_json
+                ],
             )?;
         }
         tx.commit()?;
@@ -605,10 +692,19 @@ fn index_embeddings_for_chunks(
         }
         let tx = conn.transaction()?;
         for (chunk, vector) in filtered.into_iter().zip(vectors.into_iter()) {
-            let vec_json = serde_json::to_string(&vector)?;
+            let vec = sanitize_and_normalize_embedding(vector);
+            let vec_json = serde_json::to_string(&vec)?;
             tx.execute(
-                "INSERT INTO memory_embeddings(path, start_line, end_line, source, vector) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![rel_path, chunk.start_line, chunk.end_line, source, vec_json],
+                "INSERT INTO memory_embeddings(path, start_line, end_line, source, provider, model, vector) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    rel_path,
+                    chunk.start_line,
+                    chunk.end_line,
+                    source,
+                    provider.cache_provider(),
+                    provider.model.as_str(),
+                    vec_json
+                ],
             )?;
         }
         tx.commit()?;
@@ -641,21 +737,27 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
         [],
     )?;
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS memory_embeddings (path TEXT, start_line INTEGER, end_line INTEGER, source TEXT, vector TEXT, PRIMARY KEY(path, start_line, end_line, source))",
+        "CREATE TABLE IF NOT EXISTS memory_embeddings (path TEXT, start_line INTEGER, end_line INTEGER, source TEXT, provider TEXT, model TEXT, vector TEXT, PRIMARY KEY(path, start_line, end_line, source, provider, model))",
         [],
     )?;
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS memory_embedding_failures (path TEXT, source TEXT, attempts INTEGER, last_attempt_ms INTEGER, next_retry_ms INTEGER, last_error TEXT, PRIMARY KEY(path, source))",
+        "CREATE TABLE IF NOT EXISTS memory_embedding_failures (path TEXT, source TEXT, provider TEXT, model TEXT, attempts INTEGER, last_attempt_ms INTEGER, next_retry_ms INTEGER, last_error TEXT, PRIMARY KEY(path, source, provider, model))",
         [],
     )?;
     Ok(())
 }
 
-fn should_attempt_embeddings(conn: &Connection, rel_path: &str, source: &str) -> Result<bool> {
+fn should_attempt_embeddings(
+    conn: &Connection,
+    rel_path: &str,
+    source: &str,
+    provider: &str,
+    model: &str,
+) -> Result<bool> {
     let next_retry_ms: Option<i64> = conn
         .query_row(
-            "SELECT next_retry_ms FROM memory_embedding_failures WHERE path = ? AND source = ?",
-            params![rel_path, source],
+            "SELECT next_retry_ms FROM memory_embedding_failures WHERE path = ? AND source = ? AND provider = ? AND model = ?",
+            params![rel_path, source, provider, model],
             |row| row.get(0),
         )
         .optional()?;
@@ -665,19 +767,32 @@ fn should_attempt_embeddings(conn: &Connection, rel_path: &str, source: &str) ->
     Ok(now_ms() >= next_retry_ms)
 }
 
-fn clear_embedding_failure(conn: &Connection, rel_path: &str, source: &str) -> Result<()> {
+fn clear_embedding_failure(
+    conn: &Connection,
+    rel_path: &str,
+    source: &str,
+    provider: &str,
+    model: &str,
+) -> Result<()> {
     conn.execute(
-        "DELETE FROM memory_embedding_failures WHERE path = ? AND source = ?",
-        params![rel_path, source],
+        "DELETE FROM memory_embedding_failures WHERE path = ? AND source = ? AND provider = ? AND model = ?",
+        params![rel_path, source, provider, model],
     )?;
     Ok(())
 }
 
-fn record_embedding_failure(conn: &Connection, rel_path: &str, source: &str, error: &str) -> Result<()> {
+fn record_embedding_failure(
+    conn: &Connection,
+    rel_path: &str,
+    source: &str,
+    provider: &str,
+    model: &str,
+    error: &str,
+) -> Result<()> {
     let attempts: Option<i64> = conn
         .query_row(
-            "SELECT attempts FROM memory_embedding_failures WHERE path = ? AND source = ?",
-            params![rel_path, source],
+            "SELECT attempts FROM memory_embedding_failures WHERE path = ? AND source = ? AND provider = ? AND model = ?",
+            params![rel_path, source, provider, model],
             |row| row.get(0),
         )
         .optional()?;
@@ -687,15 +802,24 @@ fn record_embedding_failure(conn: &Connection, rel_path: &str, source: &str, err
     let next_retry_ms = now.saturating_add(backoff_ms);
     conn.execute(
         r#"
-        INSERT INTO memory_embedding_failures(path, source, attempts, last_attempt_ms, next_retry_ms, last_error)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-        ON CONFLICT(path, source) DO UPDATE SET
+        INSERT INTO memory_embedding_failures(path, source, provider, model, attempts, last_attempt_ms, next_retry_ms, last_error)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ON CONFLICT(path, source, provider, model) DO UPDATE SET
           attempts = excluded.attempts,
           last_attempt_ms = excluded.last_attempt_ms,
           next_retry_ms = excluded.next_retry_ms,
           last_error = excluded.last_error
         "#,
-        params![rel_path, source, attempts, now, next_retry_ms, error],
+        params![
+            rel_path,
+            source,
+            provider,
+            model,
+            attempts,
+            now,
+            next_retry_ms,
+            error
+        ],
     )?;
     Ok(())
 }
@@ -1187,16 +1311,37 @@ fn build_embedding_provider(cfg: &EmbeddingsConfig) -> Result<Option<EmbeddingPr
         None => return Ok(None),
     };
 
-    let provider = cfg
+    let raw_provider = cfg
         .provider
         .as_deref()
         .unwrap_or("openai")
-        .to_lowercase();
+        .trim()
+        .to_string();
+    let provider_lc = raw_provider.to_lowercase();
+    let (provider_id, provider_base_override) =
+        if raw_provider.starts_with("http://") || raw_provider.starts_with("https://") {
+            ("openai-compatible".to_string(), Some(raw_provider.clone()))
+        } else {
+            (provider_lc, None)
+        };
+    let provider_id = if provider_id == "local" {
+        // OpenClaw config calls this "local" (node-llama-cpp); in Clawdex we currently
+        // implement local embeddings via a local Ollama HTTP endpoint.
+        "ollama".to_string()
+    } else {
+        provider_id
+    };
+    let kind = if provider_id == "ollama" {
+        EmbeddingProviderKind::Ollama
+    } else {
+        EmbeddingProviderKind::OpenAICompatible
+    };
 
     let api_base = cfg
         .api_base
         .clone()
-        .or_else(|| default_api_base(&provider))
+        .or(provider_base_override)
+        .or_else(|| default_api_base(&provider_id))
         .unwrap_or_default();
     if api_base.is_empty() {
         return Ok(None);
@@ -1205,15 +1350,24 @@ fn build_embedding_provider(cfg: &EmbeddingsConfig) -> Result<Option<EmbeddingPr
     let api_key_env = cfg
         .api_key_env
         .clone()
-        .unwrap_or_else(|| default_api_key_env(&provider));
-    let api_key = std::env::var(&api_key_env).unwrap_or_default();
-    if api_key.is_empty() {
+        .unwrap_or_else(|| default_api_key_env(&provider_id));
+    let api_key = if api_key_env.trim().is_empty() {
+        String::new()
+    } else {
+        std::env::var(&api_key_env).unwrap_or_default()
+    };
+    if (provider_id == "openai" || provider_id == "codex") && api_key.trim().is_empty() {
+        // Keep the previous behavior: OpenAI/Codex embeddings are only enabled when a key is
+        // present, rather than attempting a request that will 401.
         return Ok(None);
     }
 
     let batch_size = cfg.batch_size.unwrap_or(32);
+    let provider_key = provider_cache_key(&provider_id, &api_base);
     Ok(Some(EmbeddingProvider {
         client: Client::new(),
+        kind,
+        provider_key,
         api_base,
         model,
         api_key,
@@ -1236,6 +1390,10 @@ fn default_api_base(provider: &str) -> Option<String> {
         return Some("https://api.openai.com".to_string());
     }
 
+    if provider == "ollama" {
+        return Some("http://127.0.0.1:11434".to_string());
+    }
+
     if provider.starts_with("http://") || provider.starts_with("https://") {
         return Some(provider.to_string());
     }
@@ -1250,8 +1408,24 @@ fn default_api_key_env(provider: &str) -> String {
     "OPENAI_API_KEY".to_string()
 }
 
+fn provider_cache_key(provider: &str, api_base: &str) -> String {
+    let base = api_base.trim().trim_end_matches('/');
+    format!("{provider}@{base}")
+}
+
 impl EmbeddingProvider {
+    fn cache_provider(&self) -> &str {
+        self.provider_key.as_str()
+    }
+
     fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
+        match self.kind {
+            EmbeddingProviderKind::OpenAICompatible => self.embed_openai_compatible(inputs),
+            EmbeddingProviderKind::Ollama => self.embed_ollama(inputs),
+        }
+    }
+
+    fn embed_openai_compatible(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
         if inputs.is_empty() {
             return Ok(Vec::new());
         }
@@ -1275,13 +1449,11 @@ impl EmbeddingProvider {
         let max_attempts = 3usize;
         let mut last_err: Option<anyhow::Error> = None;
         for attempt in 1..=max_attempts {
-            let resp = self
-                .client
-                .post(&url)
-                .bearer_auth(&self.api_key)
-                .json(&payload)
-                .send()
-                .context("embeddings request");
+            let mut req = self.client.post(&url).json(&payload);
+            if !self.api_key.trim().is_empty() {
+                req = req.bearer_auth(&self.api_key);
+            }
+            let resp = req.send().context("embeddings request");
             match resp {
                 Ok(resp) => {
                     if resp.status().is_success() {
@@ -1289,7 +1461,10 @@ impl EmbeddingProvider {
                             resp.json().context("parse embeddings response")?;
                         let mut out = data.data;
                         out.sort_by_key(|d| d.index);
-                        return Ok(out.into_iter().map(|d| d.embedding).collect());
+                        return Ok(out
+                            .into_iter()
+                            .map(|d| sanitize_and_normalize_embedding(d.embedding))
+                            .collect());
                     }
                     let status = resp.status();
                     let body = resp.text().unwrap_or_default();
@@ -1314,6 +1489,70 @@ impl EmbeddingProvider {
         }
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("embeddings request failed")))
     }
+
+    fn embed_ollama(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let url = format!("{}/api/embeddings", self.api_base.trim_end_matches('/'));
+        let mut out = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            out.push(self.embed_ollama_one(&url, input)?);
+        }
+        Ok(out)
+    }
+
+    fn embed_ollama_one(&self, url: &str, input: &str) -> Result<Vec<f32>> {
+        let payload = json!({
+            "model": self.model,
+            "prompt": input,
+        });
+
+        let retry_delay = |attempt: usize| {
+            let exp = attempt.saturating_sub(1).min(10) as u32;
+            let multiplier = 1_u64.checked_shl(exp).unwrap_or(u64::MAX);
+            let delay_ms = 200_u64.saturating_mul(multiplier).min(2_000);
+            Duration::from_millis(delay_ms)
+        };
+
+        let max_attempts = 3usize;
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 1..=max_attempts {
+            let mut req = self.client.post(url).json(&payload);
+            if !self.api_key.trim().is_empty() {
+                req = req.bearer_auth(&self.api_key);
+            }
+            let resp = req.send().context("ollama embeddings request");
+            match resp {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        let data: OllamaEmbeddingResponse =
+                            resp.json().context("parse ollama embeddings response")?;
+                        return Ok(sanitize_and_normalize_embedding(data.embedding));
+                    }
+                    let status = resp.status();
+                    let body = resp.text().unwrap_or_default();
+                    let err = anyhow::anyhow!("ollama embeddings request failed ({status}): {body}");
+                    last_err = Some(err);
+                    let retryable = status.as_u16() == 429 || status.is_server_error();
+                    if retryable && attempt < max_attempts {
+                        std::thread::sleep(retry_delay(attempt));
+                        continue;
+                    }
+                    break;
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    if attempt < max_attempts {
+                        std::thread::sleep(retry_delay(attempt));
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("ollama embeddings request failed")))
+    }
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
@@ -1334,6 +1573,28 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
         return 0.0;
     }
     dot / (norm_a.sqrt() * norm_b.sqrt())
+}
+
+fn sanitize_and_normalize_embedding(mut vec: Vec<f32>) -> Vec<f32> {
+    for v in &mut vec {
+        if !v.is_finite() {
+            *v = 0.0;
+        }
+    }
+    let mut magnitude = 0.0f64;
+    for v in &vec {
+        let value = *v as f64;
+        magnitude += value * value;
+    }
+    magnitude = magnitude.sqrt();
+    if !magnitude.is_finite() || magnitude < 1e-10 {
+        return vec;
+    }
+    let inv = (1.0 / magnitude) as f32;
+    for v in &mut vec {
+        *v *= inv;
+    }
+    vec
 }
 
 fn paths_config(paths: &ClawdPaths) -> Result<crate::config::ClawdConfig> {

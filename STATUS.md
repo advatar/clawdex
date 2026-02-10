@@ -91,7 +91,9 @@ Parity Execution (from ROADMAP.md):
 - [x] Phase 4b: Backfill embeddings for unchanged files when embeddings config becomes available
 - [x] Phase 4c: Add optional memory sync/watch loop (configurable) to keep index warm
 - [x] Phase 4d: Batch embeddings queue with retries/backoff + persistent failure metadata
-- [ ] Phase 4e: Local embeddings backend option (offline / no network)
+- [x] Phase 4e: Local embeddings backend option (offline / no network)
+  - [x] Add a local embeddings provider (Ollama HTTP) that works without an API key.
+  - [x] Key embeddings cache + backoff metadata by provider/model to avoid cross-provider poisoning.
 - [ ] Phase 5: mac app functional parity (timeline, approvals UI, plugin management UI, connectors, attachments, config UI).
 - [ ] Phase 6: Web/admin parity (dashboards + admin workflows where implemented).
 

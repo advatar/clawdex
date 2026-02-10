@@ -40,6 +40,10 @@ impl EmbeddingsServer {
         Self::start_with_handler(handle_embeddings_request_reject_empty)
     }
 
+    fn start_ollama() -> Result<Self> {
+        Self::start_with_handler(handle_ollama_embeddings_request)
+    }
+
     fn start_with_handler(handler: fn(tiny_http::Request) -> Result<()>) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
@@ -129,6 +133,44 @@ fn handle_embeddings_request(mut request: tiny_http::Request) -> Result<()> {
         .collect::<Vec<_>>();
 
     let response = json!({ "data": data });
+    let bytes = serde_json::to_vec(&response)?;
+    let header = tiny_http::Header::from_bytes(
+        &b"Content-Type"[..],
+        &b"application/json"[..],
+    )
+    .expect("content-type header");
+    let _ = request.respond(Response::from_data(bytes).with_header(header));
+    Ok(())
+}
+
+fn handle_ollama_embeddings_request(mut request: tiny_http::Request) -> Result<()> {
+    if request.method() != &Method::Post {
+        let _ = request.respond(Response::empty(StatusCode(405)));
+        return Ok(());
+    }
+    let url = request.url().to_string();
+    if url != "/api/embeddings" {
+        let _ = request.respond(Response::empty(StatusCode(404)));
+        return Ok(());
+    }
+
+    let mut body = String::new();
+    request.as_reader().read_to_string(&mut body)?;
+    let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    let prompt = parsed
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let lower = prompt.to_lowercase();
+    let embedding = if lower.contains("needle") {
+        vec![1.0_f32, 0.0_f32, 0.0_f32]
+    } else {
+        vec![0.0_f32, 1.0_f32, 0.0_f32]
+    };
+
+    let response = json!({ "embedding": embedding });
     let bytes = serde_json::to_vec(&response)?;
     let header = tiny_http::Header::from_bytes(
         &b"Content-Type"[..],
@@ -422,6 +464,51 @@ fn memory_index_skips_empty_chunks_for_embeddings() -> Result<()> {
     assert_eq!(server.count(), 0);
 
     std::env::remove_var("CLAWDEX_TEST_API_KEY_4");
+    let _ = fs::remove_dir_all(base);
+    Ok(())
+}
+
+#[test]
+fn memory_search_supports_ollama_without_api_key() -> Result<()> {
+    let _guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let server = EmbeddingsServer::start_ollama()?;
+    std::env::remove_var("CLAWDEX_TEST_API_KEY_OLLAMA");
+
+    let (base, paths) = temp_paths()?;
+    let memory_dir = paths.workspace_dir.join("memory");
+    fs::create_dir_all(&memory_dir)?;
+    fs::write(memory_dir.join("2026-02-01.md"), "alpha\nneedle here\nbeta\n")?;
+
+    write_config(
+        &paths,
+        &json!({
+            "memory": {
+                "enabled": true,
+                "session_memory": false,
+                "embeddings": {
+                    "enabled": true,
+                    "provider": "ollama",
+                    "model": "nomic-embed-text",
+                    "api_base": server.base_url,
+                    "api_key_env": "CLAWDEX_TEST_API_KEY_OLLAMA",
+                    "batch_size": 32
+                }
+            }
+        }),
+    )?;
+
+    let res1 = memory::memory_search(&paths, &json!({ "query": "needle" }))?;
+    let results1 = res1.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    assert!(!results1.is_empty());
+    assert!(results1[0].get("embeddingScore").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.9);
+
+    // Expected requests:
+    // - first search: one embed call for indexing + one for query embedding
+    assert_eq!(server.count(), 2);
+
+    std::env::remove_var("CLAWDEX_TEST_API_KEY_OLLAMA");
     let _ = fs::remove_dir_all(base);
     Ok(())
 }

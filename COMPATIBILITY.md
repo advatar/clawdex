@@ -24,6 +24,9 @@ The MCP server exposes OpenClaw-compatible tool names so OpenClaw skills can be 
 `memory_get` only permits `MEMORY.md` and `memory/**/*.md` relative to the workspace.
 `memory_search` uses SQLite FTS5 with optional embeddings if configured.
 
+Local embeddings:
+- Set `memory.embeddings.provider = "ollama"` (or `"local"`) with `api_base = "http://127.0.0.1:11434"` and an Ollama embedding model (for example `nomic-embed-text`) to run embeddings locally without an API key.
+
 Optional index warm-up:
 - If you run `clawdex daemon` (or the daemon HTTP server), you can set `memory.sync.intervalMinutes` (or `interval_minutes`) to periodically sync/reindex memory in the background so searches do less work on-demand.
 
