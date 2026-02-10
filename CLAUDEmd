@@ -1,0 +1,68 @@
+Here you go — I packaged the “extra artifacts” bundle (PR-style change request + exact Rust schemas + SQLite migration SQL + concrete diff/checklist for `plugins.rs` + `ui_bridge.rs`) into a single zip you can drop into your repo workflow.
+
+[Download the Clawdex Claude-Plugins artifacts zip](sandbox:/mnt/data/clawdex_claude_plugins_artifacts.zip?_chatgptios_conversationID=6981b991-d974-8397-addd-f3eec73d4946&_chatgptios_messageID=3f14311e-c508-46c4-85be-8c5cfe41de88)
+
+## What’s inside the zip
+
+- **`docs/CR-PLUGINS-001.md`**  
+  A PR-style change request/spec for “Claude Code / Cowork plugin compatibility in Clawdex” (includes phases, acceptance criteria, and Mac App Store constrained-mode policy).
+
+- **`docs/DiffPlan.md`**  
+  A file-by-file checklist for what to change in your current sources (specifically references the structure in your uploaded `share/src/...`).
+
+- **`rust/claude_plugin_schema.rs`**  
+  Exact `serde` structs for:
+  - `.claude-plugin/plugin.json` (manifest)
+  - `.claude-plugin/marketplace.json` (marketplace)
+  - plus untagged enums for the `string | array | object` fields.
+
+- **`sql/001_create_plugin_marketplaces.sql`**  
+  SQLite tables for:
+  - `plugin_marketplaces`
+  - `marketplace_plugins`
+  - `plugin_errors`  
+  (Designed to paste into your current `TaskStore::migrate()` which uses `CREATE TABLE IF NOT EXISTS`.)
+
+## Why these artifacts are shaped this way
+
+They’re grounded in the Claude Code spec:
+
+- **Manifest is optional**; if it exists, **`name` is the only required field**.  [oai_citation:0‡Claude Code](https://code.claude.com/docs/en/plugins-reference)  
+- The manifest supports **component path fields** and multiple shapes (`string`, `array`, inline objects).  [oai_citation:1‡Claude Code](https://code.claude.com/docs/en/plugins-reference)  
+- Marketplaces list plugins and can source them via:
+  - relative paths (when marketplace is installed via git)
+  - GitHub repo objects (`repo`, optional `ref`, optional `sha`)
+  - git URL objects ending in `.git` (`url`, optional `ref`, optional `sha`)  [oai_citation:2‡Claude Code](https://code.claude.com/docs/en/plugin-marketplaces)  
+
+And it includes explicit Mac App Store gating because Apple’s guidelines are strict about downloading/executing additional code that changes the app’s functionality.  [oai_citation:3‡Apple Developer](https://developer.apple.com/app-store/review/guidelines/)
+
+## How to apply this in your repo quickly
+
+1) Extract the zip somewhere convenient.
+
+2) Copy the artifacts into your repo (recommended layout):
+- `docs/CR-PLUGINS-001.md` → `docs/CR-PLUGINS-001.md`
+- `docs/DiffPlan.md` → `docs/DiffPlan-ClaudePlugins.md`
+- `rust/claude_plugin_schema.rs` → `src/claude_plugins/schema.rs` (or `src/claude_compat/schema.rs`)
+- `sql/001_create_plugin_marketplaces.sql` → `docs/sql/001_create_plugin_marketplaces.sql` (and paste into `TaskStore::migrate()`)
+
+3) Follow `docs/DiffPlan.md` in order (it’s sequenced so you don’t end up refactoring twice).
+
+## One important note about your current `plugins.rs`
+
+The diff plan calls this out explicitly, but it’s worth highlighting:
+
+- Your `sync_plugin_skills()` currently walks for `*.md` and uses `file_stem()`, which will incorrectly name `skills/<x>/SKILL.md` as `SKILL` instead of `<x>`. The Claude plugin spec treats each skill as a directory with `SKILL.md`.  [oai_citation:4‡Claude Code](https://code.claude.com/docs/en/plugins-reference)  
+So that function needs to switch to:
+- discover `skills/**/SKILL.md` and derive skill name from the parent directory
+- also discover `commands/**/*.md`
+
+## (Optional context) Reality check on “Cowork plugins” + market chatter
+
+The “open-sourced Cowork plugins caused a big market reaction” story is not purely viral fluff — Reuters and other outlets reported that Anthropic open-sourced a set of Cowork plugins and that legal/publishing software stocks moved sharply afterwards.  [oai_citation:5‡Bloomberg](https://www.bloomberg.com/news/articles/2026-02-03/legal-software-stocks-plunge-as-anthropic-releases-new-ai-tool)  
+
+That’s part of why the CR positions this work as: **distribution + workflow packaging**, not “new model magic.”
+
+---
+
+If you want, I can also produce a **ready-to-apply patch** (unified diff) that implements Phase 0 + Phase 1 from the CR against your current `share/src/plugins.rs`, `share/src/task_db.rs`, and `share/src/ui_bridge.rs` (keeping changes isolated and minimizing upstream Codex drift).
