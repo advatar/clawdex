@@ -35,3 +35,6 @@ base64 = "0.22"
 codex-app-server-protocol = { path = "../codex/codex-rs/app-server-protocol" }
 codex-protocol = { path = "../codex/codex-rs/protocol" }
 codex-utils-absolute-path = { path = "../codex/codex-rs/utils/absolute-path" }
+
+[patch.crates-io]
+jetscii = { path = "vendor/jetscii" }

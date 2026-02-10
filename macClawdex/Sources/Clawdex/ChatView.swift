@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 struct ChatView: View {
     @EnvironmentObject var appState: AppState
@@ -6,6 +8,7 @@ struct ChatView: View {
 
     @State private var input: String = ""
     @State private var showCommandPalette: Bool = false
+    @State private var attachments: [ChatImageAttachment] = []
     @State private var messages: [ChatMessage] = [
         ChatMessage(role: .system, text: "Clawdex (Codex-powered) — macOS app shell. Configure API key + workspace in Settings. Plugin commands: /plugin <id> <command> [input].")
     ]
@@ -84,29 +87,51 @@ struct ChatView: View {
     }
 
     private var composer: some View {
-        HStack {
-            TextField("Message…", text: $input, axis: .vertical)
-                .lineLimit(1...6)
-            Button("Send") {
-                send()
+        VStack(alignment: .leading, spacing: 8) {
+            if !attachments.isEmpty {
+                attachmentsPreview
             }
-            .keyboardShortcut(.return, modifiers: [.command])
-            .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+            HStack {
+                TextField("Message…", text: $input, axis: .vertical)
+                    .lineLimit(1...6)
+
+                Button("Attach…") {
+                    chooseImages()
+                }
+
+                Button("Send") {
+                    send()
+                }
+                .keyboardShortcut(.return, modifiers: [.command])
+                .disabled(!canSend)
+            }
         }
         .padding()
     }
 
     private func send() {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        input = ""
+        let localImages = attachments.map { $0.url.path }
+        guard !text.isEmpty || !localImages.isEmpty else { return }
 
-        messages.append(ChatMessage(role: .user, text: text))
+        input = ""
+        attachments = []
+
+        let displayText: String
+        if text.isEmpty {
+            displayText = "Sent \(localImages.count) image(s)."
+        } else if localImages.isEmpty {
+            displayText = text
+        } else {
+            displayText = "\(text) [\(localImages.count) image(s)]"
+        }
+        messages.append(ChatMessage(role: .user, text: displayText))
 
         if !runtime.isRunning {
             runtime.start()
         }
-        runtime.sendUserMessage(text)
+        runtime.sendUserMessage(text, localImagePaths: localImages)
     }
 
     private func label(for role: ChatMessage.Role) -> String {
@@ -115,5 +140,77 @@ struct ChatView: View {
         case .assistant: return "Clawdex"
         case .system: return "System"
         }
+    }
+
+    private var canSend: Bool {
+        !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+    }
+
+    private var attachmentsPreview: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 10) {
+                ForEach(attachments) { att in
+                    ZStack(alignment: .topTrailing) {
+                        if let image = NSImage(contentsOf: att.url) {
+                            Image(nsImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 64, height: 64)
+                                .clipped()
+                                .cornerRadius(8)
+                        } else {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.gray.opacity(0.12))
+                                .frame(width: 64, height: 64)
+                                .overlay(
+                                    Image(systemName: "photo")
+                                        .foregroundStyle(.secondary)
+                                )
+                        }
+
+                        Button {
+                            attachments.removeAll { $0.id == att.id }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(4)
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
+        .frame(height: 72)
+    }
+
+    private func chooseImages() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [UTType.image]
+        panel.prompt = "Attach"
+        panel.message = "Choose image(s) to attach."
+
+        if panel.runModal() == .OK {
+            let existing = Set(attachments.map { $0.url.path })
+            for url in panel.urls {
+                if existing.contains(url.path) {
+                    continue
+                }
+                attachments.append(ChatImageAttachment(url: url))
+            }
+        }
+    }
+}
+
+private struct ChatImageAttachment: Identifiable, Hashable {
+    let id: UUID
+    let url: URL
+
+    init(url: URL) {
+        self.id = UUID()
+        self.url = url
     }
 }

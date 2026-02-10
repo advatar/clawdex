@@ -100,7 +100,7 @@ Parity Execution (from ROADMAP.md):
 - [ ] Phase 5: mac app functional parity (timeline, approvals UI, plugin management UI, connectors, attachments, config UI).
   - [x] Add plugin install/update UI (npm spec + local folder/link) and wire into main navigation.
   - [x] Add gateway UI for routes (session keys), receipts, and attachments (upload/list/download).
-  - [ ] Add chat attachment UX (image picker/preview + gateway upload) where supported.
+  - [x] Add chat attachment UX (image picker/preview + send as local image inputs) where supported.
 - [ ] Phase 6: Web/admin parity (dashboards + admin workflows where implemented).
 
 Notes:

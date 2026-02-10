@@ -186,6 +186,10 @@ final class RuntimeManager: ObservableObject {
     }
 
     func sendUserMessage(_ text: String) {
+        sendUserMessage(text, localImagePaths: [])
+    }
+
+    func sendUserMessage(_ text: String, localImagePaths: [String]) {
         guard isRunning else {
             errorPublisher.send("Agent is not running.")
             return
@@ -202,10 +206,16 @@ final class RuntimeManager: ObservableObject {
             return
         }
 
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "type": "user_message",
             "text": text
         ]
+        let cleaned = localImagePaths
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if !cleaned.isEmpty {
+            payload["localImages"] = cleaned
+        }
         sendControlMessage(payload)
     }
 

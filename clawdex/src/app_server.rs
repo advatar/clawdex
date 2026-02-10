@@ -214,13 +214,30 @@ impl CodexClient {
         sandbox_policy: Option<SandboxPolicy>,
         cwd: Option<std::path::PathBuf>,
     ) -> Result<TurnOutcome> {
-        let request_id = self.request_id();
-        let mut params = TurnStartParams {
-            thread_id: thread_id.to_string(),
-            input: vec![V2UserInput::Text {
+        self.run_turn_with_inputs(
+            thread_id,
+            vec![V2UserInput::Text {
                 text: message.to_string(),
                 text_elements: Vec::new(),
             }],
+            approval_policy,
+            sandbox_policy,
+            cwd,
+        )
+    }
+
+    pub fn run_turn_with_inputs(
+        &mut self,
+        thread_id: &str,
+        input: Vec<V2UserInput>,
+        approval_policy: Option<AskForApproval>,
+        sandbox_policy: Option<SandboxPolicy>,
+        cwd: Option<std::path::PathBuf>,
+    ) -> Result<TurnOutcome> {
+        let request_id = self.request_id();
+        let mut params = TurnStartParams {
+            thread_id: thread_id.to_string(),
+            input,
             ..Default::default()
         };
         params.approval_policy = approval_policy;

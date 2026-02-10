@@ -2,7 +2,7 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::{AskForApproval, UserInput as V2UserInput};
 use serde_json::{json, Value};
 
 use crate::app_server::{ApprovalMode, CodexClient};
@@ -65,12 +65,31 @@ pub fn run_ui_bridge(
                     .get("text")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                if text.trim().is_empty() {
+                let mut input = Vec::new();
+                if !text.trim().is_empty() {
+                    input.push(V2UserInput::Text {
+                        text: text.to_string(),
+                        text_elements: Vec::new(),
+                    });
+                }
+                if let Some(images) = payload.get("localImages").and_then(|v| v.as_array()) {
+                    for entry in images {
+                        let path = entry
+                            .as_str()
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .map(PathBuf::from);
+                        if let Some(path) = path {
+                            input.push(V2UserInput::LocalImage { path });
+                        }
+                    }
+                }
+                if input.is_empty() {
                     continue;
                 }
-                match client.run_turn(
+                match client.run_turn_with_inputs(
                     &thread_id,
-                    text,
+                    input,
                     approval_policy,
                     sandbox_policy.clone(),
                     Some(paths.workspace_dir.clone()),
