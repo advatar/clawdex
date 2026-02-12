@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Clawdex Admin</title>
+  <style>
+    :root {
+      --bg: #f7f7f4;
+      --card: #ffffff;
+      --ink: #1a1d20;
+      --muted: #56616d;
+      --accent: #0f766e;
+      --danger: #b91c1c;
+      --border: #d9e0e5;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top right, #d6f5ef 0%, var(--bg) 48%);
+      color: var(--ink);
+      font: 14px/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .shell {
+      max-width: 1080px;
+      margin: 24px auto;
+      padding: 0 16px 40px;
+    }
+    h1 { margin: 0 0 12px; font-size: 30px; }
+    h2 { margin: 0 0 12px; font-size: 18px; }
+    .muted { color: var(--muted); }
+    .row { display: grid; gap: 12px; }
+    .row.cols-3 { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+      margin-bottom: 12px;
+    }
+    .stat {
+      font-size: 26px;
+      font-weight: 700;
+      margin: 0;
+    }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    button {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      padding: 7px 10px;
+      cursor: pointer;
+    }
+    button.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    button.danger {
+      color: #fff;
+      background: var(--danger);
+      border-color: var(--danger);
+    }
+    input, textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      font: inherit;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    th, td {
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      padding: 7px 6px;
+      vertical-align: top;
+    }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .ok { color: #0f766e; }
+    .bad { color: #b91c1c; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <h1>Clawdex Admin</h1>
+    <p class="muted">Web/admin parity surface for daemon oversight, plugins, gateway, and config.</p>
+
+    <div class="card">
+      <div class="actions">
+        <button class="primary" onclick="refreshAll()">Refresh</button>
+      </div>
+      <p id="status" class="muted">Loading...</p>
+    </div>
+
+    <div class="row cols-3" id="stats"></div>
+
+    <div class="card">
+      <h2>Plugins</h2>
+      <div class="actions" style="margin-bottom:10px;">
+        <button onclick="updatePlugins(false)">Update All</button>
+        <button onclick="updatePlugins(true)">Dry-run Update</button>
+      </div>
+      <div class="row" style="grid-template-columns: 1fr 1fr auto; align-items:end; margin-bottom:10px;">
+        <div>
+          <label>NPM spec</label>
+          <input id="installNpm" placeholder="@scope/plugin@latest" />
+        </div>
+        <div>
+          <label>Local path</label>
+          <input id="installPath" placeholder="/absolute/or/relative/path" />
+        </div>
+        <div>
+          <button class="primary" onclick="installPlugin()">Install</button>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr><th>ID</th><th>Version</th><th>Status</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="pluginsBody"></tbody>
+      </table>
+    </div>
+
+    <div class="row cols-3">
+      <div class="card">
+        <h2>Gateway Channels</h2>
+        <pre id="channels"><code>...</code></pre>
+      </div>
+      <div class="card">
+        <h2>Permissions</h2>
+        <div class="actions" style="margin-bottom:8px;">
+          <label><input id="internet" type="checkbox" /> Internet</label>
+          <label><input id="readOnly" type="checkbox" /> Read-only</label>
+        </div>
+        <button onclick="savePermissions()">Save Permissions</button>
+      </div>
+      <div class="card">
+        <h2>Memory Config Patch</h2>
+        <textarea id="memoryPatch" rows="8">{"memory":{"enabled":true}}</textarea>
+        <div class="actions" style="margin-top:8px;">
+          <button onclick="applyConfigPatch()">Apply Patch</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Overview Snapshot</h2>
+      <pre id="overview"><code>...</code></pre>
+    </div>
+  </div>
+
+  <script>
+    async function getJson(url) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(url + ' -> ' + res.status);
+      return res.json();
+    }
+
+    async function postJson(url, payload) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload ?? {})
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(url + ' -> ' + res.status + ': ' + text);
+      }
+      return res.json();
+    }
+
+    function setStatus(text, isError) {
+      const el = document.getElementById('status');
+      el.textContent = text;
+      el.className = isError ? 'bad' : 'ok';
+    }
+
+    function renderStats(counts) {
+      const items = [
+        ['Tasks', counts.tasks],
+        ['Runs', counts.runs],
+        ['Plugins', counts.plugins],
+        ['Channels', counts.channels],
+        ['Pending Approvals', counts.pendingApprovals],
+        ['Pending Inputs', counts.pendingUserInputs]
+      ];
+      const html = items.map(([label, value]) => (
+        `<div class="card"><p class="muted">${label}</p><p class="stat">${value}</p></div>`
+      )).join('');
+      document.getElementById('stats').innerHTML = html;
+    }
+
+    async function refreshOverview() {
+      const data = await getJson('/v1/admin/overview');
+      renderStats(data.counts || {});
+      document.getElementById('overview').textContent = JSON.stringify(data, null, 2);
+      document.getElementById('internet').checked = !!data.permissions?.internet;
+      document.getElementById('readOnly').checked = !!data.permissions?.readOnly;
+    }
+
+    async function refreshPlugins() {
+      const data = await getJson('/v1/admin/plugins?includeDisabled=true');
+      const rows = (data.plugins || []).map((p) => {
+        const status = p.enabled ? 'enabled' : 'disabled';
+        const toggleAction = p.enabled ? 'disable' : 'enable';
+        const toggleLabel = p.enabled ? 'Disable' : 'Enable';
+        return `<tr>
+          <td><code>${p.id}</code></td>
+          <td>${p.version || '-'}</td>
+          <td>${status}</td>
+          <td class="actions">
+            <button onclick="pluginAction('${p.id}','${toggleAction}')">${toggleLabel}</button>
+            <button class="danger" onclick="pluginAction('${p.id}','remove')">Remove</button>
+          </td>
+        </tr>`;
+      }).join('');
+      document.getElementById('pluginsBody').innerHTML = rows || '<tr><td colspan="4" class="muted">No plugins</td></tr>';
+    }
+
+    async function refreshChannels() {
+      const data = await getJson('/v1/admin/gateway/channels');
+      document.getElementById('channels').textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function pluginAction(pluginId, action) {
+      try {
+        await postJson(`/v1/admin/plugins/${encodeURIComponent(pluginId)}/${action}`, {});
+        await refreshAll();
+        setStatus(`Plugin ${pluginId}: ${action} ok`, false);
+      } catch (err) {
+        setStatus(err.message, true);
+      }
+    }
+
+    async function installPlugin() {
+      const npm = document.getElementById('installNpm').value.trim();
+      const path = document.getElementById('installPath').value.trim();
+      try {
+        await postJson('/v1/admin/plugins/install', {
+          npm: npm || undefined,
+          path: path || undefined
+        });
+        document.getElementById('installNpm').value = '';
+        document.getElementById('installPath').value = '';
+        await refreshAll();
+        setStatus('Plugin install ok', false);
+      } catch (err) {
+        setStatus(err.message, true);
+      }
+    }
+
+    async function updatePlugins(dryRun) {
+      try {
+        const resp = await postJson('/v1/admin/plugins/update', { all: true, dryRun: !!dryRun });
+        await refreshAll();
+        setStatus('Plugin update: ' + JSON.stringify(resp.outcomes || []), false);
+      } catch (err) {
+        setStatus(err.message, true);
+      }
+    }
+
+    async function savePermissions() {
+      try {
+        await postJson('/v1/admin/permissions', {
+          internet: document.getElementById('internet').checked,
+          readOnly: document.getElementById('readOnly').checked
+        });
+        setStatus('Permissions updated', false);
+      } catch (err) {
+        setStatus(err.message, true);
+      }
+    }
+
+    async function applyConfigPatch() {
+      try {
+        const patch = JSON.parse(document.getElementById('memoryPatch').value);
+        await postJson('/v1/admin/config', { patch });
+        await refreshOverview();
+        setStatus('Config patch applied', false);
+      } catch (err) {
+        setStatus(err.message, true);
+      }
+    }
+
+    async function refreshAll() {
+      try {
+        await Promise.all([refreshOverview(), refreshPlugins(), refreshChannels()]);
+        setStatus('Refreshed at ' + new Date().toLocaleTimeString(), false);
+      } catch (err) {
+        setStatus(err.message, true);
+      }
+    }
+
+    refreshAll();
+  </script>
+</body>
+</html>

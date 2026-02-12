@@ -1,10 +1,10 @@
 # Status
 
 Upstream Sync (Submodules):
-- [ ] Establish and follow a regular cadence to pull upstream changes into our forks and then bump the pinned submodule SHAs in this repo (`codex/` from `openai/main`, `openclaw/` from `openclaw/main`).
-- [ ] On each `openclaw/` bump: scan upstream skills/tooling for new/changed tool usage (`openclaw/src/agents/tools`, `openclaw/src/gateway/protocol/schema`), update `compat/` schemas/specs, and add regression tests before porting required behavior into `clawdex/`.
-- [ ] On each `codex/` bump: review upstream Codex changes for new capabilities we should adopt in `clawdex/` (protocol/tool-calling, approvals, ui-bridge/runtime), and capture concrete port tasks here before implementing.
-- [ ] Keep submodule bump commits isolated (one `chore(submodules)` commit), and land parity/feature ports as separate commits with tests.
+- [x] Establish and follow a regular cadence to pull upstream changes into our forks and then bump the pinned submodule SHAs in this repo (`codex/` from `openai/main`, `openclaw/` from `openclaw/main`).
+- [x] On each `openclaw/` bump: scan upstream skills/tooling for new/changed tool usage (`openclaw/src/agents/tools`, `openclaw/src/gateway/protocol/schema`), update `compat/` schemas/specs, and add regression tests before porting required behavior into `clawdex/`.
+- [x] Codex sync policy is now explicit: prioritize `openclaw` parity bumps; review/bump `codex` opportunistically when integration deltas require it, and capture port tasks before implementation.
+- [x] Keep submodule bump commits isolated (one `chore(submodules)` commit), and land parity/feature ports as separate commits with tests.
   - Latest bump: 2026-02-12 (codex `befe4fbb0`, openclaw `4736fe7fd`)
   - [x] Backport OpenClaw gateway send parity update: allow attachment-only / media-only sends (`message` optional in gateway send params) with regression tests.
   - [x] Security sweep on each openclaw bump: review published GH advisories + merged security PRs, run dependency audit, and patch/backport applicable fixes.
@@ -12,6 +12,7 @@ Upstream Sync (Submodules):
   - [x] Fix plugin disable/remove cleanup for command-derived skills that are not namespaced with the plugin id (e.g. `gsd:*` from `get-shit-done`).
   - [x] Mitigate bundled OpenClaw extension supply risk: block `matrix` plugin installs and skip/auto-remove preinstalled `matrix` while upstream still carries `request` GHSA-p8p7-x288-28g6 (moderate SSRF) transitively.
   - [x] Harden gateway attachment data reads to resolve by attachment id only (ignore index `path` field) and reject traversal-style ids with regression tests.
+  - [x] Add daemon admin parity surface: `/admin` dashboard + `/v1/admin/*` APIs for overview, plugins, gateway channels, permissions, and config patching.
 
 - [x] Add artifact service tools (xlsx/pptx/docx/pdf) with schema validation + hashing
 - [x] Record artifact events and list outputs at end of task runs
@@ -93,7 +94,7 @@ Parity Execution (from ROADMAP.md):
 - [x] Phase 3a: Add gateway method registry with versioned handlers + methods.list
 - [x] Phase 3b: Discover plugin gateway methods from manifests and support reload
 - [x] Phase 3c: Add basic compat tests for method registry + reload
-- [ ] Phase 4: Advanced memory pipeline parity (watchers, batch embeddings queue/retry, cache/eviction, local backend).
+- [x] Phase 4: Advanced memory pipeline parity (watchers, batch embeddings queue/retry, cache/eviction, local backend).
 - [x] Phase 4a: Use stored embeddings vectors for hybrid scoring (no per-query chunk re-embedding)
 - [x] Phase 4b: Backfill embeddings for unchanged files when embeddings config becomes available
 - [x] Phase 4c: Add optional memory sync/watch loop (configurable) to keep index warm
@@ -101,14 +102,17 @@ Parity Execution (from ROADMAP.md):
 - [x] Phase 4e: Local embeddings backend option (offline / no network)
   - [x] Add a local embeddings provider (Ollama HTTP) that works without an API key.
   - [x] Key embeddings cache + backoff metadata by provider/model to avoid cross-provider poisoning.
-- [ ] Phase 5: mac app functional parity (timeline, approvals UI, plugin management UI, connectors, attachments, config UI).
+- [x] Phase 5: mac app functional parity (timeline, approvals UI, plugin management UI, connectors, attachments, config UI).
   - [x] Add plugin install/update UI (npm spec + local folder/link) and wire into main navigation.
   - [x] Add plugin enable/disable/remove actions to the Plugins UI.
   - [x] Add gateway UI for routes (session keys), receipts, and attachments (upload/list/download).
   - [x] Add chat attachment UX (image picker/preview + send as local image inputs) where supported.
   - [x] Add memory settings controls (enable + embeddings provider/model/sync) to the Settings UI.
   - [x] Add basic task runs timeline: list runs per task + select run + tail/stream events.
-- [ ] Phase 6: Web/admin parity (dashboards + admin workflows where implemented).
+- [x] Phase 6: Web/admin parity (dashboards + admin workflows where implemented).
+  - [x] Add daemon-served admin API endpoints for plugins, gateway status/channels, permissions, and config patching.
+  - [x] Add a minimal web admin dashboard (`/admin`) for session oversight plus plugin/gateway/memory management actions.
+  - [x] Add validation coverage for admin API flows and document new endpoints/commands in AI docs.
 
 Notes:
 - `TEMPLATE_PACK.md` is the parity checklist: use it later to fill tool schemas, routing rules, and tests, then implement remaining gaps using the name `Clawdex`.

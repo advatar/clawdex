@@ -9,6 +9,12 @@ commands:
   - name: daemon-health
     description: Check local clawdexd daemon health endpoint
     cmd: curl -sS http://127.0.0.1:18791/v1/health
+  - name: daemon-admin-overview
+    description: Inspect daemon admin overview snapshot (counts + runtime paths)
+    cmd: curl -sS http://127.0.0.1:18791/v1/admin/overview | jq '{counts,daemon}'
+  - name: daemon-admin-plugins
+    description: List plugins through daemon admin API
+    cmd: curl -sS 'http://127.0.0.1:18791/v1/admin/plugins?includeDisabled=true' | jq '.plugins'
   - name: clawdex-cli
     description: Run the clawdex CLI from source
     cmd: cargo run --manifest-path clawdex/Cargo.toml -- <args>

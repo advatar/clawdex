@@ -14,7 +14,7 @@ services:
       - workspace_dir
   - name: clawdex-daemon
     owner: clawdex
-    description: Daemon HTTP API used by the mac app (tasks/runs/events/approvals/cron).
+    description: Daemon HTTP API used by the mac app and admin web UI (`/admin`, `/v1/admin/*`) for tasks/runs/events/approvals/cron/plugins/config.
     command: clawdexd --bind 127.0.0.1:18791
     ports:
       - name: http
