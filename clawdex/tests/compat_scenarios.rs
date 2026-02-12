@@ -326,6 +326,85 @@ fn gateway_ws_send_enqueues_outbox() -> Result<()> {
 }
 
 #[test]
+fn gateway_http_send_allows_attachments_only() -> Result<()> {
+    let (_base, paths) = temp_paths()?;
+    let url = start_gateway(&paths)?;
+    write_gateway_config(&paths, &url)?;
+
+    let response = gateway::send_message(
+        &paths,
+        &json!({
+            "channel": "slack",
+            "to": "U123",
+            "attachments": [{ "url": "https://example.com/image.png" }],
+            "sessionKey": "slack:U123"
+        }),
+    )?;
+    assert_eq!(response["ok"].as_bool(), Some(true));
+
+    let outbox = paths.state_dir.join("gateway").join("outbox.jsonl");
+    let entries = read_json_lines(&outbox, Some(10))?;
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["channel"].as_str().unwrap_or(""), "slack");
+    assert_eq!(entry["to"].as_str().unwrap_or(""), "U123");
+    assert!(entry.get("text").is_none());
+    assert!(entry.get("message").is_none());
+    let attachments = entry
+        .get("attachments")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(
+        attachments[0].get("url").and_then(|value| value.as_str()),
+        Some("https://example.com/image.png")
+    );
+    Ok(())
+}
+
+#[test]
+fn gateway_http_send_allows_media_url_only() -> Result<()> {
+    let (_base, paths) = temp_paths()?;
+    let url = start_gateway(&paths)?;
+    write_gateway_config(&paths, &url)?;
+
+    let response = gateway::send_message(
+        &paths,
+        &json!({
+            "channel": "slack",
+            "to": "U123",
+            "mediaUrl": "https://example.com/cover.jpg",
+            "mediaUrls": ["https://example.com/clip.mp4"],
+            "sessionKey": "slack:U123"
+        }),
+    )?;
+    assert_eq!(response["ok"].as_bool(), Some(true));
+
+    let outbox = paths.state_dir.join("gateway").join("outbox.jsonl");
+    let entries = read_json_lines(&outbox, Some(10))?;
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert!(entry.get("text").is_none());
+    assert!(entry.get("message").is_none());
+    let attachments = entry
+        .get("attachments")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(attachments.len(), 2);
+    assert_eq!(
+        attachments[0].get("url").and_then(|value| value.as_str()),
+        Some("https://example.com/cover.jpg")
+    );
+    assert_eq!(
+        attachments[1].get("url").and_then(|value| value.as_str()),
+        Some("https://example.com/clip.mp4")
+    );
+    Ok(())
+}
+
+#[test]
 fn gateway_ws_methods_list_and_reload() -> Result<()> {
     let (base, paths) = temp_paths()?;
     let plugin_dir = base.join("plugin-methods");

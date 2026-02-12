@@ -6,6 +6,17 @@
     "to": {"type": "string"},
     "text": {"type": "string"},
     "message": {"type": "string"},
+    "attachments": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "object"}
+    },
+    "mediaUrl": {"type": "string", "minLength": 1},
+    "mediaUrls": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
     "accountId": {"type": "string"},
     "sessionKey": {"type": "string"},
     "bestEffort": {"type": "boolean"},
@@ -16,7 +27,10 @@
   "required": ["channel", "to"],
   "anyOf": [
     {"required": ["text"]},
-    {"required": ["message"]}
+    {"required": ["message"]},
+    {"required": ["attachments"]},
+    {"required": ["mediaUrl"]},
+    {"required": ["mediaUrls"]}
   ],
   "additionalProperties": false
 }

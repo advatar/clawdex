@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use codex_app_server_protocol::{AskForApproval, SandboxPolicy};
+use codex_app_server_protocol::{AskForApproval, ReadOnlyAccess, SandboxPolicy};
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 use crate::app_server::{ApprovalMode, CodexClient, TurnOutcome};
@@ -119,7 +119,9 @@ impl CodexRunner {
 
 pub fn workspace_sandbox_policy(policy: &WorkspacePolicy) -> Result<Option<SandboxPolicy>> {
     if policy.read_only {
-        return Ok(Some(SandboxPolicy::ReadOnly));
+        return Ok(Some(SandboxPolicy::ReadOnly {
+            access: ReadOnlyAccess::FullAccess,
+        }));
     }
     let mut roots = Vec::new();
     for root in &policy.allowed_roots {
@@ -129,6 +131,7 @@ pub fn workspace_sandbox_policy(policy: &WorkspacePolicy) -> Result<Option<Sandb
     }
     Ok(Some(SandboxPolicy::WorkspaceWrite {
         writable_roots: roots,
+        read_only_access: ReadOnlyAccess::FullAccess,
         network_access: policy.network_access,
         exclude_tmpdir_env_var: false,
         exclude_slash_tmp: false,

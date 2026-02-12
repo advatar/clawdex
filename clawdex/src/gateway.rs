@@ -1714,15 +1714,13 @@ pub fn send_message(paths: &ClawdPaths, args: &Value) -> Result<Value> {
 }
 
 fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> Result<Value> {
-    let raw_text = args
+    let text = args
         .get("text")
         .or_else(|| args.get("message"))
         .and_then(|v| v.as_str())
-        .context("message.send requires text or message")?;
-    let text = strip_reasoning_tags_from_text(raw_text);
-    if text.trim().is_empty() {
-        return Err(anyhow::anyhow!("message.send requires non-empty text"));
-    }
+        .map(strip_reasoning_tags_from_text)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
 
     let best_effort = args
         .get("bestEffort")
@@ -1766,6 +1764,24 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("auto-{}", Uuid::new_v4()));
 
+    let has_raw_attachments = args.get("attachments").is_some();
+    let has_media_url = args
+        .get("mediaUrl")
+        .and_then(|v| v.as_str())
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let has_media_urls = args
+        .get("mediaUrls")
+        .and_then(|v| v.as_array())
+        .map(|list| !list.is_empty())
+        .unwrap_or(false);
+
+    if text.is_none() && !has_raw_attachments && !has_media_url && !has_media_urls {
+        return Err(anyhow::anyhow!(
+            "message.send requires text/message or attachments"
+        ));
+    }
+
     if dry_run {
         return Ok(json!({ "ok": true, "dryRun": true }));
     }
@@ -1773,7 +1789,42 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
     let mut route_store = RouteStore::load(paths)?;
     let cfg = load_gateway_config(paths)?;
     let cutoff = route_cutoff_ms(&cfg);
-    let attachments = process_attachments(paths, &cfg, args.get("attachments"))?;
+    let mut attachments = process_attachments(paths, &cfg, args.get("attachments"))
+        .map(Option::unwrap_or_default)?;
+
+    if let Some(media_url) = args
+        .get("mediaUrl")
+        .and_then(|v| v.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        attachments.push(json!({ "url": media_url }));
+    }
+
+    if let Some(media_urls) = args.get("mediaUrls") {
+        let list = media_urls
+            .as_array()
+            .context("message.send mediaUrls must be an array")?;
+        for value in list {
+            let media_url = value
+                .as_str()
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty())
+                .context("message.send mediaUrls entries must be non-empty strings")?;
+            attachments.push(json!({ "url": media_url }));
+        }
+    }
+    let attachments = if attachments.is_empty() {
+        None
+    } else {
+        Some(attachments)
+    };
+
+    if text.is_none() && attachments.is_none() {
+        return Err(anyhow::anyhow!(
+            "message.send requires text/message or attachments"
+        ));
+    }
 
     let mut resolved_session_key = session_key.clone();
     let mut route = None;
@@ -1874,18 +1925,19 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
 
     let entry_account_id = account_id.clone().or(route.account_id.clone());
     let created_at_ms = now_ms();
-    let message_text = text.clone();
     let mut entry = json!({
         "id": Uuid::new_v4().to_string(),
         "sessionKey": session_key,
         "channel": route.channel,
         "to": route.to,
         "accountId": entry_account_id,
-        "text": text,
-        "message": message_text,
         "idempotencyKey": idempotency_key,
         "createdAtMs": created_at_ms,
     });
+    if let Some(text) = text {
+        entry["text"] = Value::String(text.clone());
+        entry["message"] = Value::String(text);
+    }
     if let Some(attachments) = attachments {
         entry["attachments"] = Value::Array(attachments);
     }

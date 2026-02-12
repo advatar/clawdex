@@ -1186,6 +1186,26 @@ mod tests {
     }
 
     #[test]
+    fn validates_message_send_allows_attachments_only() {
+        let args = json!({
+            "channel": "slack",
+            "to": "U123",
+            "attachments": [{ "url": "https://example.com/image.png" }]
+        });
+        assert!(validate_tool_arguments("message.send", &args).is_ok());
+    }
+
+    #[test]
+    fn validates_message_send_allows_media_url_only() {
+        let args = json!({
+            "channel": "slack",
+            "to": "U123",
+            "mediaUrl": "https://example.com/image.png"
+        });
+        assert!(validate_tool_arguments("message.send", &args).is_ok());
+    }
+
+    #[test]
     fn validates_artifact_create_xlsx() {
         let args = json!({
             "outputPath": "reports/demo.xlsx",
