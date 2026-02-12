@@ -33,8 +33,11 @@ final class RuntimeManager: ObservableObject {
 
     // Increment this whenever you change embedded tool wiring.
     private let toolsVersion = "0.3.0"
-    private let openclawPluginsVersion = "1"
+    private let openclawPluginsVersion = "2"
     private let openclawPluginsSourceLabel = "bundled-openclaw"
+    private let blockedBundledOpenClawPlugins: [String: String] = [
+        "matrix": "Blocked due to GHSA-p8p7-x288-28g6 (`request` SSRF) in transitive dependency chain."
+    ]
 
     func bootstrap(appState: AppState) {
         self.appState = appState
@@ -630,6 +633,21 @@ final class RuntimeManager: ObservableObject {
                 self.appendLog("[app] Preinstalling bundled OpenClaw plugins...")
                 var failures = 0
                 for root in pluginRoots {
+                    if let pluginID = self.bundledOpenClawPluginID(for: root),
+                       let reason = self.blockedBundledOpenClawPlugins[pluginID]
+                    {
+                        self.appendLog("[app] Skipping bundled plugin \(pluginID): \(reason)")
+                        do {
+                            try self.removeBundledOpenClawPluginIfInstalled(
+                                clawdexURL: toolPaths.clawdex,
+                                stateDir: stateDir,
+                                pluginID: pluginID
+                            )
+                        } catch {
+                            self.appendLog("[app] Failed to remove blocked plugin \(pluginID): \(error.localizedDescription)")
+                        }
+                        continue
+                    }
                     do {
                         try self.installBundledOpenClawPlugin(
                             clawdexURL: toolPaths.clawdex,
@@ -677,6 +695,38 @@ final class RuntimeManager: ObservableObject {
             }
         }
         return plugins.sorted { $0.lastPathComponent.lowercased() < $1.lastPathComponent.lowercased() }
+    }
+
+    private func bundledOpenClawPluginID(for pluginDir: URL) -> String? {
+        let manifestURL = pluginDir.appendingPathComponent("openclaw.plugin.json")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let pluginID = json["id"] as? String
+        else {
+            return nil
+        }
+        let trimmed = pluginID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func removeBundledOpenClawPluginIfInstalled(
+        clawdexURL: URL,
+        stateDir: URL,
+        pluginID: String
+    ) throws {
+        var args = [
+            "plugins",
+            "remove",
+            "--id",
+            pluginID,
+            "--state-dir",
+            stateDir.path
+        ]
+        if let workspaceURL {
+            args += ["--workspace", workspaceURL.path]
+        }
+        _ = try runClawdexCommand(clawdexURL: clawdexURL, args: args)
+        appendLog("[app] Removed blocked plugin \(pluginID).")
     }
 
     private func installBundledOpenClawPlugin(
