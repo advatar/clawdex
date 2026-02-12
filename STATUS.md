@@ -14,6 +14,7 @@ Upstream Sync (Submodules):
   - [x] Harden gateway attachment data reads to resolve by attachment id only (ignore index `path` field) and reject traversal-style ids with regression tests.
   - [x] Add daemon admin parity surface: `/admin` dashboard + `/v1/admin/*` APIs for overview, plugins, gateway channels, permissions, and config patching.
   - [x] Backport OpenClaw install-script hardening: add `--ignore-scripts` to npm dependency installs during plugin setup.
+  - [x] Backport OpenClaw gateway WS payload policy bump for image uploads (`maxPayload` 8 MiB, `maxBufferedBytes` 16 MiB) with regression coverage.
 
 - [x] Add artifact service tools (xlsx/pptx/docx/pdf) with schema validation + hashing
 - [x] Record artifact events and list outputs at end of task runs

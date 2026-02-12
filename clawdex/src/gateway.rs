@@ -33,6 +33,8 @@ const INBOX_OFFSET_FILE: &str = "inbox_offset.json";
 const AUTH_TOKENS_FILE: &str = "auth_tokens.json";
 const DEVICE_AUTH_FILE: &str = "device_auth.json";
 const DEFAULT_ATTACHMENTS_MAX_BYTES: usize = 5_000_000;
+const WS_MAX_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+const WS_MAX_BUFFERED_BYTES: usize = 16 * 1024 * 1024;
 const DEVICE_CODE_TTL_MS: i64 = 10 * 60 * 1000;
 const DEFAULT_CHANNEL_ORDER: &[&str] = &[
     "telegram",
@@ -2499,8 +2501,8 @@ fn hello_ok_payload(paths: &ClawdPaths, conn_id: &str) -> Value {
         },
         "snapshot": snapshot,
         "policy": {
-            "maxPayload": 1048576,
-            "maxBufferedBytes": 1048576,
+            "maxPayload": WS_MAX_PAYLOAD_BYTES,
+            "maxBufferedBytes": WS_MAX_BUFFERED_BYTES,
             "tickIntervalMs": 30000,
         },
     })
@@ -2965,6 +2967,28 @@ mod tests {
 
         let resolved = resolve_target(&paths, &json!({ "channel": "slack" }))?;
         assert_eq!(resolved.get("channel").and_then(|v| v.as_str()), Some("slack"));
+
+        let _ = std::fs::remove_dir_all(base);
+        Ok(())
+    }
+
+    #[test]
+    fn hello_policy_matches_openclaw_ws_limits() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("clawdex-hello-policy-{}", Uuid::new_v4()));
+        let state_dir = base.join("state");
+        let workspace_dir = base.join("workspace");
+        std::fs::create_dir_all(&workspace_dir)?;
+
+        let (_cfg, paths) = crate::config::load_config(Some(state_dir), Some(workspace_dir))?;
+        let hello = hello_ok_payload(&paths, "conn-1");
+        assert_eq!(
+            hello.pointer("/policy/maxPayload").and_then(|v| v.as_u64()),
+            Some(WS_MAX_PAYLOAD_BYTES as u64)
+        );
+        assert_eq!(
+            hello.pointer("/policy/maxBufferedBytes").and_then(|v| v.as_u64()),
+            Some(WS_MAX_BUFFERED_BYTES as u64)
+        );
 
         let _ = std::fs::remove_dir_all(base);
         Ok(())
