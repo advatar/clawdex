@@ -16,6 +16,11 @@ struct SettingsView: View {
                         UserDefaults.standard.set(newValue, forKey: DefaultsKeys.agentAutoStart)
                     }
 
+                Toggle("Enable DeepThink parallel prepass", isOn: $appState.parallelPrepassEnabled)
+                    .onChange(of: appState.parallelPrepassEnabled) { _, newValue in
+                        UserDefaults.standard.set(newValue, forKey: DefaultsKeys.parallelPrepassEnabled)
+                    }
+
                 Toggle("Launch at login", isOn: $appState.launchAtLoginEnabled)
                     .onChange(of: appState.launchAtLoginEnabled) { _, newValue in
                         LaunchAtLoginController.setEnabled(newValue)

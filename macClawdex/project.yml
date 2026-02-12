@@ -6,10 +6,16 @@ options:
 configFiles:
   Debug: Configs/Signing.xcconfig
   Release: Configs/Signing.xcconfig
+packages:
+  DeepThink:
+    path: ../Packages/DeepThink
 targets:
   Clawdex:
     type: application
     platform: macOS
+    dependencies:
+      - package: DeepThink
+        product: ParallellVibe
     sources:
       - path: Sources/Clawdex
     resources:

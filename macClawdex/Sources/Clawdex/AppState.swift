@@ -5,6 +5,7 @@ final class AppState: ObservableObject {
     @Published var workspaceDisplayPath: String = "Not set"
     @Published var launchAtLoginEnabled: Bool = false
     @Published var agentAutoStart: Bool = true
+    @Published var parallelPrepassEnabled: Bool = false
     @Published var internetEnabled: Bool = true
     @Published var workspaceReadOnly: Bool = false
     @Published var mcpAllowlist: String = ""

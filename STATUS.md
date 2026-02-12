@@ -1,5 +1,8 @@
 # Status
 
+Active:
+- [x] Integrate `Packages/DeepThink` into `macClawdex` and add an optional parallel-agent prepass path in the app runtime.
+
 Upstream Sync (Submodules):
 - [x] Establish and follow a regular cadence to pull upstream changes into our forks and then bump the pinned submodule SHAs in this repo (`codex/` from `openai/main`, `openclaw/` from `openclaw/main`).
 - [x] On each `openclaw/` bump: scan upstream skills/tooling for new/changed tool usage (`openclaw/src/agents/tools`, `openclaw/src/gateway/protocol/schema`), update `compat/` schemas/specs, and add regression tests before porting required behavior into `clawdex/`.

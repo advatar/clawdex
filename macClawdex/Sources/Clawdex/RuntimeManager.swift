@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import AppKit
+import ParallellVibe
 
 final class RuntimeManager: ObservableObject {
     @Published private(set) var isRunning: Bool = false
@@ -46,7 +47,11 @@ final class RuntimeManager: ObservableObject {
         if UserDefaults.standard.object(forKey: DefaultsKeys.agentAutoStart) == nil {
             UserDefaults.standard.set(true, forKey: DefaultsKeys.agentAutoStart)
         }
+        if UserDefaults.standard.object(forKey: DefaultsKeys.parallelPrepassEnabled) == nil {
+            UserDefaults.standard.set(false, forKey: DefaultsKeys.parallelPrepassEnabled)
+        }
         appState.agentAutoStart = UserDefaults.standard.bool(forKey: DefaultsKeys.agentAutoStart)
+        appState.parallelPrepassEnabled = UserDefaults.standard.bool(forKey: DefaultsKeys.parallelPrepassEnabled)
         appState.launchAtLoginEnabled = LaunchAtLoginController.isEnabled()
         appState.hasOpenAIKey = (try? Keychain.loadOpenAIKey()) != nil
 
@@ -198,6 +203,10 @@ final class RuntimeManager: ObservableObject {
             return
         }
 
+        let cleaned = localImagePaths
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
         if let command = parsePluginCommand(text) {
             let payload: [String: Any] = [
                 "type": "plugin_command",
@@ -209,17 +218,151 @@ final class RuntimeManager: ObservableObject {
             return
         }
 
+        if shouldRunParallelPrepass(prompt: text, localImagePaths: cleaned) {
+            runParallelPrepassAndSend(prompt: text, localImagePaths: cleaned)
+            return
+        }
+
+        sendUserPayload(text: text, localImagePaths: cleaned)
+    }
+
+    private func shouldRunParallelPrepass(prompt: String, localImagePaths: [String]) -> Bool {
+        guard appState?.parallelPrepassEnabled == true else { return false }
+        guard localImagePaths.isEmpty else { return false }
+        return !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func sendUserPayload(text: String, localImagePaths: [String]) {
         var payload: [String: Any] = [
             "type": "user_message",
             "text": text
         ]
-        let cleaned = localImagePaths
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        if !cleaned.isEmpty {
-            payload["localImages"] = cleaned
+        if !localImagePaths.isEmpty {
+            payload["localImages"] = localImagePaths
         }
         sendControlMessage(payload)
+    }
+
+    private func runParallelPrepassAndSend(prompt: String, localImagePaths: [String]) {
+        let weakSelf = WeakRuntimeManager(self)
+        appendLog("[app] DeepThink prepass started.")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            Task {
+                guard let strongSelf = weakSelf.value else { return }
+
+                let finalPrompt: String
+                do {
+                    finalPrompt = try await strongSelf.buildParallelPrepassPrompt(for: prompt)
+                    weakSelf.value?.appendLog("[app] DeepThink prepass selected a candidate.")
+                } catch {
+                    finalPrompt = prompt
+                    weakSelf.value?.appendLog("[app] DeepThink prepass failed: \(error.localizedDescription). Using original prompt.")
+                }
+
+                Task { @MainActor in
+                    weakSelf.value?.sendUserPayload(text: finalPrompt, localImagePaths: localImagePaths)
+                }
+            }
+        }
+    }
+
+    private func buildParallelPrepassPrompt(for prompt: String) async throws -> String {
+        let trimmedKey = try Keychain.loadOpenAIKey()?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmedKey.isEmpty else {
+            throw NSError(
+                domain: "Clawdex",
+                code: 1001,
+                userInfo: [NSLocalizedDescriptionKey: "OpenAI API key is missing."]
+            )
+        }
+
+        let environment = ProcessInfo.processInfo.environment
+        let endpointRaw = environment["CLAWDEX_PARALLEL_API_URL"] ?? "https://api.openai.com/v1/chat/completions"
+        guard let endpoint = URL(string: endpointRaw) else {
+            throw NSError(
+                domain: "Clawdex",
+                code: 1002,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid parallel API URL: \(endpointRaw)"]
+            )
+        }
+        let model = resolveParallelModel(environment: environment)
+
+        let provider = APILLMProvider(
+            config: .openAICompatible(endpoint: endpoint, apiKey: trimmedKey, model: model)
+        )
+        var configuration = ParallelVibeConfiguration.default
+        configuration.candidateCount = resolveParallelCandidateCount(environment: environment)
+        configuration.refineRounds = resolveParallelRefineRounds(environment: environment)
+        configuration.allowParallelGeneration = true
+        configuration.allowParallelVerification = true
+
+        let result = try await ParallelVibeEngine(
+            provider: provider,
+            configuration: configuration
+        ).run(prompt: prompt)
+
+        let selected = result.selected.candidate.output
+        return renderParallelPrompt(originalPrompt: prompt, selected: selected)
+    }
+
+    private func resolveParallelModel(environment: [String: String]) -> String {
+        let configured = environment["CLAWDEX_PARALLEL_MODEL"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let configured, !configured.isEmpty {
+            return configured
+        }
+        return "gpt-4.1-mini"
+    }
+
+    private func resolveParallelCandidateCount(environment: [String: String]) -> Int {
+        if let parsed = parseParallelInt(environment["CLAWDEX_PARALLEL_CANDIDATES"]) {
+            return min(max(parsed, 1), 8)
+        }
+        return 3
+    }
+
+    private func resolveParallelRefineRounds(environment: [String: String]) -> Int {
+        if let parsed = parseParallelInt(environment["CLAWDEX_PARALLEL_REFINE_ROUNDS"]) {
+            return min(max(parsed, 0), 4)
+        }
+        return 1
+    }
+
+    private func parseParallelInt(_ raw: String?) -> Int? {
+        guard let raw else { return nil }
+        return Int(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func renderParallelPrompt(originalPrompt: String, selected: CandidateOutput) -> String {
+        var lines: [String] = []
+        lines.append("The user request appears below.")
+        lines.append("A parallel prepass generated a candidate answer. Use it as a starting point, but verify independently and use tools as needed.")
+        lines.append("")
+        lines.append("PREPASS_FINAL_ANSWER:")
+        lines.append(selected.finalAnswer)
+
+        if !selected.keySteps.isEmpty {
+            lines.append("")
+            lines.append("PREPASS_KEY_STEPS:")
+            for step in selected.keySteps {
+                lines.append("- \(step)")
+            }
+        }
+
+        if !selected.failureModes.isEmpty {
+            lines.append("")
+            lines.append("PREPASS_FAILURE_MODES:")
+            for mode in selected.failureModes {
+                lines.append("- \(mode)")
+            }
+        }
+
+        lines.append("")
+        lines.append("ORIGINAL_USER_REQUEST:")
+        lines.append(originalPrompt)
+        return lines.joined(separator: "\n")
     }
 
     func requestConfig() {
