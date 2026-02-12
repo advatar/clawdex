@@ -13,6 +13,7 @@ Upstream Sync (Submodules):
   - [x] Mitigate bundled OpenClaw extension supply risk: block `matrix` plugin installs and skip/auto-remove preinstalled `matrix` while upstream still carries `request` GHSA-p8p7-x288-28g6 (moderate SSRF) transitively.
   - [x] Harden gateway attachment data reads to resolve by attachment id only (ignore index `path` field) and reject traversal-style ids with regression tests.
   - [x] Add daemon admin parity surface: `/admin` dashboard + `/v1/admin/*` APIs for overview, plugins, gateway channels, permissions, and config patching.
+  - [x] Backport OpenClaw install-script hardening: add `--ignore-scripts` to npm dependency installs during plugin setup.
 
 - [x] Add artifact service tools (xlsx/pptx/docx/pdf) with schema validation + hashing
 - [x] Record artifact events and list outputs at end of task runs

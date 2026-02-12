@@ -1321,6 +1321,10 @@ fn run_npm_pack(spec: &str, dest_dir: &Path) -> Result<PathBuf> {
     Ok(dest_dir.join(packed))
 }
 
+fn npm_install_args() -> &'static [&'static str] {
+    &["install", "--omit=dev", "--ignore-scripts", "--silent"]
+}
+
 fn install_dependencies_if_needed(root: &Path, package: Option<&PackageManifest>) -> Result<()> {
     let has_deps = package
         .and_then(|pkg| pkg.dependencies.as_ref())
@@ -1330,7 +1334,7 @@ fn install_dependencies_if_needed(root: &Path, package: Option<&PackageManifest>
         return Ok(());
     }
     let output = Command::new("npm")
-        .args(["install", "--omit=dev", "--silent"])
+        .args(npm_install_args())
         .current_dir(root)
         .env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
         .output()
@@ -2709,6 +2713,16 @@ Do the thing.
         assert!(
             updated.contains(&expected_prefix),
             "expected rewrite to substitute plugin root: {updated}"
+        );
+    }
+
+    #[test]
+    fn npm_install_args_harden_against_lifecycle_scripts() {
+        let args = npm_install_args();
+        assert_eq!(args.first().copied(), Some("install"));
+        assert!(
+            args.contains(&"--ignore-scripts"),
+            "expected npm dependency installs to disable lifecycle scripts"
         );
     }
 
