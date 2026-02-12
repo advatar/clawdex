@@ -164,14 +164,13 @@ fn authorize_gateway_auth(
         .map(|value| value.trim())
         .filter(|value| !value.is_empty());
 
-    let check_token_store =
-        |token: &str, store: &mut TokenStore| -> Result<bool, GatewayAuthFailure> {
-            if store.is_valid(token) {
-                let _ = store.mark_used(token);
-                return Ok(true);
-            }
-            Ok(false)
-        };
+    let check_token_store = |token: &str, store: &mut TokenStore| -> Result<bool, GatewayAuthFailure> {
+        if store.is_valid(token) {
+            let _ = store.mark_used(token);
+            return Ok(true);
+        }
+        Ok(false)
+    };
 
     match auth.mode {
         GatewayAuthMode::None => Ok(()),
@@ -269,10 +268,7 @@ impl PresenceEntry {
         }
         if let Some(last_input_ms) = self.last_input_ms {
             let delta = now_ms.saturating_sub(last_input_ms);
-            map.insert(
-                "lastInputSeconds".to_string(),
-                Value::Number((delta / 1000).into()),
-            );
+            map.insert("lastInputSeconds".to_string(), Value::Number((delta / 1000).into()));
         }
         if let Some(value) = self.reason.as_ref() {
             map.insert("reason".to_string(), Value::String(value.clone()));
@@ -480,8 +476,13 @@ impl GatewayMethodRegistry {
         if key.is_empty() {
             return;
         }
-        self.methods
-            .insert(key, GatewayMethodDefinition { version, handler });
+        self.methods.insert(
+            key,
+            GatewayMethodDefinition {
+                version,
+                handler,
+            },
+        );
     }
 
     fn handle(&self, name: &str, paths: &ClawdPaths, params: &Value) -> GatewayMethodResult {
@@ -826,10 +827,7 @@ fn resolve_channel_order(cfg: &GatewayConfig) -> Vec<String> {
         }
     }
     if order.is_empty() {
-        order = DEFAULT_CHANNEL_ORDER
-            .iter()
-            .map(|entry| (*entry).to_string())
-            .collect();
+        order = DEFAULT_CHANNEL_ORDER.iter().map(|entry| (*entry).to_string()).collect();
     }
     order
 }
@@ -973,7 +971,9 @@ fn gateway_registry_handle(paths: &ClawdPaths) -> GatewayRegistryHandle {
         }
     }
 
-    let mut guard = registries.write().unwrap_or_else(|err| err.into_inner());
+    let mut guard = registries
+        .write()
+        .unwrap_or_else(|err| err.into_inner());
     guard
         .entry(paths.state_dir.clone())
         .or_insert_with(|| Arc::new(RwLock::new(build_gateway_registry(paths))))
@@ -982,22 +982,21 @@ fn gateway_registry_handle(paths: &ClawdPaths) -> GatewayRegistryHandle {
 
 fn reload_gateway_registry(paths: &ClawdPaths) {
     let handle = gateway_registry_handle(paths);
-    let mut guard = handle.write().unwrap_or_else(|err| err.into_inner());
+    let mut guard = handle
+        .write()
+        .unwrap_or_else(|err| err.into_inner());
     *guard = build_gateway_registry(paths);
 }
 
 fn list_gateway_method_versions(paths: &ClawdPaths) -> Vec<Value> {
     let handle = gateway_registry_handle(paths);
-    let guard = handle.read().unwrap_or_else(|err| err.into_inner());
+    let guard = handle
+        .read()
+        .unwrap_or_else(|err| err.into_inner());
     let mut entries = guard.list_versions();
     let mut names: HashSet<String> = entries
         .iter()
-        .filter_map(|entry| {
-            entry
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
+        .filter_map(|entry| entry.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .collect();
     for extra in ["methods.list", "gateway.reload"] {
         if names.insert(extra.to_string()) {
@@ -1015,12 +1014,7 @@ fn list_gateway_method_versions(paths: &ClawdPaths) -> Vec<Value> {
 fn list_gateway_methods(paths: &ClawdPaths) -> Vec<String> {
     let mut entries = list_gateway_method_versions(paths)
         .into_iter()
-        .filter_map(|entry| {
-            entry
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
+        .filter_map(|entry| entry.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .collect::<Vec<_>>();
     entries.sort();
     entries
@@ -1057,13 +1051,7 @@ fn parse_attachment_query(query: Option<&str>) -> AttachmentQuery {
 fn list_attachments(paths: &ClawdPaths, query: AttachmentQuery) -> Result<Vec<Value>> {
     let mut entries = read_json_lines(&attachments_index_path(paths), None)?;
     if let Some(after) = query.after {
-        entries.retain(|entry| {
-            entry
-                .get("createdAtMs")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0)
-                > after
-        });
+        entries.retain(|entry| entry.get("createdAtMs").and_then(|v| v.as_i64()).unwrap_or(0) > after);
     }
     if let Some(limit) = query.limit {
         if entries.len() > limit {
@@ -1111,9 +1099,7 @@ fn decode_attachment_content(content: &str) -> Result<(Vec<u8>, Option<String>)>
             return Err(anyhow::anyhow!("attachment content invalid data url"));
         };
         if !meta.to_lowercase().contains(";base64") {
-            return Err(anyhow::anyhow!(
-                "attachment content must be base64 data url"
-            ));
+            return Err(anyhow::anyhow!("attachment content must be base64 data url"));
         }
         let mime = meta
             .split(';')
@@ -1467,12 +1453,7 @@ fn resolve_gateway_url(cfg: &GatewayConfig) -> Option<String> {
             return Some(trimmed.to_string());
         }
     }
-    if let Some(url) = cfg
-        .url
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(url) = cfg.url.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
         return Some(url);
     }
     cfg.bind
@@ -1725,9 +1706,7 @@ fn route_cutoff_ms(cfg: &GatewayConfig) -> Option<i64> {
 }
 
 fn route_is_fresh(route: &RouteEntry, cutoff: Option<i64>) -> bool {
-    cutoff
-        .map(|cutoff| route.updated_at_ms >= cutoff)
-        .unwrap_or(true)
+    cutoff.map(|cutoff| route.updated_at_ms >= cutoff).unwrap_or(true)
 }
 
 fn route_matches(route: &RouteEntry, channel: Option<&str>, to: Option<&str>) -> bool {
@@ -1824,8 +1803,8 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
     let mut route_store = RouteStore::load(paths)?;
     let cfg = load_gateway_config(paths)?;
     let cutoff = route_cutoff_ms(&cfg);
-    let mut attachments =
-        process_attachments(paths, &cfg, args.get("attachments")).map(Option::unwrap_or_default)?;
+    let mut attachments = process_attachments(paths, &cfg, args.get("attachments"))
+        .map(Option::unwrap_or_default)?;
 
     if let Some(media_url) = args
         .get("mediaUrl")
@@ -2072,10 +2051,7 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
             },
         )?;
         idempotency.insert(&idempotency_key, now_ms())?;
-        let result = response
-            .get("result")
-            .cloned()
-            .unwrap_or_else(|| response.clone());
+        let result = response.get("result").cloned().unwrap_or_else(|| response.clone());
         let mut receipt = build_receipt(
             "sent",
             "outgoing",
@@ -2283,7 +2259,10 @@ pub fn record_incoming(paths: &ClawdPaths, payload: &Value) -> Result<Value> {
         .get("from")
         .and_then(|v| v.as_str())
         .context("incoming requires from")?;
-    let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let text = payload
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     let session_key = format!("{channel}:{from}");
     let received_at_ms = now_ms();
@@ -2327,10 +2306,7 @@ pub fn record_incoming(paths: &ClawdPaths, payload: &Value) -> Result<Value> {
         RouteEntry {
             channel: channel.to_string(),
             to: from.to_string(),
-            account_id: payload
-                .get("accountId")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+            account_id: payload.get("accountId").and_then(|v| v.as_str()).map(|s| s.to_string()),
             updated_at_ms: now_ms(),
         },
     )?;
@@ -2358,7 +2334,8 @@ pub fn drain_inbox(paths: &ClawdPaths) -> Result<Vec<Value>> {
 pub fn run_gateway(bind: &str, paths: &ClawdPaths) -> Result<()> {
     std::fs::create_dir_all(gateway_dir(paths))
         .with_context(|| format!("create gateway dir {}", gateway_dir(paths).display()))?;
-    let server = Server::http(bind).map_err(|err| anyhow::anyhow!("bind gateway {bind}: {err}"))?;
+    let server = Server::http(bind)
+        .map_err(|err| anyhow::anyhow!("bind gateway {bind}: {err}"))?;
 
     for mut request in server.incoming_requests() {
         let response = match handle_request(paths, &mut request) {
@@ -2489,14 +2466,13 @@ fn handle_ws_frame(
         "gateway.reload" => {
             reload_gateway_registry(paths);
             let methods = list_gateway_method_versions(paths);
-            Some(ws_response_ok(
-                &id,
-                json!({ "methods": methods, "reloaded": true }),
-            ))
+            Some(ws_response_ok(&id, json!({ "methods": methods, "reloaded": true })))
         }
         _ => {
             let handle = gateway_registry_handle(paths);
-            let registry = handle.read().unwrap_or_else(|err| err.into_inner());
+            let registry = handle
+                .read()
+                .unwrap_or_else(|err| err.into_inner());
             match registry.handle(method, paths, &params) {
                 Ok(payload) => Some(ws_response_ok(&id, payload)),
                 Err(err) => Some(ws_response_err(&id, err.code(), err.message())),
@@ -2597,9 +2573,7 @@ fn handle_request(
         if wants_data {
             let file_path = match attachment_data_path(paths, attachment_id) {
                 Ok(path) => path,
-                Err(_) => {
-                    return Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)))
-                }
+                Err(_) => return Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404))),
             };
             let data = std::fs::read(&file_path)
                 .with_context(|| format!("read attachment {}", file_path.display()))?;
@@ -2640,9 +2614,7 @@ fn handle_request(
                 attachments.push(store_attachment(paths, &cfg, &payload)?);
             }
             let count = attachments.len();
-            Ok(json_response(
-                json!({ "ok": true, "attachments": attachments, "count": count }),
-            )?)
+            Ok(json_response(json!({ "ok": true, "attachments": attachments, "count": count }))?)
         }
         (&Method::Get, "/v1/attachments") => {
             let query = parse_attachment_query(query);
@@ -2675,9 +2647,7 @@ fn handle_request(
         (&Method::Get, "/v1/auth/tokens") => {
             let token_store = TokenStore::load(paths)?;
             let tokens = token_store.list();
-            Ok(json_response(
-                json!({ "ok": true, "tokens": tokens, "count": token_store.tokens.len() }),
-            )?)
+            Ok(json_response(json!({ "ok": true, "tokens": tokens, "count": token_store.tokens.len() }))?)
         }
         (&Method::Post, "/v1/auth/tokens") => {
             let body = read_body(request)?;
@@ -2695,9 +2665,7 @@ fn handle_request(
                 .context("token required")?;
             let mut token_store = TokenStore::load(paths)?;
             let revoked = token_store.revoke(token)?;
-            Ok(json_response(
-                json!({ "ok": revoked.is_some(), "revoked": revoked }),
-            )?)
+            Ok(json_response(json!({ "ok": revoked.is_some(), "revoked": revoked }))?)
         }
         (&Method::Post, "/v1/auth/rotate") => {
             let body = read_body(request)?;
@@ -2736,14 +2704,20 @@ fn read_body(request: &mut tiny_http::Request) -> Result<Vec<u8>> {
 
 fn json_response(value: Value) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
     let data = serde_json::to_vec(&value)?;
-    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-        .map_err(|_| anyhow::anyhow!("invalid content-type header"))?;
+    let header = tiny_http::Header::from_bytes(
+        &b"Content-Type"[..],
+        &b"application/json"[..],
+    )
+    .map_err(|_| anyhow::anyhow!("invalid content-type header"))?;
     Ok(Response::from_data(data).with_header(header))
 }
 
 fn bytes_response(data: Vec<u8>, mime: &str) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
-    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], mime.as_bytes())
-        .map_err(|_| anyhow::anyhow!("invalid content-type header"))?;
+    let header = tiny_http::Header::from_bytes(
+        &b"Content-Type"[..],
+        mime.as_bytes(),
+    )
+    .map_err(|_| anyhow::anyhow!("invalid content-type header"))?;
     Ok(Response::from_data(data).with_header(header))
 }
 
@@ -2916,10 +2890,7 @@ mod tests {
             },
         )?;
         assert_eq!(filtered.len(), 2);
-        assert_eq!(
-            filtered[0].get("tsMs").and_then(|v| v.as_i64()),
-            Some(2_000)
-        );
+        assert_eq!(filtered[0].get("tsMs").and_then(|v| v.as_i64()), Some(2_000));
 
         let limited = list_receipts(
             &paths,
@@ -2990,16 +2961,10 @@ mod tests {
         )?;
 
         let resolved = resolve_target(&paths, &json!({}))?;
-        assert_eq!(
-            resolved.get("channel").and_then(|v| v.as_str()),
-            Some("whatsapp")
-        );
+        assert_eq!(resolved.get("channel").and_then(|v| v.as_str()), Some("whatsapp"));
 
         let resolved = resolve_target(&paths, &json!({ "channel": "slack" }))?;
-        assert_eq!(
-            resolved.get("channel").and_then(|v| v.as_str()),
-            Some("slack")
-        );
+        assert_eq!(resolved.get("channel").and_then(|v| v.as_str()), Some("slack"));
 
         let _ = std::fs::remove_dir_all(base);
         Ok(())
@@ -3021,7 +2986,10 @@ mod tests {
             "content": "aGVsbG8=",
         });
         let meta = store_attachment(&paths, &cfg, &attachment)?;
-        let stored_path = meta.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let stored_path = meta
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         assert!(!stored_path.is_empty());
         let full_path = gateway_dir(&paths).join(stored_path);
         assert!(full_path.exists());
@@ -3085,14 +3053,8 @@ mod tests {
         assert!(token_store.is_valid(&token));
 
         let poll = poll_device_auth(&paths, &json!({ "deviceCode": device_code }))?;
-        assert_eq!(
-            poll.get("status").and_then(|v| v.as_str()),
-            Some("approved")
-        );
-        assert_eq!(
-            poll.get("token").and_then(|v| v.as_str()),
-            Some(token.as_str())
-        );
+        assert_eq!(poll.get("status").and_then(|v| v.as_str()), Some("approved"));
+        assert_eq!(poll.get("token").and_then(|v| v.as_str()), Some(token.as_str()));
 
         let _ = std::fs::remove_dir_all(base);
         Ok(())
