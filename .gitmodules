@@ -7,3 +7,6 @@
 [submodule "get-shit-done"]
 	path = plugins/get-shit-done
 	url = git@github.com:advatar/get-shit-done.git
+[submodule "Packages/DeepThink"]
+	path = Packages/DeepThink
+	url = git@github-personal:advatar/DeepThink.git
