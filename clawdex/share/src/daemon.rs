@@ -135,7 +135,9 @@ pub fn run_daemon_loop(
         }
 
         if heartbeat_enabled && now >= next_heartbeat {
-            execute_heartbeat(&mut runner, &cfg, &paths)?;
+            if let Err(err) = execute_heartbeat(&mut runner, &cfg, &paths) {
+                eprintln!("[clawdex][heartbeat] tick failed: {err}");
+            }
             next_heartbeat = now + interval as i64;
         }
 
