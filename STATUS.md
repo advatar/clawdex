@@ -5,7 +5,7 @@ Upstream Sync (Submodules):
 - [x] On each `openclaw/` bump: scan upstream skills/tooling for new/changed tool usage (`openclaw/src/agents/tools`, `openclaw/src/gateway/protocol/schema`), update `compat/` schemas/specs, and add regression tests before porting required behavior into `clawdex/`.
 - [x] Codex sync policy is now explicit: prioritize `openclaw` parity bumps; review/bump `codex` opportunistically when integration deltas require it, and capture port tasks before implementation.
 - [x] Keep submodule bump commits isolated (one `chore(submodules)` commit), and land parity/feature ports as separate commits with tests.
-  - Latest bump: 2026-02-12 (codex `befe4fbb0`, openclaw `a5ab9fac0`)
+  - Latest bump: 2026-02-12 (codex `befe4fbb0`, openclaw `bdd0c1232`)
   - [x] Backport OpenClaw gateway send parity update: allow attachment-only / media-only sends (`message` optional in gateway send params) with regression tests.
   - [x] Security sweep on each openclaw bump: review published GH advisories + merged security PRs, run dependency audit, and patch/backport applicable fixes.
   - [x] Add `plugins/get-shit-done/` submodule support to the bundled-plugin flow (auto-install + Codex skills sync), including parsing Claude Code-style command frontmatter and rewriting `~/.claude/...` paths to `${CLAUDE_PLUGIN_ROOT}/...` for portability.
