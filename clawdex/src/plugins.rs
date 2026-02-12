@@ -27,6 +27,33 @@ const BUNDLED_CLAUDE_PLUGINS_DIR_ENV: &str = "CLAWDEX_BUNDLED_CLAUDE_PLUGINS_DIR
 const DISABLE_BUNDLED_CLAUDE_PLUGINS_ENV: &str = "CLAWDEX_DISABLE_DEFAULT_CLAUDE_PLUGINS";
 const BUNDLED_CLAUDE_PLUGINS_SOURCE_LABEL: &str = "bundled-claude";
 const CLAWDEX_PLUGIN_ID_FRONTMATTER_KEY: &str = "clawdex-plugin-id";
+const ALLOW_VULNERABLE_PLUGINS_ENV: &str = "CLAWDEX_ALLOW_VULNERABLE_PLUGINS";
+const VULNERABLE_PLUGIN_BLOCKLIST: &[(&str, &str)] = &[
+    (
+        "matrix",
+        "Blocked due to GHSA-p8p7-x288-28g6 (`request` SSRF) in transitive dependency chain.",
+    ),
+];
+
+fn blocked_plugin_reason(plugin_id: &str) -> Option<&'static str> {
+    VULNERABLE_PLUGIN_BLOCKLIST
+        .iter()
+        .find(|(id, _)| *id == plugin_id)
+        .map(|(_, reason)| *reason)
+}
+
+fn enforce_plugin_security_policy(plugin_id: &str) -> Result<()> {
+    if std::env::var(ALLOW_VULNERABLE_PLUGINS_ENV)
+        .ok()
+        .is_some_and(|value| value.trim() == "1")
+    {
+        return Ok(());
+    }
+    if let Some(reason) = blocked_plugin_reason(plugin_id) {
+        anyhow::bail!("plugin \"{plugin_id}\" blocked by security policy: {reason}");
+    }
+    Ok(())
+}
 
 pub fn ensure_default_claude_plugins_installed(cfg: &ClawdConfig, paths: &ClawdPaths) -> Result<()> {
     if std::env::var(DISABLE_BUNDLED_CLAUDE_PLUGINS_ENV)
@@ -1424,6 +1451,7 @@ fn install_plugin(
             anyhow::bail!("plugin id mismatch: expected {expected_id}, got {plugin_id}");
         }
     }
+    enforce_plugin_security_policy(&plugin_id)?;
 
     let root = plugin_root(paths, &plugin_id);
     if root.exists() && mode == PluginInstallMode::Install {
@@ -2682,6 +2710,17 @@ Do the thing.
             updated.contains(&expected_prefix),
             "expected rewrite to substitute plugin root: {updated}"
         );
+    }
+
+    #[test]
+    fn blocked_plugin_reason_flags_matrix_plugin() {
+        let reason = blocked_plugin_reason("matrix");
+        assert!(reason.is_some(), "expected matrix to be blocked");
+    }
+
+    #[test]
+    fn blocked_plugin_reason_allows_other_plugins() {
+        assert!(blocked_plugin_reason("telegram").is_none());
     }
 
     #[test]

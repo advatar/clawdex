@@ -10,7 +10,7 @@ Upstream Sync (Submodules):
   - [x] Security sweep on each openclaw bump: review published GH advisories + merged security PRs, run dependency audit, and patch/backport applicable fixes.
   - [x] Add `plugins/get-shit-done/` submodule support to the bundled-plugin flow (auto-install + Codex skills sync), including parsing Claude Code-style command frontmatter and rewriting `~/.claude/...` paths to `${CLAUDE_PLUGIN_ROOT}/...` for portability.
   - [x] Fix plugin disable/remove cleanup for command-derived skills that are not namespaced with the plugin id (e.g. `gsd:*` from `get-shit-done`).
-  - [x] Mitigate bundled OpenClaw extension supply risk: skip and auto-remove preinstalled `matrix` plugin while upstream still carries `request` GHSA-p8p7-x288-28g6 (moderate SSRF) transitively.
+  - [x] Mitigate bundled OpenClaw extension supply risk: block `matrix` plugin installs and skip/auto-remove preinstalled `matrix` while upstream still carries `request` GHSA-p8p7-x288-28g6 (moderate SSRF) transitively.
 
 - [x] Add artifact service tools (xlsx/pptx/docx/pdf) with schema validation + hashing
 - [x] Record artifact events and list outputs at end of task runs
