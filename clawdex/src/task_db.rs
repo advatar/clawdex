@@ -315,6 +315,78 @@ impl TaskStore {
         Ok(())
     }
 
+    pub fn get_run(&self, run_id: &str) -> Result<Option<TaskRun>> {
+        self.conn
+            .query_row(
+                "SELECT id, task_id, status, started_at_ms, ended_at_ms, codex_thread_id, sandbox_mode, approval_policy FROM task_runs WHERE id = ?1",
+                params![run_id],
+                |row| {
+                    Ok(TaskRun {
+                        id: row.get(0)?,
+                        task_id: row.get(1)?,
+                        status: row.get(2)?,
+                        started_at_ms: row.get(3)?,
+                        ended_at_ms: row.get(4)?,
+                        codex_thread_id: row.get(5)?,
+                        sandbox_mode: row.get(6)?,
+                        approval_policy: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .context("query run")
+    }
+
+    pub fn list_runs(
+        &self,
+        task_id: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<TaskRun>> {
+        let limit = limit.unwrap_or(50).clamp(1, 500) as i64;
+        let sql = if task_id.is_some() {
+            "SELECT id, task_id, status, started_at_ms, ended_at_ms, codex_thread_id, sandbox_mode, approval_policy FROM task_runs WHERE task_id = ?1 ORDER BY started_at_ms DESC LIMIT ?2"
+        } else {
+            "SELECT id, task_id, status, started_at_ms, ended_at_ms, codex_thread_id, sandbox_mode, approval_policy FROM task_runs ORDER BY started_at_ms DESC LIMIT ?1"
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let mut runs = Vec::new();
+        if let Some(task_id) = task_id {
+            let rows = stmt.query_map(params![task_id, limit], |row| {
+                Ok(TaskRun {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    status: row.get(2)?,
+                    started_at_ms: row.get(3)?,
+                    ended_at_ms: row.get(4)?,
+                    codex_thread_id: row.get(5)?,
+                    sandbox_mode: row.get(6)?,
+                    approval_policy: row.get(7)?,
+                })
+            })?;
+            for row in rows {
+                runs.push(row?);
+            }
+        } else {
+            let rows = stmt.query_map(params![limit], |row| {
+                Ok(TaskRun {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    status: row.get(2)?,
+                    started_at_ms: row.get(3)?,
+                    ended_at_ms: row.get(4)?,
+                    codex_thread_id: row.get(5)?,
+                    sandbox_mode: row.get(6)?,
+                    approval_policy: row.get(7)?,
+                })
+            })?;
+            for row in rows {
+                runs.push(row?);
+            }
+        }
+        Ok(runs)
+    }
+
     pub fn record_event(&self, run_id: &str, kind: &str, payload: &Value) -> Result<TaskEvent> {
         let now = now_ms();
         let id = Uuid::new_v4().to_string();

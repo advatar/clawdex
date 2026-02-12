@@ -12,9 +12,22 @@ services:
     dependencies:
       - state_dir
       - workspace_dir
+  - name: clawdex-daemon
+    owner: clawdex
+    description: Daemon HTTP API used by the mac app (tasks/runs/events/approvals/cron).
+    command: clawdexd --bind 127.0.0.1:18791
+    ports:
+      - name: http
+        port: 18791
+        protocol: http
+    health: /v1/health
+    dependencies:
+      - state_dir
+      - workspace_dir
+      - codex_bin
   - name: clawdex-task-server
     owner: clawdex
-    description: Task HTTP server for UI integration.
+    description: Legacy task HTTP server (CLI/debug path).
     command: clawdex tasks server --bind 127.0.0.1:18790
     ports:
       - name: http

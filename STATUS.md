@@ -103,6 +103,7 @@ Parity Execution (from ROADMAP.md):
   - [x] Add gateway UI for routes (session keys), receipts, and attachments (upload/list/download).
   - [x] Add chat attachment UX (image picker/preview + send as local image inputs) where supported.
   - [x] Add memory settings controls (enable + embeddings provider/model/sync) to the Settings UI.
+  - [x] Add basic task runs timeline: list runs per task + select run + tail/stream events.
 - [ ] Phase 6: Web/admin parity (dashboards + admin workflows where implemented).
 
 Notes:

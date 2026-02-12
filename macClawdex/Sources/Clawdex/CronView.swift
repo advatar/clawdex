@@ -212,7 +212,7 @@ struct CronView: View {
             "message": form.message
         ]
 
-        var body: [String: Any] = [
+        let body: [String: Any] = [
             "name": form.name.isEmpty ? "Untitled Job" : form.name,
             "enabled": form.enabled,
             "sessionTarget": form.sessionTarget,

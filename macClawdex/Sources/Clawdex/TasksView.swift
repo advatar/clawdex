@@ -3,6 +3,7 @@ import SwiftUI
 @MainActor
 final class TasksViewModel: ObservableObject {
     @Published var tasks: [TaskSummary] = []
+    @Published var runs: [TaskRunInfo] = []
     @Published var events: [TaskEvent] = []
     @Published var selectedTaskId: String? = nil
     @Published var currentRunId: String? = nil
@@ -19,8 +20,33 @@ final class TasksViewModel: ObservableObject {
             if selectedTaskId == nil {
                 selectedTaskId = tasks.first?.id
             }
+            await refreshRuns()
         } catch {
             statusMessage = "Failed to load tasks: \(error.localizedDescription)"
+        }
+    }
+
+    func refreshRuns() async {
+        guard let taskId = selectedTaskId else {
+            runs = []
+            currentRunId = nil
+            events = []
+            lastEventTs = 0
+            stopPolling()
+            return
+        }
+        do {
+            let runs = try await client.fetchRuns(taskId: taskId, limit: 100)
+            self.runs = runs.sorted { $0.startedAtMs > $1.startedAtMs }
+            if let current = currentRunId,
+               !runs.contains(where: { $0.id == current }) {
+                currentRunId = nil
+            }
+            if currentRunId == nil {
+                currentRunId = self.runs.first?.id
+            }
+        } catch {
+            statusMessage = "Failed to load runs: \(error.localizedDescription)"
         }
     }
 
@@ -29,6 +55,7 @@ final class TasksViewModel: ObservableObject {
             let task = try await client.createTask(title: title)
             tasks.insert(task, at: 0)
             selectedTaskId = task.id
+            await refreshRuns()
         } catch {
             statusMessage = "Create failed: \(error.localizedDescription)"
         }
@@ -41,10 +68,35 @@ final class TasksViewModel: ObservableObject {
             lastEventTs = 0
             events = []
             statusMessage = "Run started: \(run.id)"
+            await refreshRuns()
             startPolling()
         } catch {
             statusMessage = "Run failed: \(error.localizedDescription)"
         }
+    }
+
+    func handleTaskSelectionChange() async {
+        stopPolling()
+        events = []
+        lastEventTs = 0
+        currentRunId = nil
+        await refreshRuns()
+        await handleRunSelectionChange()
+    }
+
+    func handleRunSelectionChange() async {
+        stopPolling()
+        events = []
+        lastEventTs = 0
+        guard let runId = currentRunId else { return }
+        do {
+            let recent = try await client.fetchRecentEvents(runId: runId, limit: 200)
+            events = recent
+            lastEventTs = max(lastEventTs, recent.map { $0.tsMs }.max() ?? lastEventTs)
+        } catch {
+            // Ignore failures; polling will attempt to recover.
+        }
+        startPolling()
     }
 
     func startPolling() {
@@ -95,6 +147,16 @@ struct TasksView: View {
         }
         .onChange(of: runtime.daemonRunning) { _, running in
             handleDaemonStateChange(running: running)
+        }
+        .onChange(of: viewModel.selectedTaskId) { _, _ in
+            Task {
+                await viewModel.handleTaskSelectionChange()
+            }
+        }
+        .onChange(of: viewModel.currentRunId) { _, _ in
+            Task {
+                await viewModel.handleRunSelectionChange()
+            }
         }
         .onDisappear {
             viewModel.stopPolling()
@@ -176,6 +238,41 @@ struct TasksView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            }
+
+            Divider()
+
+            HStack {
+                Text("Runs")
+                    .font(.headline)
+
+                Spacer()
+
+                Button("Refresh") {
+                    Task {
+                        await viewModel.refreshRuns()
+                    }
+                }
+            }
+
+            HStack {
+                Picker("Run", selection: $viewModel.currentRunId) {
+                    Text("None").tag(String?.none)
+                    ForEach(viewModel.runs, id: \.id) { run in
+                        Text("\(formatMs(run.startedAtMs)) • \(run.status)")
+                            .tag(String?.some(run.id))
+                    }
+                }
+                .labelsHidden()
+
+                if let runId = viewModel.currentRunId,
+                   let run = viewModel.runs.first(where: { $0.id == runId }) {
+                    Text(run.endedAtMs == nil && run.status == "running" ? "Running" : run.status.capitalized)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
             }
 
             Divider()

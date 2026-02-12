@@ -138,6 +138,51 @@ fn handle_request(
             }, broker.clone())?;
             Ok(json_response(json!({ "run": run }))?)
         }
+        _ if method == Method::Get && url.starts_with("/v1/runs") => {
+            let (path, query) = split_path_query(&url);
+            if path == "/v1/runs" {
+                let task_id = query_param_string(query, "taskId");
+                let limit = query_param_usize(query, "limit").unwrap_or(50).clamp(1, 500);
+                let store = TaskStore::open(paths)?;
+                let runs = store.list_runs(task_id.as_deref(), Some(limit))?;
+                return Ok(json_response(json!({ "runs": runs }))?);
+            }
+
+            let Some(rest) = path.strip_prefix("/v1/runs/") else {
+                return Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)));
+            };
+            let rest = rest.trim_matches('/');
+            if rest.is_empty() {
+                return Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)));
+            }
+            if let Some(run_id) = rest.strip_suffix("/events") {
+                let run_id = run_id.trim_matches('/');
+                if run_id.is_empty() {
+                    return Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)));
+                }
+                let after = query_param_i64(query, "after");
+                let limit = query_param_usize(query, "limit").unwrap_or(200).clamp(1, 2000);
+                let wait_ms = query_param_i64(query, "wait").unwrap_or(0);
+                let store = TaskStore::open(paths)?;
+                let mut events = match after {
+                    None => store.list_events(run_id, Some(limit))?,
+                    Some(after) if wait_ms > 0 => wait_for_events(&store, run_id, after, limit, wait_ms)?,
+                    Some(after) => store.list_events_after(run_id, after, limit)?,
+                };
+                if after.is_none() {
+                    // list_events returns newest-first; return chronological for UI consumption.
+                    events.reverse();
+                }
+                return Ok(json_response(json!({ "events": events }))?);
+            }
+
+            let run_id = rest;
+            let store = TaskStore::open(paths)?;
+            if let Some(run) = store.get_run(run_id)? {
+                return Ok(json_response(json!({ "run": run }))?);
+            }
+            Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)))
+        }
         _ if method == Method::Get && url.starts_with("/v1/cron/jobs") => {
             let (path, query) = split_path_query(&url);
             if path != "/v1/cron/jobs" {
@@ -234,20 +279,6 @@ fn handle_request(
             Ok(json_response(json!({ "ok": ok }))?)
         }
         _ => {
-            if method == Method::Get && url.starts_with("/v1/runs/") {
-                let (run_id, query) = split_path_query(&url);
-                let run_id = run_id.trim_start_matches("/v1/runs/").trim_end_matches("/events");
-                let after = query_param_i64(query, "after").unwrap_or(0);
-                let limit = query_param_usize(query, "limit").unwrap_or(200);
-                let wait_ms = query_param_i64(query, "wait").unwrap_or(0);
-                let store = TaskStore::open(paths)?;
-                let events = if wait_ms > 0 {
-                    wait_for_events(&store, run_id, after, limit, wait_ms)?
-                } else {
-                    store.list_events_after(run_id, after, limit)?
-                };
-                return Ok(json_response(json!({ "events": events }))?);
-            }
             Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)))
         }
     }
@@ -298,6 +329,23 @@ fn query_param_i64(query: Option<&str>, key: &str) -> Option<i64> {
         let v = parts.next().unwrap_or("").trim();
         if k == key {
             return v.parse::<i64>().ok();
+        }
+    }
+    None
+}
+
+fn query_param_string(query: Option<&str>, key: &str) -> Option<String> {
+    let query = query?;
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let k = parts.next()?.trim();
+        let v = parts.next().unwrap_or("").trim();
+        if k == key {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            return Some(trimmed.to_string());
         }
     }
     None

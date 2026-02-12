@@ -11,6 +11,8 @@ struct TaskRunInfo: Hashable {
     let id: String
     let taskId: String
     let status: String
+    let startedAtMs: Int64
+    let endedAtMs: Int64?
 }
 
 struct TaskEvent: Identifiable, Hashable {
@@ -138,7 +140,70 @@ final class DaemonClient {
               let status = run?["status"] as? String else {
             throw NSError(domain: "Clawdex", code: 5, userInfo: [NSLocalizedDescriptionKey: "Invalid run response"])
         }
-        return TaskRunInfo(id: id, taskId: taskId, status: status)
+        let startedAtMs = int64Value(run?["started_at_ms"]) ?? 0
+        let endedAtMs = int64Value(run?["ended_at_ms"])
+        return TaskRunInfo(
+            id: id,
+            taskId: taskId,
+            status: status,
+            startedAtMs: startedAtMs,
+            endedAtMs: endedAtMs
+        )
+    }
+
+    func fetchRuns(taskId: String?, limit: Int = 50) async throws -> [TaskRunInfo] {
+        var components = URLComponents(url: baseURL.appendingPathComponent("/v1/runs"), resolvingAgainstBaseURL: false)
+        var items: [URLQueryItem] = [
+            URLQueryItem(name: "limit", value: "\(max(1, min(500, limit)))")
+        ]
+        if let taskId {
+            items.append(URLQueryItem(name: "taskId", value: taskId))
+        }
+        components?.queryItems = items
+        guard let url = components?.url else {
+            throw NSError(domain: "Clawdex", code: 7, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])
+        }
+
+        let (data, _) = try await URLSession.shared.data(from: url)
+        let obj = try parseObject(data: data)
+        let itemsArray = obj["runs"] as? [[String: Any]] ?? []
+        return itemsArray.compactMap { item -> TaskRunInfo? in
+            guard let id = item["id"] as? String,
+                  let taskId = item["task_id"] as? String,
+                  let status = item["status"] as? String else { return nil }
+            let startedAtMs = int64Value(item["started_at_ms"]) ?? 0
+            let endedAtMs = int64Value(item["ended_at_ms"])
+            return TaskRunInfo(
+                id: id,
+                taskId: taskId,
+                status: status,
+                startedAtMs: startedAtMs,
+                endedAtMs: endedAtMs
+            )
+        }
+    }
+
+    func fetchRecentEvents(runId: String, limit: Int) async throws -> [TaskEvent] {
+        var urlComponents = URLComponents(url: baseURL.appendingPathComponent("/v1/runs/\(runId)/events"), resolvingAgainstBaseURL: false)
+        urlComponents?.queryItems = [
+            URLQueryItem(name: "limit", value: "\(max(1, min(2000, limit)))")
+        ]
+        guard let url = urlComponents?.url else {
+            throw NSError(domain: "Clawdex", code: 8, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])
+        }
+
+        let (data, _) = try await URLSession.shared.data(from: url)
+        let obj = try parseObject(data: data)
+        let items = obj["events"] as? [[String: Any]] ?? []
+        return items.compactMap { item -> TaskEvent? in
+            guard let id = item["id"] as? String,
+                  let kind = item["kind"] as? String else { return nil }
+            let tsMs = int64Value(item["ts_ms"]) ?? 0
+            let payloadObj = item["payload"]
+            let payloadData = try? JSONSerialization.data(withJSONObject: payloadObj ?? [:], options: [])
+            let payloadString = payloadData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            return TaskEvent(id: id, tsMs: tsMs, kind: kind, payload: payloadString)
+        }
     }
 
     func fetchEvents(runId: String, after: Int64, waitMs: Int64) async throws -> [TaskEvent] {
