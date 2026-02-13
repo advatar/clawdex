@@ -4,6 +4,7 @@ Active:
 - [x] Integrate `Packages/DeepThink` into `macClawdex` and add an optional parallel-agent prepass path in the app runtime.
 - [x] Integrate AntennaProtocol in macClawdex and ship a peer-assist flow for reaching external agent peers (relay-published MBP2P help requests).
 - [x] Upstream sync pass: bump `openclaw`/`codex` submodules to latest `main` and backport any newly applicable OpenClaw parity fixes.
+- [x] Document Antenna peer-assist integration in user/dev docs (`README.md`, `MAC_APP.md`, `docs/ai/*`).
 - [x] WORK.md execution pass: close remaining task-runtime gaps starting with `tasks follow` live event tailing, then continue with run lifecycle controls (`cancel`/`resume`/`fork`).
   - [x] Add `clawdex tasks follow --run-id <id>` live event tailing and wire it into the CLI.
   - [x] Add `clawdex tasks cancel --run-id <id>` and wire cancellation to app-server `turn/interrupt`.

@@ -16,7 +16,7 @@ This README focuses on local development and the `clawdex` CLI surface.
 1. `clawdex/` is the Rust CLI/runtime (this repo’s primary implementation).
 2. `codex/` is the Codex submodule (used by `clawdex ui-bridge`).
 3. `openclaw/` is the OpenClaw submodule (optional; used as a skills source).
-4. `macClawdex/` is the macOS menu‑bar app starter that embeds `codex` + `clawdex`.
+4. `macClawdex/` is the macOS menu‑bar app starter that embeds `codex` + `clawdex` and supports peer-assist publishing via Antenna (MBP2P).
 5. `plugins/` contains bundled Claude-style plugin/content packs that Clawdex can auto-install on first run (including `plugins/get-shit-done/`).
 
 ---
@@ -24,7 +24,8 @@ This README focuses on local development and the `clawdex` CLI surface.
 **Prereqs (Dev)**
 1. Rust toolchain (stable) for `clawdex` and `codex` builds.
 2. macOS + Xcode only if you plan to build `macClawdex`.
-3. OpenClaw is optional and only needed if you want to sync its skills.
+3. For mac peer-assist builds, AntennaProtocol must exist at `/Volumes/XCodeX/Antenna/swift/AntennaProtocol` (local Swift package dependency).
+4. OpenClaw is optional and only needed if you want to sync its skills.
 
 ---
 
@@ -121,6 +122,28 @@ clawdex ui-bridge --stdio \
 The bridge spawns `codex app-server` and streams assistant messages back to stdout:
 - `{"type":"assistant_message","text":"..."}`
 - `{"type":"error","message":"..."}`
+
+---
+
+**macOS Peer Assist (Antenna / MBP2P)**
+
+The mac app can publish peer help requests to an Antenna relay using MBP2P envelopes.
+
+1. Open app Settings and configure:
+   - `Enable peer assist`
+   - `Relay URL (POST endpoint)`
+   - `Category ENS` (for topic routing)
+   - `Anonymous key` (optional)
+2. In Chat, send:
+   - `/peers <question>`
+3. The app publishes a `help_request` event to the relay and prints:
+   - event id
+   - publish topic
+   - replies topic
+
+Current scope:
+- Publish-only flow is implemented in the app.
+- Automatic peer reply subscription/rendering is not wired yet.
 
 ---
 

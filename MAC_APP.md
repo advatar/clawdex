@@ -8,6 +8,7 @@ This starter is a **menu‑bar macOS app** that:
   - **Workspace folder picker** using **security‑scoped bookmarks**
   - **Tasks + approvals** views (daemon IPC)
   - **Schedule** view for cron jobs
+  - **Peer assist** settings + `/peers <question>` publish flow (Antenna / MBP2P)
 
 ---
 
@@ -28,7 +29,31 @@ Minimal required stdout events:
 
 ---
 
-## 2) Build + Embed Flow
+## 2) Peer Assist (Antenna / MBP2P)
+
+The mac app includes a peer-assist publish flow that sends MBP2P `help_request` events to a configured relay.
+
+Build/runtime prerequisites:
+- Swift package dependency: `AntennaProtocol` at `/Volumes/XCodeX/Antenna/swift/AntennaProtocol`
+- Regenerate the Xcode project after dependency edits: `cd macClawdex && xcodegen generate`
+
+User flow:
+1. Open Settings -> `Peer Assist (Antenna)`.
+2. Set:
+   - `Enable peer assist`
+   - `Relay URL (POST endpoint)`
+   - `Category ENS`
+   - `Anonymous key` (optional)
+3. In chat, send `/peers <question>`.
+
+Current behavior:
+- Publishes an envelope to the configured relay and returns `event`, `topic`, and `replies` identifiers in chat.
+- Rejects `/peers` sends that include image attachments.
+- Does not auto-subscribe/render peer replies yet.
+
+---
+
+## 3) Build + Embed Flow
 
 ### A) Build‑time: universal2 binaries + embed + sign
 The Xcode build script does the following:
@@ -77,7 +102,7 @@ This avoids mutating the app bundle and keeps all state inside the sandbox conta
 
 ---
 
-## 3) Step‑by‑Step Checklist
+## 4) Step‑by‑Step Checklist
 
 ### Step 0 — Place the project
 - The folder lives at: `macClawdex/`
@@ -110,7 +135,7 @@ In `Scripts/build_and_embed_rust.sh`, update or override:
 
 ---
 
-## 4) App Store Constraints (Design Notes)
+## 5) App Store Constraints (Design Notes)
 
 If your goal is “App Store + full agent,” align with Apple’s sandbox rules:
 - Use a user‑selected workspace and security‑scoped bookmarks.
@@ -129,7 +154,7 @@ The starter app already includes:
 
 ---
 
-## 5) Embedding Additional Helpers
+## 6) Embedding Additional Helpers
 
 If you add more binaries (gateway, extra MCP servers, etc.):
 

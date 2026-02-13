@@ -9,6 +9,9 @@ commands:
   - name: mac-project-generate
     description: Regenerate Clawdex.xcodeproj from macClawdex/project.yml (required after package/dependency edits)
     cmd: cd macClawdex && xcodegen generate
+  - name: antenna-protocol-test
+    description: Run AntennaProtocol package tests used by macOS peer-assist publishing
+    cmd: swift test --package-path /Volumes/XCodeX/Antenna/swift/AntennaProtocol
   - name: daemon-health
     description: Check local clawdexd daemon health endpoint
     cmd: curl -sS http://127.0.0.1:18791/v1/health
