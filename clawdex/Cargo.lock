@@ -566,6 +566,7 @@ dependencies = [
  "schemars 0.8.22",
  "serde",
  "serde_json",
+ "shlex",
  "strum_macros",
  "thiserror 2.0.18",
  "ts-rs",
