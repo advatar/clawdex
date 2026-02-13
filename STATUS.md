@@ -4,6 +4,7 @@ Active:
 - [x] Integrate `Packages/DeepThink` into `macClawdex` and add an optional parallel-agent prepass path in the app runtime.
 - [ ] WORK.md execution pass: close remaining task-runtime gaps starting with `tasks follow` live event tailing, then continue with run lifecycle controls (`cancel`/`resume`/`fork`).
   - [x] Add `clawdex tasks follow --run-id <id>` live event tailing and wire it into the CLI.
+  - [x] Add `clawdex tasks cancel --run-id <id>` and wire cancellation to app-server `turn/interrupt`.
   - [x] Add `clawdex tasks resume --run-id <id>` wired to app-server `thread/resume`.
   - [x] Add `clawdex tasks fork --run-id <id>` wired to app-server `thread/fork`.
 

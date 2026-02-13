@@ -176,6 +176,15 @@ enum TasksCommand {
         #[arg(long = "auto-approve")]
         auto_approve: bool,
     },
+    /// Request cancellation of a running task run
+    Cancel {
+        #[arg(long = "run-id")]
+        run_id: String,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
     /// List events for a task run
     Events {
         #[arg(long = "run-id")]
@@ -512,6 +521,15 @@ fn main() -> Result<()> {
                 resume_from_run_id: None,
                 fork_from_run_id: Some(run_id),
             }),
+            TasksCommand::Cancel {
+                run_id,
+                state_dir,
+                workspace,
+            } => {
+                let value = tasks::cancel_run_command(&run_id, state_dir, workspace)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
             TasksCommand::Events {
                 run_id,
                 limit,

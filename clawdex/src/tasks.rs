@@ -85,6 +85,40 @@ pub fn list_events_command(
     Ok(json!({ "events": events }))
 }
 
+pub fn cancel_run_command(
+    run_id: &str,
+    state_dir: Option<PathBuf>,
+    workspace: Option<PathBuf>,
+) -> Result<Value> {
+    let (_cfg, paths) = load_config(state_dir, workspace)?;
+    let store = TaskStore::open(&paths)?;
+    let run = store
+        .get_run(run_id)?
+        .with_context(|| format!("run id not found: {run_id}"))?;
+    if is_terminal_run_status(&run.status) {
+        return Ok(json!({
+            "ok": false,
+            "cancelRequested": false,
+            "runId": run_id,
+            "status": run.status,
+            "reason": "run is already terminal",
+        }));
+    }
+    let requested = store.request_run_cancel(run_id)?;
+    if requested {
+        let _ = store.record_event(
+            run_id,
+            "cancel_requested",
+            &json!({ "requestedAtMs": now_ms() }),
+        );
+    }
+    Ok(json!({
+        "ok": requested,
+        "cancelRequested": requested,
+        "runId": run_id,
+    }))
+}
+
 pub fn follow_events_command(
     run_id: &str,
     poll_ms: u64,
@@ -483,22 +517,52 @@ impl TaskEngine {
         }
 
         let sandbox_policy = workspace_sandbox_policy(&self.paths.workspace_policy)?;
-        let outcome = client.run_turn(
+        let run_id = run.id.clone();
+        let mut cancel_marker_sent = false;
+        let outcome = client.run_turn_with_inputs_interruptible(
             &thread_id,
-            &prompt,
+            vec![codex_app_server_protocol::UserInput::Text {
+                text: prompt,
+                text_elements: Vec::new(),
+            }],
             approval_policy,
             sandbox_policy,
             Some(self.paths.workspace_dir.clone()),
+            |thread_id, turn_id| {
+                let cancel_requested = store_rc
+                    .borrow()
+                    .is_run_cancel_requested(&run_id)
+                    .unwrap_or(false);
+                if cancel_requested && !cancel_marker_sent {
+                    cancel_marker_sent = true;
+                    let _ = store_rc.borrow().mark_run_cancel_sent(&run_id);
+                    let _ = store_rc.borrow().record_event(
+                        &run_id,
+                        "turn_interrupt_requested",
+                        &json!({ "threadId": thread_id, "turnId": turn_id }),
+                    );
+                }
+                cancel_requested
+            },
         );
 
         let store = store_rc.borrow();
         match outcome {
             Ok(turn_outcome) => {
-                store.update_run_status(&run.id, "completed")?;
+                let status = if turn_outcome.status == codex_app_server_protocol::TurnStatus::Interrupted {
+                    "cancelled"
+                } else {
+                    "completed"
+                };
+                store.update_run_status(&run.id, status)?;
                 store.record_event(
                     &run.id,
                     "turn_completed",
-                    &json!({ "message": turn_outcome.message, "warnings": turn_outcome.warnings }),
+                    &json!({
+                        "message": turn_outcome.message,
+                        "warnings": turn_outcome.warnings,
+                        "status": turn_outcome.status,
+                    }),
                 )?;
                 if let Ok(artifacts) = store.list_artifacts(&run.id) {
                     if !artifacts.is_empty() {

@@ -183,7 +183,7 @@ Codex app-server streams `item/started`, `item/completed`, `item/agentMessage/de
 Codex supports thread resume/fork and turn interrupts.  [oai_citation:22‡OpenAI Developers](https://developers.openai.com/codex/app-server)
 
 #### Checklist
-- [ ] Implement `task_run.cancel()`: send `turn/interrupt`
+- [x] Implement `task_run.cancel()`: send `turn/interrupt`
 - [x] Implement `task_run.resume()`:
   - [x] call `thread/resume`
   - [x] start a new turn within same thread

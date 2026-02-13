@@ -321,6 +321,21 @@ fn handle_request(
             )?;
             Ok(json_response(json!({ "run": run }))?)
         }
+        _ if method == Method::Post && url.starts_with("/v1/runs/") && url.ends_with("/cancel") => {
+            let run_id = url
+                .trim_start_matches("/v1/runs/")
+                .trim_end_matches("/cancel")
+                .trim_matches('/');
+            if run_id.is_empty() {
+                return Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)));
+            }
+            let value = crate::tasks::cancel_run_command(
+                run_id,
+                Some(paths.state_dir.clone()),
+                Some(paths.workspace_dir.clone()),
+            )?;
+            Ok(json_response(value)?)
+        }
         _ if method == Method::Get && url.starts_with("/v1/runs") => {
             let (path, query) = split_path_query(&url);
             if path == "/v1/runs" {

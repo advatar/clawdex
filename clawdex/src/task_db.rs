@@ -135,6 +135,14 @@ impl TaskStore {
                 FOREIGN KEY(task_id) REFERENCES tasks(id)
             );
 
+            CREATE TABLE IF NOT EXISTS run_controls (
+                task_run_id TEXT PRIMARY KEY,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                cancel_requested_at_ms INTEGER,
+                cancel_sent_at_ms INTEGER,
+                FOREIGN KEY(task_run_id) REFERENCES task_runs(id)
+            );
+
             CREATE TABLE IF NOT EXISTS events (
                 id TEXT PRIMARY KEY,
                 task_run_id TEXT NOT NULL,
@@ -182,6 +190,7 @@ impl TaskStore {
             CREATE INDEX IF NOT EXISTS idx_approvals_run_id ON approvals(task_run_id, ts_ms);
             CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(task_run_id, created_at_ms);
             CREATE INDEX IF NOT EXISTS idx_plugins_enabled ON plugins(enabled, updated_at_ms);
+            CREATE INDEX IF NOT EXISTS idx_run_controls_cancel ON run_controls(cancel_requested, cancel_requested_at_ms);
             "#,
         )?;
         Ok(())
@@ -304,6 +313,10 @@ impl TaskStore {
             ],
         )?;
         self.conn.execute(
+            "INSERT INTO run_controls(task_run_id, cancel_requested, cancel_requested_at_ms, cancel_sent_at_ms) VALUES (?1, 0, NULL, NULL)",
+            params![id],
+        )?;
+        self.conn.execute(
             "UPDATE tasks SET last_run_at_ms = ?1 WHERE id = ?2",
             params![now, task_id],
         )?;
@@ -410,6 +423,37 @@ impl TaskStore {
             }
         }
         Ok(runs)
+    }
+
+    pub fn request_run_cancel(&self, run_id: &str) -> Result<bool> {
+        let now = now_ms();
+        let updated = self.conn.execute(
+            "UPDATE run_controls SET cancel_requested = 1, cancel_requested_at_ms = COALESCE(cancel_requested_at_ms, ?1) WHERE task_run_id = ?2",
+            params![now, run_id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    pub fn is_run_cancel_requested(&self, run_id: &str) -> Result<bool> {
+        let value: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT cancel_requested FROM run_controls WHERE task_run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("query run cancel flag")?;
+        Ok(value.unwrap_or(0) != 0)
+    }
+
+    pub fn mark_run_cancel_sent(&self, run_id: &str) -> Result<()> {
+        let now = now_ms();
+        self.conn.execute(
+            "UPDATE run_controls SET cancel_sent_at_ms = ?1 WHERE task_run_id = ?2",
+            params![now, run_id],
+        )?;
+        Ok(())
     }
 
     pub fn record_event(&self, run_id: &str, kind: &str, payload: &Value) -> Result<TaskEvent> {

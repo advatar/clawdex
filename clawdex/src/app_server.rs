@@ -14,6 +14,7 @@ use codex_app_server_protocol::{
     SandboxPolicy, ServerRequest, ThreadForkParams, ThreadForkResponse, ThreadResumeParams,
     ThreadResumeResponse, ThreadStartParams, ToolRequestUserInputAnswer,
     ToolRequestUserInputParams, ToolRequestUserInputResponse, TurnStartParams, TurnStatus,
+    TurnInterruptParams, TurnInterruptResponse,
     UserInput as V2UserInput,
 };
 use serde::de::DeserializeOwned;
@@ -116,6 +117,7 @@ impl UserInputHandler for AutoUserInputHandler {
 pub struct TurnOutcome {
     pub message: String,
     pub warnings: Vec<String>,
+    pub status: TurnStatus,
 }
 
 pub struct CodexClient {
@@ -255,6 +257,20 @@ impl CodexClient {
         )
     }
 
+    pub fn turn_interrupt(&mut self, thread_id: &str, turn_id: &str) -> Result<()> {
+        let request_id = self.request_id();
+        let request = ClientRequest::TurnInterrupt {
+            request_id: request_id.clone(),
+            params: TurnInterruptParams {
+                thread_id: thread_id.to_string(),
+                turn_id: turn_id.to_string(),
+            },
+        };
+        let _response: TurnInterruptResponse =
+            self.send_request(request, request_id, "turn/interrupt")?;
+        Ok(())
+    }
+
     pub fn run_turn_with_inputs(
         &mut self,
         thread_id: &str,
@@ -280,15 +296,62 @@ impl CodexClient {
         let response: codex_app_server_protocol::TurnStartResponse =
             self.send_request(request, request_id, "turn/start")?;
 
-        let outcome = self.stream_turn(thread_id, &response.turn.id)?;
+        let outcome = self.stream_turn(thread_id, &response.turn.id, None)?;
         Ok(outcome)
     }
 
-    fn stream_turn(&mut self, thread_id: &str, turn_id: &str) -> Result<TurnOutcome> {
+    pub fn run_turn_with_inputs_interruptible<F>(
+        &mut self,
+        thread_id: &str,
+        input: Vec<V2UserInput>,
+        approval_policy: Option<AskForApproval>,
+        sandbox_policy: Option<SandboxPolicy>,
+        cwd: Option<std::path::PathBuf>,
+        mut should_interrupt: F,
+    ) -> Result<TurnOutcome>
+    where
+        F: FnMut(&str, &str) -> bool,
+    {
+        let request_id = self.request_id();
+        let mut params = TurnStartParams {
+            thread_id: thread_id.to_string(),
+            input,
+            ..Default::default()
+        };
+        params.approval_policy = approval_policy;
+        params.sandbox_policy = sandbox_policy;
+        params.cwd = cwd;
+
+        let request = ClientRequest::TurnStart {
+            request_id: request_id.clone(),
+            params,
+        };
+        let response: codex_app_server_protocol::TurnStartResponse =
+            self.send_request(request, request_id, "turn/start")?;
+
+        let callback: &mut dyn FnMut(&str, &str) -> bool = &mut should_interrupt;
+        let outcome = self.stream_turn(thread_id, &response.turn.id, Some(callback))?;
+        Ok(outcome)
+    }
+
+    fn stream_turn(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        mut should_interrupt: Option<&mut dyn FnMut(&str, &str) -> bool>,
+    ) -> Result<TurnOutcome> {
         let mut delta = String::new();
         let mut last_agent_message: Option<String> = None;
-
-        loop {
+        let mut interrupt_sent = false;
+        let turn_status = loop {
+            if !interrupt_sent {
+                if let Some(check) = should_interrupt.as_mut() {
+                    if check(thread_id, turn_id) {
+                        self.turn_interrupt(thread_id, turn_id)?;
+                        interrupt_sent = true;
+                    }
+                }
+            }
             let notification = self.next_notification()?;
             let Ok(server_notification) = ServerNotification::try_from(notification) else {
                 continue;
@@ -321,7 +384,7 @@ impl CodexClient {
                                 return Err(anyhow::anyhow!(err.message));
                             }
                         }
-                        break;
+                        break payload.turn.status;
                     }
                 }
                 ServerNotification::Error(payload) => {
@@ -331,7 +394,7 @@ impl CodexClient {
                 }
                 _ => {}
             }
-        }
+        };
 
         let message = if !delta.is_empty() {
             delta
@@ -341,7 +404,11 @@ impl CodexClient {
             String::new()
         };
         let warnings = std::mem::take(&mut self.warnings);
-        Ok(TurnOutcome { message, warnings })
+        Ok(TurnOutcome {
+            message,
+            warnings,
+            status: turn_status,
+        })
     }
 
     fn send_request<T>(
