@@ -302,6 +302,16 @@ fn handle_request(
                 .get("codexPath")
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from);
+            let resume_from_run_id = payload
+                .get("resumeFromRunId")
+                .or_else(|| payload.get("resume_from_run_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let fork_from_run_id = payload
+                .get("forkFromRunId")
+                .or_else(|| payload.get("fork_from_run_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
 
             let engine = TaskEngine::new(cfg.clone(), paths.clone());
             let run = engine.start_task_async_with_broker(
@@ -314,8 +324,8 @@ fn handle_request(
                     prompt,
                     title,
                     task_id,
-                    resume_from_run_id: None,
-                    fork_from_run_id: None,
+                    resume_from_run_id,
+                    fork_from_run_id,
                 },
                 broker.clone(),
             )?;

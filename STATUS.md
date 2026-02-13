@@ -7,6 +7,7 @@ Active:
   - [x] Add `clawdex tasks cancel --run-id <id>` and wire cancellation to app-server `turn/interrupt`.
   - [x] Add `clawdex tasks resume --run-id <id>` wired to app-server `thread/resume`.
   - [x] Add `clawdex tasks fork --run-id <id>` wired to app-server `thread/fork`.
+  - [x] Extend daemon `POST /v1/runs` to accept `resumeFromRunId` / `forkFromRunId` for async run continuation.
 
 Upstream Sync (Submodules):
 - [x] Establish and follow a regular cadence to pull upstream changes into our forks and then bump the pinned submodule SHAs in this repo (`codex/` from `openai/main`, `openclaw/` from `openclaw/main`).
