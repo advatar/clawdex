@@ -148,6 +148,22 @@ fn resolve_gateway_auth(cfg: &GatewayConfig) -> GatewayAuth {
     }
 }
 
+fn safe_equal_secret(provided: Option<&str>, expected: Option<&str>) -> bool {
+    let (Some(provided), Some(expected)) = (provided, expected) else {
+        return false;
+    };
+    let provided_bytes = provided.as_bytes();
+    let expected_bytes = expected.as_bytes();
+    if provided_bytes.len() != expected_bytes.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (lhs, rhs) in provided_bytes.iter().zip(expected_bytes.iter()) {
+        diff |= lhs ^ rhs;
+    }
+    diff == 0
+}
+
 fn authorize_gateway_auth(
     auth: &GatewayAuth,
     attempt: &GatewayAuthAttempt,
@@ -182,10 +198,8 @@ fn authorize_gateway_auth(
                     message: "missing gateway token".to_string(),
                 });
             };
-            if let Some(expected) = auth.token.as_deref() {
-                if provided == expected {
-                    return Ok(());
-                }
+            if safe_equal_secret(Some(provided), auth.token.as_deref()) {
+                return Ok(());
             }
             if let Some(store) = token_store.as_deref_mut() {
                 if check_token_store(provided, store)? {
@@ -207,10 +221,8 @@ fn authorize_gateway_auth(
                     message: "missing gateway password".to_string(),
                 });
             };
-            if let Some(expected) = auth.password.as_deref() {
-                if provided == expected {
-                    return Ok(());
-                }
+            if safe_equal_secret(Some(provided), auth.password.as_deref()) {
+                return Ok(());
             }
             if let Some(store) = token_store.as_deref_mut() {
                 if check_token_store(provided, store)? {
@@ -2786,6 +2798,19 @@ mod tests {
             password: Some("secret".to_string()),
         };
         assert!(authorize_gateway_auth(&auth, &ok, None).is_ok());
+    }
+
+    #[test]
+    fn safe_equal_secret_accepts_exact_match() {
+        assert!(safe_equal_secret(Some("secret-token"), Some("secret-token")));
+    }
+
+    #[test]
+    fn safe_equal_secret_rejects_mismatch_or_missing() {
+        assert!(!safe_equal_secret(Some("secret-token"), Some("secret-tokEn")));
+        assert!(!safe_equal_secret(Some("short"), Some("much-longer")));
+        assert!(!safe_equal_secret(None, Some("secret")));
+        assert!(!safe_equal_secret(Some("secret"), None));
     }
 
     #[test]
