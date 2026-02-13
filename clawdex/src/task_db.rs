@@ -136,6 +136,13 @@ impl TaskStore {
                 FOREIGN KEY(task_id) REFERENCES tasks(id)
             );
 
+            CREATE TABLE IF NOT EXISTS task_policies (
+                task_id TEXT PRIMARY KEY,
+                policy_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                FOREIGN KEY(task_id) REFERENCES tasks(id)
+            );
+
             CREATE TABLE IF NOT EXISTS run_controls (
                 task_run_id TEXT PRIMARY KEY,
                 cancel_requested INTEGER NOT NULL DEFAULT 0,
@@ -188,6 +195,7 @@ impl TaskStore {
             );
 
             CREATE INDEX IF NOT EXISTS idx_task_runs_task_id ON task_runs(task_id);
+            CREATE INDEX IF NOT EXISTS idx_task_policies_updated ON task_policies(updated_at_ms);
             CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(task_run_id, ts_ms);
             CREATE INDEX IF NOT EXISTS idx_approvals_run_id ON approvals(task_run_id, ts_ms);
             CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(task_run_id, created_at_ms);
@@ -282,6 +290,39 @@ impl TaskStore {
             )
             .optional()
             .context("query task by title")
+    }
+
+    pub fn upsert_task_policy(&self, task_id: &str, policy: &Value) -> Result<()> {
+        let now = now_ms();
+        let policy_json = serde_json::to_string(policy).context("serialize task policy")?;
+        self.conn.execute(
+            r#"
+            INSERT INTO task_policies(task_id, policy_json, updated_at_ms)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(task_id) DO UPDATE SET
+              policy_json = excluded.policy_json,
+              updated_at_ms = excluded.updated_at_ms
+            "#,
+            params![task_id, policy_json, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_task_policy(&self, task_id: &str) -> Result<Option<Value>> {
+        let raw: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT policy_json FROM task_policies WHERE task_id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("query task policy")?;
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let policy = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null);
+        Ok(Some(policy))
     }
 
     pub fn get_task(&self, task_id: &str) -> Result<Option<Task>> {

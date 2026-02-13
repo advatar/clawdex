@@ -36,6 +36,8 @@ pub struct McpPermissionsConfig {
     pub allow: Option<Vec<String>>,
     pub deny: Option<Vec<String>>,
     pub plugins: Option<std::collections::HashMap<String, bool>>,
+    #[serde(alias = "serverPolicies")]
+    pub server_policies: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -156,6 +158,7 @@ pub struct McpPolicy {
     allow: std::collections::HashSet<String>,
     deny: std::collections::HashSet<String>,
     plugins: std::collections::HashMap<String, bool>,
+    server_policies: std::collections::HashMap<String, String>,
 }
 
 impl McpPolicy {
@@ -173,6 +176,14 @@ impl McpPolicy {
     pub fn is_plugin_enabled(&self, plugin_id: &str) -> bool {
         let key = normalize_mcp_name(plugin_id);
         self.plugins.get(&key).copied().unwrap_or(true)
+    }
+
+    pub fn server_policy(&self, server_name: &str) -> &str {
+        let key = normalize_mcp_name(server_name);
+        self.server_policies
+            .get(&key)
+            .map(|v| v.as_str())
+            .unwrap_or("allow_always")
     }
 }
 
@@ -317,6 +328,7 @@ pub fn resolve_mcp_policy(cfg: &ClawdConfig) -> McpPolicy {
     let mut allow = std::collections::HashSet::new();
     let mut deny = std::collections::HashSet::new();
     let mut plugins = std::collections::HashMap::new();
+    let mut server_policies = std::collections::HashMap::new();
     if let Some(mcp) = cfg.permissions.as_ref().and_then(|p| p.mcp.as_ref()) {
         if let Some(list) = mcp.allow.as_ref() {
             for entry in list {
@@ -342,11 +354,22 @@ pub fn resolve_mcp_policy(cfg: &ClawdConfig) -> McpPolicy {
                 }
             }
         }
+        if let Some(map) = mcp.server_policies.as_ref() {
+            for (key, value) in map {
+                let normalized = normalize_mcp_name(key);
+                let policy = value.trim().to_lowercase().replace('-', "_");
+                if normalized.is_empty() || policy.is_empty() {
+                    continue;
+                }
+                server_policies.insert(normalized, policy);
+            }
+        }
     }
     McpPolicy {
         allow,
         deny,
         plugins,
+        server_policies,
     }
 }
 

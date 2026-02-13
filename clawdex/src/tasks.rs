@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use tiny_http::{Method, Response, Server, StatusCode};
 
 use crate::app_server::{ApprovalHandler, ApprovalMode, CodexClient, EventSink, UserInputHandler};
-use crate::config::{load_config, ClawdConfig, ClawdPaths};
+use crate::config::{load_config, ClawdConfig, ClawdPaths, WorkspacePolicy};
 use crate::runner::workspace_sandbox_policy;
 use crate::approvals::{ApprovalBroker, BrokerApprovalHandler, BrokerUserInputHandler};
 use crate::audit;
@@ -36,6 +36,7 @@ pub struct TaskRunOptions {
     pub state_dir: Option<PathBuf>,
     pub auto_approve: bool,
     pub approval_policy: Option<AskForApproval>,
+    pub policy: Option<Value>,
     pub prompt: Option<String>,
     pub title: Option<String>,
     pub task_id: Option<String>,
@@ -269,6 +270,7 @@ struct PreparedRun {
     prompt: String,
     codex_path: PathBuf,
     approval_policy: Option<AskForApproval>,
+    workspace_policy: WorkspacePolicy,
     thread_launch: ThreadLaunch,
 }
 
@@ -313,15 +315,24 @@ impl TaskEngine {
             );
         }
         let (task, created) = resolve_task(&store, opts)?;
+        let task_policy = resolve_effective_task_policy(&store, &task.id, opts.policy.as_ref())?;
 
         let approval_policy = opts
             .approval_policy
+            .or_else(|| task_policy_approval_policy(task_policy.as_ref()))
             .or_else(|| resolve_approval_policy(&self.cfg));
+        let workspace_policy = task_policy_workspace_policy(
+            task_policy.as_ref(),
+            &self.paths.workspace_policy,
+            &self.paths.workspace_dir,
+        );
 
-        let sandbox_label = if self.paths.workspace_policy.read_only {
+        let sandbox_label = if workspace_policy.read_only {
             "read-only"
-        } else {
+        } else if workspace_policy.network_access {
             "workspace-write"
+        } else {
+            "workspace-write-no-network"
         };
         let run = store.create_run(
             &task.id,
@@ -341,6 +352,7 @@ impl TaskEngine {
             prompt,
             codex_path,
             approval_policy,
+            workspace_policy,
             thread_launch: ThreadLaunch::Start,
         })
     }
@@ -365,14 +377,23 @@ impl TaskEngine {
         let task = store
             .get_task(&source_run.task_id)?
             .with_context(|| format!("task missing for source run: {}", source_run.task_id))?;
+        let task_policy = resolve_effective_task_policy(store, &task.id, opts.policy.as_ref())?;
 
         let approval_policy = opts
             .approval_policy
+            .or_else(|| task_policy_approval_policy(task_policy.as_ref()))
             .or_else(|| resolve_approval_policy(&self.cfg));
-        let sandbox_label = if self.paths.workspace_policy.read_only {
+        let workspace_policy = task_policy_workspace_policy(
+            task_policy.as_ref(),
+            &self.paths.workspace_policy,
+            &self.paths.workspace_dir,
+        );
+        let sandbox_label = if workspace_policy.read_only {
             "read-only"
-        } else {
+        } else if workspace_policy.network_access {
             "workspace-write"
+        } else {
+            "workspace-write-no-network"
         };
         let run = store.create_run(
             &task.id,
@@ -391,6 +412,7 @@ impl TaskEngine {
             prompt,
             codex_path,
             approval_policy,
+            workspace_policy,
             thread_launch: launch(source_run_id.to_string(), source_thread_id),
         })
     }
@@ -410,6 +432,7 @@ impl TaskEngine {
             prompt,
             codex_path,
             approval_policy,
+            workspace_policy,
             thread_launch,
         } = prepared;
 
@@ -516,7 +539,7 @@ impl TaskEngine {
             );
         }
 
-        let sandbox_policy = workspace_sandbox_policy(&self.paths.workspace_policy)?;
+        let sandbox_policy = workspace_sandbox_policy(&workspace_policy)?;
         let run_id = run.id.clone();
         let mut cancel_marker_sent = false;
         let outcome = client.run_turn_with_inputs_interruptible(
@@ -665,6 +688,110 @@ fn resolve_approval_policy(cfg: &ClawdConfig) -> Option<AskForApproval> {
         _ => AskForApproval::OnRequest,
     };
     Some(policy)
+}
+
+fn parse_approval_policy(raw: &str) -> Option<AskForApproval> {
+    let normalized = raw.trim().to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    let policy = match normalized.as_str() {
+        "never" => AskForApproval::Never,
+        "on-failure" | "onfailure" => AskForApproval::OnFailure,
+        "unless-trusted" | "unlesstrusted" => AskForApproval::UnlessTrusted,
+        _ => AskForApproval::OnRequest,
+    };
+    Some(policy)
+}
+
+fn resolve_effective_task_policy(
+    store: &TaskStore,
+    task_id: &str,
+    override_policy: Option<&Value>,
+) -> Result<Option<Value>> {
+    let override_policy = override_policy.and_then(|policy| policy.as_object().cloned());
+    if let Some(policy) = override_policy {
+        let value = Value::Object(policy);
+        store.upsert_task_policy(task_id, &value)?;
+        return Ok(Some(value));
+    }
+    store.get_task_policy(task_id)
+}
+
+fn task_policy_approval_policy(policy: Option<&Value>) -> Option<AskForApproval> {
+    let policy = policy?.as_object()?;
+    let raw = policy
+        .get("approvalPolicy")
+        .or_else(|| policy.get("approval_policy"))
+        .and_then(|v| v.as_str())?;
+    parse_approval_policy(raw)
+}
+
+fn task_policy_workspace_policy(
+    policy: Option<&Value>,
+    base: &WorkspacePolicy,
+    workspace_dir: &PathBuf,
+) -> WorkspacePolicy {
+    let mut resolved = base.clone();
+    let Some(policy) = policy.and_then(|value| value.as_object()) else {
+        return resolved;
+    };
+
+    if let Some(mode) = policy
+        .get("sandboxMode")
+        .or_else(|| policy.get("sandbox_mode"))
+        .and_then(|v| v.as_str())
+    {
+        if mode.eq_ignore_ascii_case("read-only") || mode.eq_ignore_ascii_case("readonly") {
+            resolved.read_only = true;
+        } else if mode.eq_ignore_ascii_case("workspace-write")
+            || mode.eq_ignore_ascii_case("workspace")
+            || mode.eq_ignore_ascii_case("write")
+        {
+            resolved.read_only = false;
+        }
+    }
+
+    if let Some(read_only) = policy
+        .get("readOnly")
+        .or_else(|| policy.get("read_only"))
+        .and_then(|v| v.as_bool())
+    {
+        resolved.read_only = read_only;
+    }
+
+    if let Some(network_access) = policy
+        .get("networkAccess")
+        .or_else(|| policy.get("network_access"))
+        .or_else(|| policy.get("internet"))
+        .and_then(|v| v.as_bool())
+    {
+        resolved.network_access = network_access;
+    }
+
+    if let Some(roots) = policy
+        .get("allowedRoots")
+        .or_else(|| policy.get("allowed_roots"))
+        .and_then(|v| v.as_array())
+    {
+        let parsed: Vec<PathBuf> = roots
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|raw| {
+                let path = PathBuf::from(raw);
+                if path.is_absolute() {
+                    path
+                } else {
+                    workspace_dir.join(path)
+                }
+            })
+            .collect();
+        if !parsed.is_empty() {
+            resolved.allowed_roots = parsed;
+        }
+    }
+
+    resolved
 }
 
 fn print_follow_event(event: &TaskEvent) -> Result<()> {

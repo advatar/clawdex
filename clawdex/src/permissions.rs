@@ -13,6 +13,7 @@ pub struct PermissionsUpdate {
     pub mcp_allow: Option<Vec<String>>,
     pub mcp_deny: Option<Vec<String>>,
     pub mcp_plugins: Option<Vec<(String, bool)>>,
+    pub mcp_server_policies: Option<Vec<(String, String)>>,
 }
 
 pub fn get_permissions_command(
@@ -30,7 +31,10 @@ pub fn get_permissions_command(
         "mcp": {
             "allow": mcp.and_then(|m| m.allow.clone()).unwrap_or_default(),
             "deny": mcp.and_then(|m| m.deny.clone()).unwrap_or_default(),
-            "plugins": mcp.and_then(|m| m.plugins.clone()).unwrap_or_default()
+            "plugins": mcp.and_then(|m| m.plugins.clone()).unwrap_or_default(),
+            "serverPolicies": mcp
+                .and_then(|m| m.server_policies.clone())
+                .unwrap_or_default()
         }
     }))
 }
@@ -73,6 +77,27 @@ pub fn set_permissions_command(
         }
         let mut mcp_patch = Map::new();
         mcp_patch.insert("plugins".to_string(), Value::Object(plugins_map));
+        let mut permissions_patch = Map::new();
+        permissions_patch.insert("mcp".to_string(), Value::Object(mcp_patch));
+        let entry = patch
+            .entry("permissions".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        merge_config_value(entry, &Value::Object(permissions_patch));
+    }
+
+    if let Some(server_policies) = update.mcp_server_policies {
+        let mut server_map = Map::new();
+        for (server_name, mode) in server_policies {
+            if server_name.trim().is_empty() || mode.trim().is_empty() {
+                continue;
+            }
+            server_map.insert(
+                server_name,
+                Value::String(mode.trim().to_lowercase().replace('-', "_")),
+            );
+        }
+        let mut mcp_patch = Map::new();
+        mcp_patch.insert("serverPolicies".to_string(), Value::Object(server_map));
         let mut permissions_patch = Map::new();
         permissions_patch.insert("mcp".to_string(), Value::Object(mcp_patch));
         let entry = patch

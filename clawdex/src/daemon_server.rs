@@ -547,6 +547,35 @@ fn handle_request(
             let task = store.create_task(title)?;
             Ok(json_response(json!({ "task": task }))?)
         }
+        _ if method == Method::Get && url.starts_with("/v1/tasks/") && url.ends_with("/policy") => {
+            let task_id = url
+                .trim_start_matches("/v1/tasks/")
+                .trim_end_matches("/policy")
+                .trim_matches('/');
+            if task_id.is_empty() {
+                return Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)));
+            }
+            let store = TaskStore::open(paths)?;
+            let policy = store.get_task_policy(task_id)?.unwrap_or(Value::Null);
+            Ok(json_response(json!({ "taskId": task_id, "policy": policy }))?)
+        }
+        _ if method == Method::Post && url.starts_with("/v1/tasks/") && url.ends_with("/policy") => {
+            let task_id = url
+                .trim_start_matches("/v1/tasks/")
+                .trim_end_matches("/policy")
+                .trim_matches('/');
+            if task_id.is_empty() {
+                return Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)));
+            }
+            let payload = parse_json_body_or_null(request).context("parse task policy patch")?;
+            let policy = payload.get("policy").cloned().unwrap_or(payload);
+            if !policy.is_object() {
+                anyhow::bail!("task policy must be an object");
+            }
+            let store = TaskStore::open(paths)?;
+            store.upsert_task_policy(task_id, &policy)?;
+            Ok(json_response(json!({ "ok": true, "taskId": task_id, "policy": policy }))?)
+        }
         (&Method::Post, "/v1/runs") => {
             let body = read_body(request)?;
             let payload: Value = serde_json::from_str(&body).context("parse run request")?;
@@ -582,6 +611,7 @@ fn handle_request(
                 .or_else(|| payload.get("fork_from_run_id"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let policy = payload.get("policy").cloned();
 
             let engine = TaskEngine::new(cfg.clone(), paths.clone());
             let run = engine.start_task_async_with_broker(
@@ -591,6 +621,7 @@ fn handle_request(
                     state_dir: None,
                     auto_approve,
                     approval_policy: None,
+                    policy,
                     prompt,
                     title,
                     task_id,
@@ -960,6 +991,26 @@ fn parse_permissions_update(payload: &Value) -> Result<PermissionsUpdate> {
     } else {
         None
     };
+    let mcp_server_policies = if let Some(value) = payload
+        .get("mcpServers")
+        .or_else(|| payload.pointer("/mcp/serverPolicies"))
+    {
+        let map = value.as_object().context("mcpServers must be an object")?;
+        let mut out = Vec::new();
+        for (server, mode_value) in map {
+            let mode = mode_value
+                .as_str()
+                .with_context(|| format!("mcpServers.{server} must be a string"))?;
+            let normalized = mode.trim().to_lowercase().replace('-', "_");
+            if normalized.is_empty() {
+                continue;
+            }
+            out.push((server.to_string(), normalized));
+        }
+        Some(out)
+    } else {
+        None
+    };
 
     Ok(PermissionsUpdate {
         internet,
@@ -967,6 +1018,7 @@ fn parse_permissions_update(payload: &Value) -> Result<PermissionsUpdate> {
         mcp_allow,
         mcp_deny,
         mcp_plugins,
+        mcp_server_policies,
     })
 }
 
