@@ -9,6 +9,9 @@ commands:
   - name: daemon-health
     description: Check local clawdexd daemon health endpoint
     cmd: curl -sS http://127.0.0.1:18791/v1/health
+  - name: daemon-ipc-health
+    description: Check clawdexd local IPC socket via JSON-RPC (`health` method)
+    cmd: python3 -c "import json,socket,os; p=os.path.expanduser('~/.codex/clawdex/daemon.sock'); s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(p); s.sendall((json.dumps({'jsonrpc':'2.0','id':'health','method':'health'})+'\\n').encode()); print(s.recv(4096).decode().strip())"
   - name: daemon-admin-overview
     description: Inspect daemon admin overview snapshot (counts + runtime paths)
     cmd: curl -sS http://127.0.0.1:18791/v1/admin/overview | jq '{counts,daemon}'

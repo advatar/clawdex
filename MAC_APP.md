@@ -116,6 +116,11 @@ If your goal is “App Store + full agent,” align with Apple’s sandbox rules
 - Use a user‑selected workspace and security‑scoped bookmarks.
 - Avoid downloading or executing new code at runtime.
 - Stop background processes when the user quits.
+- Restrict connectors to:
+  - built-in connectors shipped in the app bundle
+  - remote MCP servers over HTTPS
+- Do not spawn user-installed local MCP binaries in the App Store build.
+- Keep local MCP process spawning for non-App-Store distribution (Homebrew/DMG).
 
 The starter app already includes:
 - `com.apple.security.files.user-selected.read-write` and bookmark entitlements

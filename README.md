@@ -263,9 +263,18 @@ Workspace policy notes:
 1. Description: Run the daemon runtime with HTTP IPC (`/v1/tasks`, `/v1/runs`).
 2. Options:
    - `--bind <addr>` bind address (default `127.0.0.1:18791`).
+   - `--ipc-uds <path>` Unix domain socket path for JSON-RPC local IPC (default `<state-dir>/daemon.sock`).
+   - `--no-ipc-uds` disable the default Unix socket IPC endpoint.
    - `--workspace <path>` overrides workspace directory.
    - `--state-dir <path>` overrides state directory.
    - `--codex-path <path>` overrides the `codex` binary path.
+
+Daemon UDS JSON-RPC:
+- Socket path defaults to `<state-dir>/daemon.sock` (unless `--no-ipc-uds`).
+- JSON-RPC method `daemon.request` proxies to the daemon HTTP API:
+  - `params.httpMethod` (`GET|POST|PUT|PATCH|DELETE`)
+  - `params.path` (for example `/v1/health`)
+  - `params.body` (optional JSON request body)
 
 `clawdex gateway`
 1. Description: Run the minimal HTTP gateway (outbox/inbox + route tracking).
@@ -291,6 +300,14 @@ Workspace policy notes:
    - `--codex-path <path>` path to the `codex` binary.
    - `--state-dir <path>` state directory (also seeds CODEX_HOME under `<state>/codex`).
    - `--workspace <path>` workspace directory.
+
+UI bridge event subscriptions:
+- App can subscribe to streamed Codex turn events:
+  - `{"type":"subscribe_events","subscriptionId":"ui","kinds":["turn_started","turn_completed"]}`
+  - `{"type":"unsubscribe_events","subscriptionId":"ui"}`
+  - `{"type":"list_event_subscriptions"}`
+- Bridge emits subscriber-targeted events:
+  - `{"type":"ui_event","subscriptionId":"ui","eventKind":"turn_completed","event":{...}}`
 
 `clawdex tasks list`
 1. Description: List tasks in the local task store.

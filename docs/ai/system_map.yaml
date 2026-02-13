@@ -14,12 +14,16 @@ services:
       - workspace_dir
   - name: clawdex-daemon
     owner: clawdex
-    description: Daemon HTTP API used by the mac app and admin web UI (`/admin`, `/v1/admin/*`) for tasks/runs/events/approvals/cron/plugins/config.
-    command: clawdexd --bind 127.0.0.1:18791
+    description: Daemon runtime exposing HTTP admin/task APIs plus local Unix socket JSON-RPC IPC (`daemon.request`).
+    command: clawdexd --bind 127.0.0.1:18791 --ipc-uds ~/.codex/clawdex/daemon.sock
     ports:
       - name: http
         port: 18791
         protocol: http
+    sockets:
+      - name: ipc
+        path: ~/.codex/clawdex/daemon.sock
+        protocol: jsonrpc
     health: /v1/health
     dependencies:
       - state_dir

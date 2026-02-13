@@ -488,8 +488,8 @@ If you want this as a literal implementation sequence for the next commits, here
 
 ## A. Foundation (daemon + DB + API)
 - [x] Create `clawdexd` crate (or rename current binary) and add SQLite store
-- [ ] Add local IPC (UDS gRPC/JSON-RPC) for CLI/app
-- [ ] Convert `ui_bridge.rs` from “write a file” → “publish events to subscribers”
+- [x] Add local IPC (UDS gRPC/JSON-RPC) for CLI/app
+- [x] Convert `ui_bridge.rs` from “write a file” → “publish events to subscribers”
 
 ## B. Task engine
 - [x] Implement `TaskEngine::start_run(prompt, workspace, policies)`
@@ -535,7 +535,7 @@ If you want this as a literal implementation sequence for the next commits, here
   - plugins + permissions settings
 - [x] Bundle `codex` + `clawdexd` in app
 - [x] Implement folder picker + bookmarks
-- [ ] For App Store: restrict connectors to built-in/remote; document constraints  [oai_citation:44‡GitHub](https://github.com/openai/codex/issues/6634)
+- [x] For App Store: restrict connectors to built-in/remote; document constraints  [oai_citation:44‡GitHub](https://github.com/openai/codex/issues/6634)
 
 ## J. Audit + compliance
 - [x] Implement event/approval export
