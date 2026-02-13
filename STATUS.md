@@ -14,6 +14,7 @@ Active:
   - [x] Add daemon local IPC over Unix domain sockets using JSON-RPC for app/CLI clients.
   - [x] Convert `ui_bridge` event flow to publish structured run events to subscribers (while keeping current message/error output compatibility).
   - [x] Document App Store connector constraints (built-in + remote connectors only; no local spawned MCP binaries).
+  - [x] Reconcile stale narrative-phase checkboxes in `WORK.md` so only true remaining gaps stay unchecked.
 
 Upstream Sync (Submodules):
 - [x] Establish and follow a regular cadence to pull upstream changes into our forks and then bump the pinned submodule SHAs in this repo (`codex/` from `openai/main`, `openclaw/` from `openclaw/main`).

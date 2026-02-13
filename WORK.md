@@ -135,20 +135,21 @@ I’ll lay this out as **phases** with **step-by-step checklists** and *exact* c
 **Goal:** Keep Codex upstream nearly untouched; treat it as an engine you orchestrate via app-server + skills + MCP config.
 
 ### Checklist
-- [ ] Define three processes/binaries:
-  - [ ] `clawdexd` (daemon/runtime)
-  - [ ] `clawdex` (CLI client)
-  - [ ] `Clawdex.app` (macOS client)
+Unchecked items in Phases 0-8 below represent true remaining gaps after parity/port work.
+- [x] Define three processes/binaries:
+  - [x] `clawdexd` (daemon/runtime)
+  - [x] `clawdex` (CLI client)
+  - [x] `Clawdex.app` (macOS client)
 - [ ] Make `clawdexd` the only component that directly:
   - starts/stops Codex app-server processes  [oai_citation:17‡OpenAI Developers](https://developers.openai.com/codex/app-server)  
   - manages skills installation / plugin sync  [oai_citation:18‡OpenAI Developers](https://developers.openai.com/codex/skills/)  
   - manages MCP configs  [oai_citation:19‡OpenAI Developers](https://developers.openai.com/codex/mcp/)  
-- [ ] Create a stable local API between clients and daemon:
-  - [ ] **Unix domain socket** (best for CLI/macOS app)
-  - [ ] Optional localhost HTTP (for debugging / future UI)
-- [ ] Choose persistence:
-  - [ ] SQLite (single user, durable, queryable)
-  - [ ] Add a JSONL append-only event log for audit export (optional; see Phase 6)
+- [x] Create a stable local API between clients and daemon:
+  - [x] **Unix domain socket** (best for CLI/macOS app)
+  - [x] Optional localhost HTTP (for debugging / future UI)
+- [x] Choose persistence:
+  - [x] SQLite (single user, durable, queryable)
+  - [x] Add a JSONL append-only event log for audit export (optional; see Phase 6)
 
 **Why this matches Cowork:** Cowork is a “rich client + local VM runtime.” Your analog is “rich client + daemon runtime + Codex app-server engine.”  [oai_citation:20‡Claude Help Center](https://support.claude.com/en/articles/13345190-getting-started-with-cowork)
 
@@ -172,11 +173,9 @@ Tables (minimum):
 Codex app-server streams `item/started`, `item/completed`, `item/agentMessage/delta`, etc.  [oai_citation:21‡OpenAI Developers](https://developers.openai.com/codex/app-server)
 
 #### Checklist
-- [ ] Replace `send_prompt()` returning a single String with:
-  - [ ] `start_task_turn(...) -> TurnHandle`
-  - [ ] `TurnHandle` yields a stream of events for UI (tokio channel)
-- [ ] Persist every event to `events` table in real time
-- [ ] Emit a separate “UI event” stream that clients can subscribe to:
+- [x] Replace single-response prompt flow with streamed turn execution/events.
+- [x] Persist every event to `events` table in real time
+- [x] Emit a separate “UI event” stream that clients can subscribe to:
   - CLI shows progress; mac app renders timeline
 
 ### 1.3 Implement cancellation + resume
@@ -202,16 +201,16 @@ Codex also explicitly positions approvals as part of the experience (“watch pl
 **Pattern:** app-server request → store in DB → notify UI → await decision → respond.
 
 #### Checklist (code changes)
-- [ ] Replace `CLAWD_AUTO_APPROVE` logic with a pluggable broker:
-  - [ ] `trait ApprovalUi { async fn request_approval(...) -> Decision }`
-- [ ] On every approval request:
-  - [ ] store `request_json` in `approvals`
-  - [ ] emit `ApprovalRequested` event to clients
-  - [ ] block waiting for a response (with timeout + cancel path)
+- [x] Replace `CLAWD_AUTO_APPROVE` logic with a pluggable broker:
+  - [x] Broker-backed approval handlers + daemon approval resolution API
+- [x] On every approval request:
+  - [x] store `request_json` in `approvals`
+  - [x] expose pending approvals to clients (daemon API)
+  - [x] block waiting for a response (with timeout + cancel path)
 - [ ] Support at least these approval types:
   - [ ] Plan approval
-  - [ ] File change approval (diff preview)
-  - [ ] Command execution approval
+  - [x] File change approval (diff preview)
+  - [x] Command execution approval
   - [ ] Network / internet access approval (if Codex surfaces it as a separate gate)
 
 ### 2.2 Add Cowork-style “Deletion protection”
@@ -222,7 +221,7 @@ You can implement a stronger guarantee:
 - Require explicit “type to confirm” or “hold to confirm” in UI
 
 #### Checklist
-- [ ] Parse file-change approval payloads
+- [x] Parse file-change approval payloads
 - [ ] Detect deletions/renames as “high risk”
 - [ ] Force **explicit** confirmation step (UI affordance)
 - [ ] Record “why approved” evidence in approvals table (for audit)
@@ -231,9 +230,9 @@ You can implement a stronger guarantee:
 In your `ApprovalServer`, you currently log “not supported” and return empty answers. That breaks tasks-mode UX.
 
 #### Checklist
-- [ ] When Codex requests user input:
-  - [ ] create a UI prompt (“Codex asks: …”)
-  - [ ] support multi-field forms if the request schema supports it
+- [x] When Codex requests user input:
+  - [x] create a UI prompt (“Codex asks: …”)
+  - [x] support multi-field forms if the request schema supports it
   - [ ] support “cancel / skip” with a clear result
 - [ ] Persist the user response as an event + approval record
 
@@ -250,14 +249,14 @@ Codex already supports sandboxing + approvals (e.g., asks for approval to edit o
 - macOS app: user chooses folder(s); store bookmarks
 
 #### Checklist
-- [ ] Implement `Workspace` type:
+- [x] Implement `Workspace` type:
   - allowed roots
   - read/write flags
   - deny patterns (e.g., `**/.git/**`, `**/.env`)
-- [ ] On each task run:
-  - [ ] set Codex `cwd` to workspace root
-  - [ ] set `sandbox_mode` appropriately
-  - [ ] set `approval_policy` appropriately
+- [x] On each task run:
+  - [x] set Codex `cwd` to workspace root
+  - [x] set `sandbox_mode` appropriately
+  - [x] set `approval_policy` appropriately
 
 ### 3.2 Internet access and MCP permissions UI
 Cowork calls out controlling:
@@ -265,8 +264,8 @@ Cowork calls out controlling:
 2) internet access.  [oai_citation:27‡Claude Help Center](https://support.claude.com/en/articles/13345190-getting-started-with-cowork)
 
 #### Checklist
-- [ ] Add “Permissions” panel (macOS) and `/permissions` in CLI:
-  - [ ] internet: off / allowlist / on
+- [x] Add “Permissions” panel (macOS) and `/permissions` in CLI:
+  - [x] internet: off / allowlist / on
   - [ ] MCP servers: enabled/disabled + per-server “ask every time / allow once / allow always”
 - [ ] Persist these policies per task or globally
 
@@ -286,26 +285,26 @@ Anthropic’s plugin repo spells out the structure + the role plugins and the co
 ### 4.1 Implement plugin loader + registry
 #### Checklist
 - [ ] Plugin install sources:
-  - [ ] local folder
-  - [ ] zip import
+  - [x] local folder
+  - [x] zip import
   - [ ] git URL (CLI only; App Store version may restrict)
-- [ ] Validate plugin structure:
+- [x] Validate plugin structure:
   - `.claude-plugin/plugin.json`
   - optional `.mcp.json`
   - `skills/`
   - `commands/`  [oai_citation:29‡GitHub](https://github.com/anthropics/knowledge-work-plugins)
-- [ ] Store plugin metadata in SQLite
-- [ ] Provide enable/disable per plugin
+- [x] Store plugin metadata in SQLite
+- [x] Provide enable/disable per plugin
 
 ### 4.2 Map plugins into Codex (skills + MCP)
 Codex skills are folder-based (`SKILL.md`, scripts, resources) with progressive disclosure.  [oai_citation:30‡OpenAI Developers](https://developers.openai.com/codex/skills/)
 
 #### Checklist
-- [ ] Convert plugin `skills/*.md` into Codex skill folders:
-  - [ ] create a folder per skill
-  - [ ] generate `SKILL.md` with metadata frontmatter (name/description)
-  - [ ] store the original markdown as the instructions body
-- [ ] Convert `.mcp.json` into Codex MCP config entries
+- [x] Convert plugin `skills/*.md` into Codex skill folders:
+  - [x] create a folder per skill
+  - [x] generate `SKILL.md` with metadata frontmatter (name/description)
+  - [x] store the original markdown as the instructions body
+- [x] Convert `.mcp.json` into Codex MCP config entries
   - Codex supports MCP servers; you can generate `mcp.json` or edit config accordingly  [oai_citation:31‡OpenAI Developers](https://developers.openai.com/codex/mcp/)
 - [ ] Add “skill provenance” to help the UI show “this came from plugin X”
 
@@ -313,18 +312,18 @@ Codex skills are folder-based (`SKILL.md`, scripts, resources) with progressive 
 Even if Codex doesn’t allow arbitrary user-defined slash commands, *you can* implement them in your wrapper UI:
 
 #### Checklist
-- [ ] Parse `commands/` definitions
-- [ ] Expose in:
+- [x] Parse `commands/` definitions
+- [x] Expose in:
   - CLI: `/sales:call-prep`, `/data:write-query` style (matching the plugin repo examples)  [oai_citation:32‡GitHub](https://github.com/anthropics/knowledge-work-plugins)
   - mac app: command palette
-- [ ] Command execution = templated prompt + skill activation + optional connector gating
+- [x] Command execution = templated prompt + skill activation + optional connector gating
 
 ### 4.4 Ship a “Marketplace baseline”
 Cowork’s repo has 11 role plugins with explicit connector expectations.  [oai_citation:33‡GitHub](https://github.com/anthropics/knowledge-work-plugins)
 
 #### Checklist
 - [ ] Add `clawdex plugins add anthropics/knowledge-work-plugins/<role>`
-- [ ] Provide a “starter set” for single-user:
+- [x] Provide a “starter set” for single-user:
   - productivity
   - data
   - product-management
@@ -345,27 +344,27 @@ Instead:
 - Teach the model to call them via skills
 
 #### Checklist (core)
-- [ ] Add an “Artifact Service” inside `clawdexd` with tools like:
+- [x] Add an “Artifact Service” inside `clawdexd` with tools like:
   - `artifact.create_xlsx(spec_json, output_path)`
   - `artifact.create_pptx(deck_spec, output_path)`
   - `artifact.create_docx(doc_spec, output_path)`
   - `artifact.create_pdf(report_spec, output_path)`
-- [ ] Provide “spec schemas” + validation
-- [ ] On success:
+- [x] Provide “spec schemas” + validation
+- [x] On success:
   - hash the output
   - store as `artifacts` record
   - emit `ArtifactCreated` event
 
 #### Checklist (skills that drive it)
-- [ ] `Spreadsheet Builder` skill:
+- [x] `Spreadsheet Builder` skill:
   - asks clarifying Qs
   - produces a validated spreadsheet spec
   - calls artifact tool
   - verifies formulas/tabs exist
-- [ ] `Slide Deck Builder` skill:
+- [x] `Slide Deck Builder` skill:
   - converts notes/transcript into outline → slides
   - calls artifact tool
-- [ ] `Report Writer` skill:
+- [x] `Report Writer` skill:
   - structured sections, citations, executive summary
 
 ---
@@ -379,12 +378,12 @@ You can match that *and* provide a “daemon continues running” option for the
 Your `cron.rs` already has job persistence and CRUD; it just doesn’t execute.
 
 #### Checklist
-- [ ] Implement `cron_run_loop()`:
+- [x] Implement `cron_run_loop()`:
   - parse cron expressions
   - compute next_run
   - when due: run a Task Run with a stored prompt/command
-- [ ] Add job locking (avoid double-run)
-- [ ] Add per-job policy:
+- [x] Add job locking (avoid double-run)
+- [x] Add per-job policy:
   - sandbox mode
   - approval policy
   - internet allowed or not
@@ -409,7 +408,7 @@ You can:
 - Offer “opt‑in memory vault” as a differentiator (with explicit user approval)
 
 #### Checklist
-- [ ] Implement real `memory_search` (your current search is a stub):
+- [x] Implement real `memory_search` (your current search is a stub):
   - embeddings-based vector search (store vectors)
   - or SQLite FTS + heuristics as v1
 - [ ] Add “write-to-memory” as a gated action:
@@ -429,22 +428,22 @@ You described “Agent Passport + Dynamic Trust Checkpoints.” Even for single-
 Codex app-server already gives you the raw event stream; you turn it into **audit artifacts**.  [oai_citation:37‡OpenAI Developers](https://developers.openai.com/codex/app-server)
 
 ### Checklist
-- [ ] Define `ActionIntent` schema generated from:
+- [x] Define `ActionIntent` schema generated from:
   - planned steps
   - tool calls
   - file diffs
   - connector targets (domain/app)
-- [ ] Implement “risk scoring” rules:
+- [x] Implement “risk scoring” rules:
   - deletion
   - credential use
   - external posting
   - money / procurement
   - exporting files outside workspace
-- [ ] Implement checkpoints:
+- [x] Implement checkpoints:
   - “needs explicit approval”
   - “needs re-auth”
   - “needs dual control” (future multi-user)
-- [ ] Implement tamper-evident audit log:
+- [x] Implement tamper-evident audit log:
   - append-only JSONL
   - hash chain (each record includes prev_hash)
 - [ ] Add “Export audit packet” UI:
