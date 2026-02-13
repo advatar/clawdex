@@ -235,6 +235,12 @@ final class DaemonClient {
         }
     }
 
+    func fetchAuditPacket(runId: String) async throws -> [String: Any] {
+        let url = baseURL.appendingPathComponent("/v1/runs/\(runId)/audit-export")
+        let (data, _) = try await URLSession.shared.data(from: url)
+        return try parseObject(data: data)
+    }
+
     func fetchApprovals() async throws -> (approvals: [PendingApproval], inputs: [PendingUserInput]) {
         let url = baseURL.appendingPathComponent("/v1/approvals")
         let (data, _) = try await URLSession.shared.data(from: url)

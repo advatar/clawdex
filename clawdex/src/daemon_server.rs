@@ -700,6 +700,19 @@ fn handle_request(
                 }
                 return Ok(json_response(json!({ "events": events }))?);
             }
+            if let Some(run_id) = rest.strip_suffix("/audit-export") {
+                let run_id = run_id.trim_matches('/');
+                if run_id.is_empty() {
+                    return Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)));
+                }
+                let value = crate::tasks::export_audit_packet_command(
+                    run_id,
+                    None,
+                    Some(paths.state_dir.clone()),
+                    Some(paths.workspace_dir.clone()),
+                )?;
+                return Ok(json_response(value)?);
+            }
 
             let run_id = rest;
             let store = TaskStore::open(paths)?;

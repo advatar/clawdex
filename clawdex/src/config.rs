@@ -77,6 +77,12 @@ pub struct HeartbeatDeliveryConfig {
 pub struct MemoryConfig {
     pub enabled: Option<bool>,
     pub citations: Option<String>,
+    #[serde(alias = "writeScope")]
+    #[serde(alias = "write_scope")]
+    pub write_scope: Option<String>,
+    #[serde(alias = "writeRequiresApproval")]
+    #[serde(alias = "write_requires_approval")]
+    pub write_requires_approval: Option<bool>,
     pub embeddings: Option<EmbeddingsConfig>,
     pub sync: Option<MemorySyncConfig>,
     #[serde(alias = "extraPaths")]

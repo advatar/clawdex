@@ -140,7 +140,7 @@ Unchecked items in Phases 0-8 below represent true remaining gaps after parity/p
   - [x] `clawdexd` (daemon/runtime)
   - [x] `clawdex` (CLI client)
   - [x] `Clawdex.app` (macOS client)
-- [ ] Make `clawdexd` the only component that directly:
+- [x] Make `clawdexd` the only component that directly:
   - starts/stops Codex app-server processes  [oai_citation:17‡OpenAI Developers](https://developers.openai.com/codex/app-server)  
   - manages skills installation / plugin sync  [oai_citation:18‡OpenAI Developers](https://developers.openai.com/codex/skills/)  
   - manages MCP configs  [oai_citation:19‡OpenAI Developers](https://developers.openai.com/codex/mcp/)  
@@ -207,11 +207,11 @@ Codex also explicitly positions approvals as part of the experience (“watch pl
   - [x] store `request_json` in `approvals`
   - [x] expose pending approvals to clients (daemon API)
   - [x] block waiting for a response (with timeout + cancel path)
-- [ ] Support at least these approval types:
-  - [ ] Plan approval
+- [x] Support at least these approval types:
+  - [x] Plan approval (covered via existing command/file approval checkpoints; Codex app-server v2 does not currently expose a dedicated plan-approval request type)
   - [x] File change approval (diff preview)
   - [x] Command execution approval
-  - [ ] Network / internet access approval (if Codex surfaces it as a separate gate)
+  - [x] Network / internet access approval (enforced via sandbox/network policy + command approvals; no separate request type surfaced today)
 
 ### 2.2 Add Cowork-style “Deletion protection”
 Cowork emphasizes controlled access and reviewing actions. It runs in a VM and urges review, especially for sensitive files.  [oai_citation:24‡Claude Help Center](https://support.claude.com/en/articles/13345190-getting-started-with-cowork)
@@ -222,9 +222,9 @@ You can implement a stronger guarantee:
 
 #### Checklist
 - [x] Parse file-change approval payloads
-- [ ] Detect deletions/renames as “high risk”
-- [ ] Force **explicit** confirmation step (UI affordance)
-- [ ] Record “why approved” evidence in approvals table (for audit)
+- [x] Detect deletions/renames as “high risk”
+- [x] Force **explicit** confirmation step (UI affordance)
+- [x] Record “why approved” evidence in approvals table (for audit)
 
 ### 2.3 Implement “ToolRequestUserInput” (you currently stub it)
 In your `ApprovalServer`, you currently log “not supported” and return empty answers. That breaks tasks-mode UX.
@@ -233,8 +233,8 @@ In your `ApprovalServer`, you currently log “not supported” and return empty
 - [x] When Codex requests user input:
   - [x] create a UI prompt (“Codex asks: …”)
   - [x] support multi-field forms if the request schema supports it
-  - [ ] support “cancel / skip” with a clear result
-- [ ] Persist the user response as an event + approval record
+  - [x] support “cancel / skip” with a clear result
+- [x] Persist the user response as an event + approval record
 
 ---
 
@@ -266,8 +266,8 @@ Cowork calls out controlling:
 #### Checklist
 - [x] Add “Permissions” panel (macOS) and `/permissions` in CLI:
   - [x] internet: off / allowlist / on
-  - [ ] MCP servers: enabled/disabled + per-server “ask every time / allow once / allow always”
-- [ ] Persist these policies per task or globally
+  - [x] MCP servers: enabled/disabled + per-server “ask every time / allow once / allow always”
+- [x] Persist these policies per task or globally
 
 ---
 
@@ -284,10 +284,10 @@ Anthropic’s plugin repo spells out the structure + the role plugins and the co
 
 ### 4.1 Implement plugin loader + registry
 #### Checklist
-- [ ] Plugin install sources:
+- [x] Plugin install sources:
   - [x] local folder
   - [x] zip import
-  - [ ] git URL (CLI only; App Store version may restrict)
+  - [x] git URL (CLI only; App Store version may restrict)
 - [x] Validate plugin structure:
   - `.claude-plugin/plugin.json`
   - optional `.mcp.json`
@@ -306,7 +306,7 @@ Codex skills are folder-based (`SKILL.md`, scripts, resources) with progressive 
   - [x] store the original markdown as the instructions body
 - [x] Convert `.mcp.json` into Codex MCP config entries
   - Codex supports MCP servers; you can generate `mcp.json` or edit config accordingly  [oai_citation:31‡OpenAI Developers](https://developers.openai.com/codex/mcp/)
-- [ ] Add “skill provenance” to help the UI show “this came from plugin X”
+- [x] Add “skill provenance” to help the UI show “this came from plugin X”
 
 ### 4.3 Implement “slash commands” for your clients
 Even if Codex doesn’t allow arbitrary user-defined slash commands, *you can* implement them in your wrapper UI:
@@ -322,7 +322,7 @@ Even if Codex doesn’t allow arbitrary user-defined slash commands, *you can* i
 Cowork’s repo has 11 role plugins with explicit connector expectations.  [oai_citation:33‡GitHub](https://github.com/anthropics/knowledge-work-plugins)
 
 #### Checklist
-- [ ] Add `clawdex plugins add anthropics/knowledge-work-plugins/<role>`
+- [x] Add `clawdex plugins add anthropics/knowledge-work-plugins/<role>`
 - [x] Provide a “starter set” for single-user:
   - productivity
   - data
@@ -387,7 +387,7 @@ Your `cron.rs` already has job persistence and CRUD; it just doesn’t execute.
   - sandbox mode
   - approval policy
   - internet allowed or not
-- [ ] Store run events under the same `task_runs/events` pipeline
+- [x] Store run events under the same `task_runs/events` pipeline
 
 ### 6.2 macOS background constraints
 If you truly want **App Store** distribution, background daemons and spawning arbitrary binaries get tricky.
@@ -411,10 +411,10 @@ You can:
 - [x] Implement real `memory_search` (your current search is a stub):
   - embeddings-based vector search (store vectors)
   - or SQLite FTS + heuristics as v1
-- [ ] Add “write-to-memory” as a gated action:
+- [x] Add “write-to-memory” as a gated action:
   - always requires user approval
   - stores provenance (which task wrote it, why)
-- [ ] Add “memory scope”:
+- [x] Add “memory scope”:
   - global
   - per workspace
   - per plugin/role
@@ -446,7 +446,7 @@ Codex app-server already gives you the raw event stream; you turn it into **audi
 - [x] Implement tamper-evident audit log:
   - append-only JSONL
   - hash chain (each record includes prev_hash)
-- [ ] Add “Export audit packet” UI:
+- [x] Add “Export audit packet” UI:
   - events
   - approvals
   - artifact hashes

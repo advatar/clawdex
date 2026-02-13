@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use codex_app_server_protocol::AskForApproval;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -21,6 +21,7 @@ use crate::heartbeat;
 use crate::memory;
 use crate::sessions;
 use crate::runner::{CodexRunner, CodexRunnerConfig};
+use crate::task_db::TaskStore;
 use crate::util::now_ms;
 
 #[derive(Debug, Clone)]
@@ -268,6 +269,19 @@ fn execute_job(
     base_workspace: &PathBuf,
 ) -> Result<()> {
     let started_at = now_ms();
+    let policy = job_policy_overrides(job);
+    let approval_policy = policy.approval_policy.unwrap_or(base_approval_policy);
+    let (workspace_policy, workspace) =
+        apply_workspace_overrides(base_workspace_policy, base_workspace, &policy)?;
+    let mut task_run = start_cron_task_run(
+        paths,
+        job,
+        approval_policy,
+        &workspace_policy,
+        &workspace,
+        started_at,
+    );
+
     let Some(prompt) = job_prompt(job, started_at) else {
         record_run(
             paths,
@@ -276,6 +290,22 @@ fn execute_job(
             "missing payload message",
             Some(json!({ "applyState": false })),
         )?;
+        record_cron_task_event(
+            &mut task_run,
+            "cron_job_skipped",
+            json!({ "jobId": job.id, "reason": "missing payload message" }),
+        );
+        finish_cron_task_run(
+            &mut task_run,
+            "completed",
+            "cron_job_finished",
+            json!({
+                "jobId": job.id,
+                "status": "skipped",
+                "reason": "missing payload message",
+                "endedAtMs": now_ms(),
+            }),
+        );
         return Ok(());
     };
 
@@ -289,21 +319,75 @@ fn execute_job(
                 "locked",
                 Some(json!({ "applyState": false })),
             )?;
+            record_cron_task_event(
+                &mut task_run,
+                "cron_job_skipped",
+                json!({ "jobId": job.id, "reason": "locked" }),
+            );
+            finish_cron_task_run(
+                &mut task_run,
+                "completed",
+                "cron_job_finished",
+                json!({
+                    "jobId": job.id,
+                    "status": "skipped",
+                    "reason": "locked",
+                    "endedAtMs": now_ms(),
+                }),
+            );
             return Ok(());
         }
     };
 
     mark_job_running(paths, &job.id, started_at)?;
-
-    let policy = job_policy_overrides(job);
-    let approval_policy = policy.approval_policy.unwrap_or(base_approval_policy);
-    let (workspace_policy, workspace) =
-        apply_workspace_overrides(base_workspace_policy, base_workspace, &policy)?;
-
     let outcome = if job.session_target == "isolated" {
-        runner.run_isolated_with_policy(&job.id, &prompt, approval_policy, &workspace_policy, workspace.clone())?
+        runner.run_isolated_with_policy(
+            &job.id,
+            &prompt,
+            approval_policy,
+            &workspace_policy,
+            workspace.clone(),
+        )
     } else {
-        runner.run_main_with_policy(&prompt, approval_policy, &workspace_policy, workspace.clone())?
+        runner.run_main_with_policy(&prompt, approval_policy, &workspace_policy, workspace.clone())
+    };
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            let ended_at = now_ms();
+            let duration_ms = ended_at.saturating_sub(started_at);
+            let error_text = err.to_string();
+            let _ = record_run(
+                paths,
+                &job.id,
+                "failed",
+                "execution failed",
+                Some(json!({
+                    "error": error_text,
+                    "runAtMs": started_at,
+                    "durationMs": duration_ms,
+                })),
+            );
+            record_cron_task_event(
+                &mut task_run,
+                "turn_failed",
+                json!({ "error": error_text }),
+            );
+            finish_cron_task_run(
+                &mut task_run,
+                "failed",
+                "cron_job_finished",
+                json!({
+                    "jobId": job.id,
+                    "status": "failed",
+                    "reason": "execution failed",
+                    "runAtMs": started_at,
+                    "endedAtMs": ended_at,
+                    "durationMs": duration_ms,
+                }),
+            );
+            return Err(err);
+        }
     };
 
     let ended_at = now_ms();
@@ -359,15 +443,146 @@ fn execute_job(
         }
     }
 
+    let error_for_record = error.clone();
     let details = json!({
         "summary": summary,
-        "error": error,
+        "error": error_for_record,
         "runAtMs": started_at,
         "durationMs": duration_ms
     });
     record_run(paths, &job.id, status, reason, Some(details))?;
+    record_cron_task_event(
+        &mut task_run,
+        "turn_completed",
+        json!({
+            "message": outcome.message,
+            "warnings": outcome.warnings,
+        }),
+    );
+    record_cron_task_event(
+        &mut task_run,
+        "cron_delivery_result",
+        json!({
+            "requested": plan.requested,
+            "bestEffort": plan.best_effort,
+            "status": status,
+            "reason": reason,
+            "error": error,
+        }),
+    );
+    let run_status = if status == "delivery_failed" {
+        "failed"
+    } else {
+        "completed"
+    };
+    finish_cron_task_run(
+        &mut task_run,
+        run_status,
+        "cron_job_finished",
+        json!({
+            "jobId": job.id,
+            "status": status,
+            "reason": reason,
+            "runAtMs": started_at,
+            "endedAtMs": ended_at,
+            "durationMs": duration_ms,
+        }),
+    );
 
     Ok(())
+}
+
+fn start_cron_task_run(
+    paths: &ClawdPaths,
+    job: &CronJob,
+    approval_policy: AskForApproval,
+    workspace_policy: &crate::config::WorkspacePolicy,
+    workspace: &PathBuf,
+    started_at_ms: i64,
+) -> Option<(TaskStore, String)> {
+    let store = match TaskStore::open(paths) {
+        Ok(store) => store,
+        Err(err) => {
+            eprintln!("[clawdex][cron] failed to open task store: {err}");
+            return None;
+        }
+    };
+    let title = cron_task_title(job);
+    let task = match store.get_task_by_title(&title) {
+        Ok(Some(task)) => task,
+        Ok(None) => match store.create_task(&title) {
+            Ok(task) => task,
+            Err(err) => {
+                eprintln!("[clawdex][cron] failed to create task for {}: {err}", job.id);
+                return None;
+            }
+        },
+        Err(err) => {
+            eprintln!("[clawdex][cron] failed to load task for {}: {err}", job.id);
+            return None;
+        }
+    };
+    let run = match store.create_run(
+        &task.id,
+        "running",
+        None,
+        Some(cron_sandbox_label(workspace_policy).to_string()),
+        Some(format!("{approval_policy:?}")),
+    ) {
+        Ok(run) => run,
+        Err(err) => {
+            eprintln!("[clawdex][cron] failed to create task run for {}: {err}", job.id);
+            return None;
+        }
+    };
+    let _ = store.record_event(
+        &run.id,
+        "cron_job_started",
+        &json!({
+            "jobId": job.id,
+            "jobName": job.name,
+            "sessionTarget": job.session_target,
+            "workspace": workspace.to_string_lossy(),
+            "startedAtMs": started_at_ms,
+        }),
+    );
+    Some((store, run.id))
+}
+
+fn record_cron_task_event(task_run: &mut Option<(TaskStore, String)>, kind: &str, payload: Value) {
+    if let Some((store, run_id)) = task_run.as_mut() {
+        let _ = store.record_event(run_id, kind, &payload);
+    }
+}
+
+fn finish_cron_task_run(
+    task_run: &mut Option<(TaskStore, String)>,
+    status: &str,
+    event_kind: &str,
+    payload: Value,
+) {
+    if let Some((store, run_id)) = task_run.as_mut() {
+        let _ = store.update_run_status(run_id, status);
+        let _ = store.record_event(run_id, event_kind, &payload);
+    }
+}
+
+fn cron_task_title(job: &CronJob) -> String {
+    if let Some(name) = job.name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+        format!("[cron:{}] {}", job.id, name)
+    } else {
+        format!("[cron:{}]", job.id)
+    }
+}
+
+fn cron_sandbox_label(workspace_policy: &crate::config::WorkspacePolicy) -> &'static str {
+    if workspace_policy.read_only {
+        "read-only"
+    } else if workspace_policy.network_access {
+        "workspace-write"
+    } else {
+        "workspace-write-no-network"
+    }
 }
 
 fn execute_heartbeat(runner: &mut CodexRunner, cfg: &ClawdConfig, paths: &ClawdPaths) -> Result<()> {

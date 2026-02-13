@@ -33,3 +33,12 @@ commands:
   - name: tasks-cancel
     description: Request cancellation of a running task run
     cmd: cargo run --manifest-path clawdex/Cargo.toml -- tasks cancel --run-id <run-id>
+  - name: tasks-audit-export
+    description: Export a task-run audit packet (events/approvals/artifacts/plugins/audit-log)
+    cmd: cargo run --manifest-path clawdex/Cargo.toml -- tasks audit-export --run-id <run-id> --output <path>
+  - name: plugins-add-git
+    description: Install a plugin directly from Git (URL or owner/repo[/subdir] shorthand)
+    cmd: cargo run --manifest-path clawdex/Cargo.toml -- plugins add anthropics/knowledge-work-plugins/<role>
+  - name: permissions-set-mcp-server
+    description: Set per-MCP-server policy mode (ask_every_time|allow_once|allow_always|deny)
+    cmd: cargo run --manifest-path clawdex/Cargo.toml -- permissions set --mcp-server '<server>=ask_every_time'

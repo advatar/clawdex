@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 @MainActor
 final class TasksViewModel: ObservableObject {
@@ -125,6 +127,17 @@ final class TasksViewModel: ObservableObject {
             }
         } catch {
             // Ignore polling failures.
+        }
+    }
+
+    func exportAuditPacket(runId: String, outputURL: URL) async {
+        do {
+            let packet = try await client.fetchAuditPacket(runId: runId)
+            let data = try JSONSerialization.data(withJSONObject: packet, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: outputURL, options: .atomic)
+            statusMessage = "Audit exported: \(outputURL.lastPathComponent)"
+        } catch {
+            statusMessage = "Audit export failed: \(error.localizedDescription)"
         }
     }
 }
@@ -273,6 +286,21 @@ struct TasksView: View {
                 }
 
                 Spacer()
+
+                Button("Export Audit…") {
+                    guard let runId = viewModel.currentRunId else { return }
+                    let panel = NSSavePanel()
+                    panel.allowedContentTypes = [UTType.json]
+                    panel.canCreateDirectories = true
+                    panel.nameFieldStringValue = "audit-\(runId).json"
+                    panel.prompt = "Export"
+                    if panel.runModal() == .OK, let url = panel.url {
+                        Task {
+                            await viewModel.exportAuditPacket(runId: runId, outputURL: url)
+                        }
+                    }
+                }
+                .disabled(viewModel.currentRunId == nil)
             }
 
             Divider()

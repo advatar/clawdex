@@ -53,6 +53,10 @@ const MEMORY_GET_REQUEST_SCHEMA: &str =
     include_str!("../../compat/tool-schemas/memory_get.request.schema.json");
 const MEMORY_GET_RESPONSE_SCHEMA: &str =
     include_str!("../../compat/tool-schemas/memory_get.response.schema.json");
+const MEMORY_WRITE_REQUEST_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/memory_write.request.schema.json");
+const MEMORY_WRITE_RESPONSE_SCHEMA: &str =
+    include_str!("../../compat/tool-schemas/memory_write.response.schema.json");
 const MESSAGE_SEND_REQUEST_SCHEMA: &str =
     include_str!("../../compat/tool-schemas/message.send.request.schema.json");
 const MESSAGE_SEND_RESPONSE_SCHEMA: &str =
@@ -327,6 +331,16 @@ fn tool_definitions() -> Vec<Tool> {
             meta: None,
         },
         Tool {
+            name: "memory_write".to_string(),
+            title: None,
+            description: Some("Write a memory entry with explicit approval and scope".to_string()),
+            input_schema: schema_value(MEMORY_WRITE_REQUEST_SCHEMA),
+            output_schema: Some(schema_value(MEMORY_WRITE_RESPONSE_SCHEMA)),
+            annotations: None,
+            icons: None,
+            meta: None,
+        },
+        Tool {
             name: "message.send".to_string(),
             title: None,
             description: Some("Send a message via the gateway".to_string()),
@@ -510,6 +524,18 @@ fn handle_tool_call(
             memory::memory_get(paths, &arguments)
                 .map_err(|err| JsonRpcError::internal(err.to_string()))?
         }
+        "memory_write" => {
+            let content = arguments
+                .get("content")
+                .or_else(|| arguments.get("text"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if content.trim().is_empty() {
+                return Err(JsonRpcError::invalid_params("missing content"));
+            }
+            memory::memory_write(paths, &arguments)
+                .map_err(|err| JsonRpcError::internal(err.to_string()))?
+        }
         "message.send" => {
             if let Some(map) = arguments.as_object_mut() {
                 for field in ["text", "message"] {
@@ -593,6 +619,10 @@ fn sanitize_tool_response(name: &str, value: Value) -> Value {
                 "disabled",
                 "error",
             ],
+        ),
+        "memory_write" => sanitize_object_fields(
+            value,
+            &["ok", "scope", "path", "indexed", "disabled", "error"],
         ),
         "message.send" => sanitize_object_fields(
             value,
@@ -902,6 +932,7 @@ fn validate_tool_arguments(name: &str, arguments: &Value) -> std::result::Result
         "cron.status" => Some(CRON_STATUS_REQUEST_SCHEMA),
         "memory_search" => Some(MEMORY_SEARCH_REQUEST_SCHEMA),
         "memory_get" => Some(MEMORY_GET_REQUEST_SCHEMA),
+        "memory_write" => Some(MEMORY_WRITE_REQUEST_SCHEMA),
         "message.send" => Some(MESSAGE_SEND_REQUEST_SCHEMA),
         "channels.list" => Some(CHANNELS_LIST_REQUEST_SCHEMA),
         "channels.resolve_target" => Some(CHANNELS_RESOLVE_REQUEST_SCHEMA),
@@ -942,6 +973,7 @@ fn validate_tool_response(name: &str, result: &Value) -> std::result::Result<(),
         "cron.status" => Some(CRON_STATUS_RESPONSE_SCHEMA),
         "memory_search" => Some(MEMORY_SEARCH_RESPONSE_SCHEMA),
         "memory_get" => Some(MEMORY_GET_RESPONSE_SCHEMA),
+        "memory_write" => Some(MEMORY_WRITE_RESPONSE_SCHEMA),
         "message.send" => Some(MESSAGE_SEND_RESPONSE_SCHEMA),
         "channels.list" => Some(CHANNELS_LIST_RESPONSE_SCHEMA),
         "channels.resolve_target" => Some(CHANNELS_RESOLVE_RESPONSE_SCHEMA),
@@ -992,6 +1024,15 @@ fn normalize_args_for_validation(name: &str, arguments: &Value) -> Value {
                     ("max_results", "maxResults"),
                     ("min_score", "minScore"),
                     ("session_key", "sessionKey"),
+                ],
+            );
+        }
+        "memory_write" => {
+            normalize_aliases(
+                map,
+                &[
+                    ("memory_scope", "scope"),
+                    ("plugin_id", "pluginId"),
                 ],
             );
         }
@@ -1168,6 +1209,17 @@ mod tests {
     }
 
     #[test]
+    fn validates_memory_write_arguments() {
+        let args = json!({
+            "content": "Remember this",
+            "scope": "workspace",
+            "approved": true,
+            "confirmation": "WRITE_MEMORY",
+        });
+        assert!(validate_tool_arguments("memory_write", &args).is_ok());
+    }
+
+    #[test]
     fn validates_cron_add_wrapped_defaults() {
         let args = json!({
             "job": {
@@ -1247,6 +1299,7 @@ mod tests {
             ("cron.status", CRON_STATUS_RESPONSE_SCHEMA),
             ("memory_search", MEMORY_SEARCH_RESPONSE_SCHEMA),
             ("memory_get", MEMORY_GET_RESPONSE_SCHEMA),
+            ("memory_write", MEMORY_WRITE_RESPONSE_SCHEMA),
             ("message.send", MESSAGE_SEND_RESPONSE_SCHEMA),
             ("channels.list", CHANNELS_LIST_RESPONSE_SCHEMA),
             ("channels.resolve_target", CHANNELS_RESOLVE_RESPONSE_SCHEMA),
@@ -1356,6 +1409,10 @@ mod tests {
         assert_response_ok(
             "memory_get",
             json!({ "path": "MEMORY.md", "text": "hi", "content": "hi", "from": 1, "lines": 1 }),
+        );
+        assert_response_ok(
+            "memory_write",
+            json!({ "ok": true, "scope": "workspace", "path": "memory/writes/workspace/a.md", "indexed": true }),
         );
         assert_response_ok("message.send", json!({ "ok": true, "result": { "id": "msg" } }));
         assert_response_ok(

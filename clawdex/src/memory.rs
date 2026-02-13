@@ -1,4 +1,8 @@
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
+use std::fs::OpenOptions;
+use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -21,6 +25,8 @@ const DEFAULT_CHUNK_OVERLAP: usize = 80;
 const SCHEMA_VERSION: i64 = 3;
 const EMBEDDINGS_QUERY_FAILURE_PATH: &str = "__query__";
 const EMBEDDINGS_QUERY_FAILURE_SOURCE: &str = "__query__";
+const MEMORY_WRITES_DIR: &str = "writes";
+const MEMORY_WRITE_CONFIRMATION: &str = "WRITE_MEMORY";
 
 #[derive(Debug, Clone)]
 struct SearchRow {
@@ -83,6 +89,13 @@ struct IndexedFile {
     content: String,
 }
 
+#[derive(Debug, Clone)]
+enum MemoryWriteScope {
+    Global,
+    Workspace,
+    Plugin(String),
+}
+
 pub fn memory_get(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     let cfg = paths_config(paths)?;
     if !resolve_memory_enabled(&cfg) {
@@ -110,7 +123,7 @@ pub fn memory_get(paths: &ClawdPaths, args: &Value) -> Result<Value> {
         .map(|p| normalize_rel_path(&p.to_string_lossy()))
         .unwrap_or_else(|| abs_path.to_string_lossy().to_string());
 
-    let extra_paths = normalize_extra_paths(&paths.workspace_dir, cfg.memory.as_ref());
+    let extra_paths = memory_extra_paths(paths, &cfg);
     let allowed_workspace = is_memory_rel_path(&rel_path);
     let allowed_extra = is_allowed_extra_path(&abs_path, &extra_paths)?;
     if !allowed_workspace && !allowed_extra {
@@ -145,6 +158,68 @@ pub fn memory_get(paths: &ClawdPaths, args: &Value) -> Result<Value> {
         "totalLines": total_lines,
         "content": slice,
         "text": slice,
+    }))
+}
+
+pub fn memory_write(paths: &ClawdPaths, args: &Value) -> Result<Value> {
+    let cfg = paths_config(paths)?;
+    if !resolve_memory_enabled(&cfg) {
+        return Ok(json!({
+            "ok": false,
+            "disabled": true,
+            "error": "memory disabled"
+        }));
+    }
+
+    let content = args
+        .get("content")
+        .or_else(|| args.get("text"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("memory_write requires content")?;
+
+    let require_approval = cfg
+        .memory
+        .as_ref()
+        .and_then(|m| m.write_requires_approval)
+        .unwrap_or(true);
+    if require_approval && !memory_write_has_confirmation(args) {
+        anyhow::bail!(
+            "memory_write requires explicit approval (set approved=true and confirmation=\"{MEMORY_WRITE_CONFIRMATION}\")"
+        );
+    }
+
+    let default_scope = cfg
+        .memory
+        .as_ref()
+        .and_then(|m| m.write_scope.as_deref())
+        .unwrap_or("workspace");
+    let scope_raw = args
+        .get("scope")
+        .or_else(|| args.get("memoryScope"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(default_scope);
+    let scope = parse_memory_write_scope(scope_raw, args)?;
+    let target = memory_write_target_path(paths, &scope)?;
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+    append_memory_write_entry(paths, &target, &scope, args, content)?;
+    sync_memory_index(paths, None)?;
+
+    let path = target
+        .strip_prefix(&paths.state_dir)
+        .ok()
+        .map(|rel| normalize_rel_path(&rel.to_string_lossy()))
+        .unwrap_or_else(|| target.to_string_lossy().to_string());
+
+    Ok(json!({
+        "ok": true,
+        "scope": memory_scope_label(&scope),
+        "path": path,
+        "indexed": true,
     }))
 }
 
@@ -186,7 +261,7 @@ pub fn memory_search(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     let include_citations = should_include_citations(citations_mode.as_str(), session_key.as_deref());
 
     let (chunk_tokens, chunk_overlap) = resolve_chunking(&cfg);
-    let extra_paths = normalize_extra_paths(&paths.workspace_dir, cfg.memory.as_ref());
+    let extra_paths = memory_extra_paths(paths, &cfg);
     let include_sessions = cfg
         .memory
         .as_ref()
@@ -349,7 +424,7 @@ pub fn sync_memory_index(paths: &ClawdPaths, session_key: Option<&str>) -> Resul
     }
 
     let (chunk_tokens, chunk_overlap) = resolve_chunking(&cfg);
-    let extra_paths = normalize_extra_paths(&paths.workspace_dir, cfg.memory.as_ref());
+    let extra_paths = memory_extra_paths(paths, &cfg);
     let include_sessions = cfg
         .memory
         .as_ref()
@@ -863,6 +938,165 @@ fn normalize_extra_paths(workspace: &Path, cfg: Option<&crate::config::MemoryCon
         }
     }
     resolved
+}
+
+fn memory_extra_paths(paths: &ClawdPaths, cfg: &ClawdConfig) -> Vec<PathBuf> {
+    let mut extra_paths = normalize_extra_paths(&paths.workspace_dir, cfg.memory.as_ref());
+    extra_paths.push(memory_writes_root(paths));
+    if extra_paths.len() <= 1 {
+        return extra_paths;
+    }
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for path in extra_paths {
+        let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if seen.insert(key) {
+            deduped.push(path);
+        }
+    }
+    deduped
+}
+
+fn memory_writes_root(paths: &ClawdPaths) -> PathBuf {
+    paths.memory_dir.join(MEMORY_WRITES_DIR)
+}
+
+fn memory_write_has_confirmation(args: &Value) -> bool {
+    let approved = args
+        .get("approved")
+        .or_else(|| args.get("approval"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !approved {
+        return false;
+    }
+    args.get("confirmation")
+        .or_else(|| args.get("confirm"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case(MEMORY_WRITE_CONFIRMATION))
+}
+
+fn parse_memory_write_scope(scope_raw: &str, args: &Value) -> Result<MemoryWriteScope> {
+    let normalized = scope_raw.trim().to_lowercase();
+    if normalized.is_empty() || normalized == "workspace" {
+        return Ok(MemoryWriteScope::Workspace);
+    }
+    if normalized == "global" {
+        return Ok(MemoryWriteScope::Global);
+    }
+    if let Some(plugin_id) = normalized.strip_prefix("plugin:") {
+        return Ok(MemoryWriteScope::Plugin(normalize_plugin_scope_id(plugin_id)?));
+    }
+    if normalized == "plugin" {
+        let plugin_id = args
+            .get("pluginId")
+            .or_else(|| args.get("plugin_id"))
+            .and_then(|v| v.as_str())
+            .context("memory_write scope=plugin requires pluginId")?;
+        return Ok(MemoryWriteScope::Plugin(normalize_plugin_scope_id(plugin_id)?));
+    }
+    anyhow::bail!("invalid memory scope `{scope_raw}` (expected global, workspace, or plugin)");
+}
+
+fn normalize_plugin_scope_id(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("pluginId is required for plugin memory scope");
+    }
+    if trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Ok(trimmed.to_string());
+    }
+    anyhow::bail!("pluginId contains invalid characters");
+}
+
+fn memory_write_target_path(paths: &ClawdPaths, scope: &MemoryWriteScope) -> Result<PathBuf> {
+    let root = memory_writes_root(paths);
+    let path = match scope {
+        MemoryWriteScope::Global => root.join("global.md"),
+        MemoryWriteScope::Workspace => {
+            let key = workspace_scope_key(&paths.workspace_dir);
+            root.join("workspace").join(format!("{key}.md"))
+        }
+        MemoryWriteScope::Plugin(plugin_id) => root.join("plugin").join(format!("{plugin_id}.md")),
+    };
+    Ok(path)
+}
+
+fn workspace_scope_key(workspace: &Path) -> String {
+    let mut hasher = DefaultHasher::new();
+    workspace.to_string_lossy().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn memory_scope_label(scope: &MemoryWriteScope) -> String {
+    match scope {
+        MemoryWriteScope::Global => "global".to_string(),
+        MemoryWriteScope::Workspace => "workspace".to_string(),
+        MemoryWriteScope::Plugin(plugin_id) => format!("plugin:{plugin_id}"),
+    }
+}
+
+fn append_memory_write_entry(
+    paths: &ClawdPaths,
+    target: &Path,
+    scope: &MemoryWriteScope,
+    args: &Value,
+    content: &str,
+) -> Result<()> {
+    let title = args
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let reason = args
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let source = args
+        .get("source")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(target)
+        .with_context(|| format!("open {}", target.display()))?;
+
+    let empty = file.metadata().map(|meta| meta.len() == 0).unwrap_or(true);
+    if empty {
+        writeln!(file, "# Clawdex Memory Writes\n")
+            .with_context(|| format!("write {}", target.display()))?;
+    }
+
+    let entry_id = now_ms();
+    writeln!(file, "\n## Entry {entry_id}")
+        .with_context(|| format!("write {}", target.display()))?;
+    if let Some(title) = title {
+        writeln!(file, "- title: {title}")
+            .with_context(|| format!("write {}", target.display()))?;
+    }
+    writeln!(file, "- scope: {}", memory_scope_label(scope))
+        .with_context(|| format!("write {}", target.display()))?;
+    writeln!(file, "- workspace: {}", paths.workspace_dir.to_string_lossy())
+        .with_context(|| format!("write {}", target.display()))?;
+    if let Some(reason) = reason {
+        writeln!(file, "- reason: {reason}")
+            .with_context(|| format!("write {}", target.display()))?;
+    }
+    if let Some(source) = source {
+        writeln!(file, "- source: {source}")
+            .with_context(|| format!("write {}", target.display()))?;
+    }
+    writeln!(file, "\n{}\n", content.trim_end())
+        .with_context(|| format!("write {}", target.display()))?;
+    Ok(())
 }
 
 fn is_memory_rel_path(rel_path: &str) -> bool {

@@ -3,7 +3,7 @@
 Active:
 - [x] Integrate `Packages/DeepThink` into `macClawdex` and add an optional parallel-agent prepass path in the app runtime.
 - [x] Upstream sync pass: bump `openclaw`/`codex` submodules to latest `main` and backport any newly applicable OpenClaw parity fixes.
-- [ ] WORK.md execution pass: close remaining task-runtime gaps starting with `tasks follow` live event tailing, then continue with run lifecycle controls (`cancel`/`resume`/`fork`).
+- [x] WORK.md execution pass: close remaining task-runtime gaps starting with `tasks follow` live event tailing, then continue with run lifecycle controls (`cancel`/`resume`/`fork`).
   - [x] Add `clawdex tasks follow --run-id <id>` live event tailing and wire it into the CLI.
   - [x] Add `clawdex tasks cancel --run-id <id>` and wire cancellation to app-server `turn/interrupt`.
   - [x] Expose cancellation in the legacy task HTTP server via `POST /v1/runs/{id}/cancel`.
@@ -16,12 +16,12 @@ Active:
   - [x] Convert `ui_bridge` event flow to publish structured run events to subscribers (while keeping current message/error output compatibility).
   - [x] Document App Store connector constraints (built-in + remote connectors only; no local spawned MCP binaries).
   - [x] Reconcile stale narrative-phase checkboxes in `WORK.md` so only true remaining gaps stay unchecked.
-  - [ ] Close remaining WORK.md gaps:
-    - [ ] Finish plugin install parity: CLI/Admin `spec` + `--git` wiring, GitHub shorthand support, and skill provenance surfacing.
-    - [ ] Record cron daemon executions in the shared `task_runs/events` pipeline.
-    - [ ] Add gated memory writes with explicit scope (`global` / `workspace` / `plugin`).
-    - [ ] Add macOS UI action for exporting audit packets.
-    - [ ] Reconcile `WORK.md` checkboxes after implementation (including already-shipped approval/user-input/policy items).
+  - [x] Close remaining WORK.md gaps:
+    - [x] Finish plugin install parity: CLI/Admin `spec` + `--git` wiring, GitHub shorthand support, and skill provenance surfacing.
+    - [x] Record cron daemon executions in the shared `task_runs/events` pipeline.
+    - [x] Add gated memory writes with explicit scope (`global` / `workspace` / `plugin`).
+    - [x] Add macOS UI action for exporting audit packets.
+    - [x] Reconcile `WORK.md` checkboxes after implementation (including already-shipped approval/user-input/policy items).
 
 Upstream Sync (Submodules):
 - [x] Establish and follow a regular cadence to pull upstream changes into our forks and then bump the pinned submodule SHAs in this repo (`codex/` from `openai/main`, `openclaw/` from `openclaw/main`).
