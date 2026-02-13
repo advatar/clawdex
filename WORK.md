@@ -487,60 +487,60 @@ This gives you the App Store presence without sacrificing power users.
 If you want this as a literal implementation sequence for the next commits, here it is:
 
 ## A. Foundation (daemon + DB + API)
-- [ ] Create `clawdexd` crate (or rename current binary) and add SQLite store
+- [x] Create `clawdexd` crate (or rename current binary) and add SQLite store
 - [ ] Add local IPC (UDS gRPC/JSON-RPC) for CLI/app
 - [ ] Convert `ui_bridge.rs` from “write a file” → “publish events to subscribers”
 
 ## B. Task engine
-- [ ] Implement `TaskEngine::start_run(prompt, workspace, policies)`
-- [ ] Store `task` + `task_run` rows
-- [ ] Wire Codex app-server thread/turn lifecycle to task runs  [oai_citation:40‡OpenAI Developers](https://developers.openai.com/codex/app-server)
+- [x] Implement `TaskEngine::start_run(prompt, workspace, policies)`
+- [x] Store `task` + `task_run` rows
+- [x] Wire Codex app-server thread/turn lifecycle to task runs  [oai_citation:40‡OpenAI Developers](https://developers.openai.com/codex/app-server)
 
 ## C. Streaming
-- [ ] Rewrite `CodexClient` to stream events and persist them
+- [x] Rewrite `CodexClient` to stream events and persist them
 - [x] CLI “live view” that follows a run
 
 ## D. Approvals UX
-- [ ] Replace env-based approvals with Approval Broker
-- [ ] Add interactive CLI approvals (plan/file/command)
-- [ ] Implement ToolRequestUserInput prompting
+- [x] Replace env-based approvals with Approval Broker
+- [x] Add interactive CLI approvals (plan/file/command)
+- [x] Implement ToolRequestUserInput prompting
 
 ## E. Workspace & permissions
-- [ ] Implement workspace allowlist + deny patterns
-- [ ] Default sandbox = workspace-write, approval = on-request/untrusted (your choice)  [oai_citation:41‡OpenAI Developers](https://developers.openai.com/codex/config-advanced/)
-- [ ] Add “permissions view” to CLI and app
+- [x] Implement workspace allowlist + deny patterns
+- [x] Default sandbox = workspace-write, approval = on-request/untrusted (your choice)  [oai_citation:41‡OpenAI Developers](https://developers.openai.com/codex/config-advanced/)
+- [x] Add “permissions view” to CLI and app
 
 ## F. Plugin compatibility (Cowork plugins)
-- [ ] Implement plugin install/enable/disable
-- [ ] Parse `.claude-plugin/plugin.json` + `.mcp.json` + skills + commands  [oai_citation:42‡GitHub](https://github.com/anthropics/knowledge-work-plugins)
-- [ ] Convert plugin skills into Codex skills folders (`SKILL.md`)  [oai_citation:43‡OpenAI Developers](https://developers.openai.com/codex/skills/)
-- [ ] Implement wrapper slash commands in your UI (not inside Codex)
+- [x] Implement plugin install/enable/disable
+- [x] Parse `.claude-plugin/plugin.json` + `.mcp.json` + skills + commands  [oai_citation:42‡GitHub](https://github.com/anthropics/knowledge-work-plugins)
+- [x] Convert plugin skills into Codex skills folders (`SKILL.md`)  [oai_citation:43‡OpenAI Developers](https://developers.openai.com/codex/skills/)
+- [x] Implement wrapper slash commands in your UI (not inside Codex)
 
 ## G. Output generation (Excel/slides/docs)
-- [ ] Add artifact service tools
-- [ ] Add “Spreadsheet Builder” / “Deck Builder” / “Report Writer” skills
-- [ ] Save artifact hashes + list outputs at end of run
+- [x] Add artifact service tools
+- [x] Add “Spreadsheet Builder” / “Deck Builder” / “Report Writer” skills
+- [x] Save artifact hashes + list outputs at end of run
 
 ## H. Scheduler
-- [ ] Implement cron runner loop
-- [ ] Add “schedule this task” UI and CLI commands
+- [x] Implement cron runner loop
+- [x] Add “schedule this task” UI and CLI commands
 
 ## I. macOS app
-- [ ] Build a minimal shell UI:
+- [x] Build a minimal shell UI:
   - task list
   - new task
   - run detail (stream)
   - approvals sheet
   - outputs list
   - plugins + permissions settings
-- [ ] Bundle `codex` + `clawdexd` in app
-- [ ] Implement folder picker + bookmarks
+- [x] Bundle `codex` + `clawdexd` in app
+- [x] Implement folder picker + bookmarks
 - [ ] For App Store: restrict connectors to built-in/remote; document constraints  [oai_citation:44‡GitHub](https://github.com/openai/codex/issues/6634)
 
 ## J. Audit + compliance
-- [ ] Implement event/approval export
-- [ ] Add tamper-evident log chaining
-- [ ] Add “Action Intent + checkpoint” evidence records
+- [x] Implement event/approval export
+- [x] Add tamper-evident log chaining
+- [x] Add “Action Intent + checkpoint” evidence records
 
 ---
 
