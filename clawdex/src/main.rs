@@ -146,6 +146,36 @@ enum TasksCommand {
         #[arg(long = "auto-approve")]
         auto_approve: bool,
     },
+    /// Resume from an existing run thread and continue with a new prompt
+    Resume {
+        #[arg(long = "run-id")]
+        run_id: String,
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long = "codex-path")]
+        codex_path: Option<PathBuf>,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        #[arg(long = "auto-approve")]
+        auto_approve: bool,
+    },
+    /// Fork an existing run thread and continue on a branch with a new prompt
+    Fork {
+        #[arg(long = "run-id")]
+        run_id: String,
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long = "codex-path")]
+        codex_path: Option<PathBuf>,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        #[arg(long = "auto-approve")]
+        auto_approve: bool,
+    },
     /// List events for a task run
     Events {
         #[arg(long = "run-id")]
@@ -441,6 +471,46 @@ fn main() -> Result<()> {
                 workspace,
                 auto_approve,
                 approval_policy: None,
+                resume_from_run_id: None,
+                fork_from_run_id: None,
+            }),
+            TasksCommand::Resume {
+                run_id,
+                prompt,
+                codex_path,
+                state_dir,
+                workspace,
+                auto_approve,
+            } => tasks::run_task_command(tasks::TaskRunOptions {
+                task_id: None,
+                title: None,
+                prompt,
+                codex_path,
+                state_dir,
+                workspace,
+                auto_approve,
+                approval_policy: None,
+                resume_from_run_id: Some(run_id),
+                fork_from_run_id: None,
+            }),
+            TasksCommand::Fork {
+                run_id,
+                prompt,
+                codex_path,
+                state_dir,
+                workspace,
+                auto_approve,
+            } => tasks::run_task_command(tasks::TaskRunOptions {
+                task_id: None,
+                title: None,
+                prompt,
+                codex_path,
+                state_dir,
+                workspace,
+                auto_approve,
+                approval_policy: None,
+                resume_from_run_id: None,
+                fork_from_run_id: Some(run_id),
             }),
             TasksCommand::Events {
                 run_id,

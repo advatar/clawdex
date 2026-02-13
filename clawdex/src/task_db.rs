@@ -256,6 +256,31 @@ impl TaskStore {
             .context("query task by title")
     }
 
+    pub fn get_task(&self, task_id: &str) -> Result<Option<Task>> {
+        self.conn
+            .query_row(
+                "SELECT id, title, created_at_ms, last_run_at_ms, pinned, tags_json FROM tasks WHERE id = ?",
+                [task_id],
+                |row| {
+                    let tags_json: Option<String> = row.get(5)?;
+                    let tags: Vec<String> = tags_json
+                        .as_deref()
+                        .and_then(|raw| serde_json::from_str(raw).ok())
+                        .unwrap_or_default();
+                    Ok(Task {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        created_at_ms: row.get(2)?,
+                        last_run_at_ms: row.get(3)?,
+                        pinned: row.get::<_, i64>(4)? != 0,
+                        tags,
+                    })
+                },
+            )
+            .optional()
+            .context("query task by id")
+    }
+
     pub fn create_run(
         &self,
         task_id: &str,

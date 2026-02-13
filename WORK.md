@@ -184,11 +184,11 @@ Codex supports thread resume/fork and turn interrupts.  [oai_citation:22‡OpenA
 
 #### Checklist
 - [ ] Implement `task_run.cancel()`: send `turn/interrupt`
-- [ ] Implement `task_run.resume()`:
-  - [ ] call `thread/resume`
-  - [ ] start a new turn within same thread
-- [ ] Support “branching” runs:
-  - [ ] `task_run.fork()` → `thread/fork` for “try a different approach”
+- [x] Implement `task_run.resume()`:
+  - [x] call `thread/resume`
+  - [x] start a new turn within same thread
+- [x] Support “branching” runs:
+  - [x] `task_run.fork()` → `thread/fork` for “try a different approach”
 
 ---
 

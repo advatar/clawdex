@@ -21,3 +21,9 @@ commands:
   - name: tasks-follow
     description: Tail task-run events until the run reaches a terminal state
     cmd: cargo run --manifest-path clawdex/Cargo.toml -- tasks follow --run-id <run-id>
+  - name: tasks-resume
+    description: Resume an existing run thread and submit a new prompt turn
+    cmd: cargo run --manifest-path clawdex/Cargo.toml -- tasks resume --run-id <run-id> --prompt '<text>'
+  - name: tasks-fork
+    description: Fork an existing run thread and submit a new prompt turn on the branch
+    cmd: cargo run --manifest-path clawdex/Cargo.toml -- tasks fork --run-id <run-id> --prompt '<text>'

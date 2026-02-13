@@ -11,7 +11,8 @@ use codex_app_server_protocol::{
     FileChangeApprovalDecision, FileChangeRequestApprovalParams,
     FileChangeRequestApprovalResponse, InitializeCapabilities, InitializeParams, JSONRPCMessage,
     JSONRPCNotification, JSONRPCRequest, JSONRPCResponse, RequestId, ServerNotification,
-    SandboxPolicy, ServerRequest, ThreadStartParams, ToolRequestUserInputAnswer,
+    SandboxPolicy, ServerRequest, ThreadForkParams, ThreadForkResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadStartParams, ToolRequestUserInputAnswer,
     ToolRequestUserInputParams, ToolRequestUserInputResponse, TurnStartParams, TurnStatus,
     UserInput as V2UserInput,
 };
@@ -204,6 +205,33 @@ impl CodexClient {
         };
         let response: codex_app_server_protocol::ThreadStartResponse =
             self.send_request(request, request_id, "thread/start")?;
+        Ok(response.thread.id)
+    }
+
+    pub fn thread_resume(&mut self, thread_id: &str) -> Result<String> {
+        let request_id = self.request_id();
+        let request = ClientRequest::ThreadResume {
+            request_id: request_id.clone(),
+            params: ThreadResumeParams {
+                thread_id: thread_id.to_string(),
+                ..Default::default()
+            },
+        };
+        let response: ThreadResumeResponse =
+            self.send_request(request, request_id, "thread/resume")?;
+        Ok(response.thread.id)
+    }
+
+    pub fn thread_fork(&mut self, thread_id: &str) -> Result<String> {
+        let request_id = self.request_id();
+        let request = ClientRequest::ThreadFork {
+            request_id: request_id.clone(),
+            params: ThreadForkParams {
+                thread_id: thread_id.to_string(),
+                ..Default::default()
+            },
+        };
+        let response: ThreadForkResponse = self.send_request(request, request_id, "thread/fork")?;
         Ok(response.thread.id)
     }
 

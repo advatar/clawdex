@@ -39,6 +39,8 @@ pub struct TaskRunOptions {
     pub prompt: Option<String>,
     pub title: Option<String>,
     pub task_id: Option<String>,
+    pub resume_from_run_id: Option<String>,
+    pub fork_from_run_id: Option<String>,
 }
 
 pub fn run_task_command(opts: TaskRunOptions) -> Result<()> {
@@ -233,11 +235,49 @@ struct PreparedRun {
     prompt: String,
     codex_path: PathBuf,
     approval_policy: Option<AskForApproval>,
+    thread_launch: ThreadLaunch,
+}
+
+enum ThreadLaunch {
+    Start,
+    Resume {
+        source_run_id: String,
+        source_thread_id: String,
+    },
+    Fork {
+        source_run_id: String,
+        source_thread_id: String,
+    },
 }
 
 impl TaskEngine {
     fn prepare_run(&self, opts: &TaskRunOptions) -> Result<PreparedRun> {
         let store = TaskStore::open(&self.paths)?;
+        if opts.resume_from_run_id.is_some() && opts.fork_from_run_id.is_some() {
+            anyhow::bail!("cannot set both resume and fork source run ids");
+        }
+        if let Some(source_run_id) = opts.resume_from_run_id.as_deref() {
+            return self.prepare_run_from_existing(
+                &store,
+                opts,
+                source_run_id,
+                |source_run_id, source_thread_id| ThreadLaunch::Resume {
+                    source_run_id,
+                    source_thread_id,
+                },
+            );
+        }
+        if let Some(source_run_id) = opts.fork_from_run_id.as_deref() {
+            return self.prepare_run_from_existing(
+                &store,
+                opts,
+                source_run_id,
+                |source_run_id, source_thread_id| ThreadLaunch::Fork {
+                    source_run_id,
+                    source_thread_id,
+                },
+            );
+        }
         let (task, created) = resolve_task(&store, opts)?;
 
         let approval_policy = opts
@@ -267,6 +307,57 @@ impl TaskEngine {
             prompt,
             codex_path,
             approval_policy,
+            thread_launch: ThreadLaunch::Start,
+        })
+    }
+
+    fn prepare_run_from_existing<F>(
+        &self,
+        store: &TaskStore,
+        opts: &TaskRunOptions,
+        source_run_id: &str,
+        launch: F,
+    ) -> Result<PreparedRun>
+    where
+        F: FnOnce(String, String) -> ThreadLaunch,
+    {
+        let source_run = store
+            .get_run(source_run_id)?
+            .with_context(|| format!("source run not found: {source_run_id}"))?;
+        let source_thread_id = source_run
+            .codex_thread_id
+            .clone()
+            .with_context(|| format!("source run missing codex thread id: {source_run_id}"))?;
+        let task = store
+            .get_task(&source_run.task_id)?
+            .with_context(|| format!("task missing for source run: {}", source_run.task_id))?;
+
+        let approval_policy = opts
+            .approval_policy
+            .or_else(|| resolve_approval_policy(&self.cfg));
+        let sandbox_label = if self.paths.workspace_policy.read_only {
+            "read-only"
+        } else {
+            "workspace-write"
+        };
+        let run = store.create_run(
+            &task.id,
+            "running",
+            Some(source_thread_id.clone()),
+            Some(sandbox_label.to_string()),
+            approval_policy.map(|p| format!("{p:?}")),
+        )?;
+        let prompt = resolve_prompt(opts)?;
+        let codex_path = resolve_codex_path(&self.cfg, opts.codex_path.clone())?;
+
+        Ok(PreparedRun {
+            task,
+            created: false,
+            run,
+            prompt,
+            codex_path,
+            approval_policy,
+            thread_launch: launch(source_run_id.to_string(), source_thread_id),
         })
     }
 
@@ -285,6 +376,7 @@ impl TaskEngine {
             prompt,
             codex_path,
             approval_policy,
+            thread_launch,
         } = prepared;
 
         let codex_home = self.paths.state_dir.join("codex");
@@ -340,14 +432,53 @@ impl TaskEngine {
         client.set_user_input_handler(Some(user_input_handler));
         client.initialize()?;
 
-        let thread_id = client.thread_start()?;
+        let (thread_id, thread_event_kind, thread_event_payload) = match &thread_launch {
+            ThreadLaunch::Start => {
+                let thread_id = client.thread_start()?;
+                (
+                    thread_id.clone(),
+                    "thread_started",
+                    json!({ "threadId": thread_id }),
+                )
+            }
+            ThreadLaunch::Resume {
+                source_run_id,
+                source_thread_id,
+            } => {
+                let thread_id = client.thread_resume(source_thread_id)?;
+                (
+                    thread_id.clone(),
+                    "thread_resumed",
+                    json!({
+                        "threadId": thread_id,
+                        "sourceRunId": source_run_id,
+                        "sourceThreadId": source_thread_id,
+                    }),
+                )
+            }
+            ThreadLaunch::Fork {
+                source_run_id,
+                source_thread_id,
+            } => {
+                let thread_id = client.thread_fork(source_thread_id)?;
+                (
+                    thread_id.clone(),
+                    "thread_forked",
+                    json!({
+                        "threadId": thread_id,
+                        "sourceRunId": source_run_id,
+                        "sourceThreadId": source_thread_id,
+                    }),
+                )
+            }
+        };
         {
             let store = store_rc.borrow();
             let _ = store.update_run_thread(&run.id, &thread_id);
             let _ = store.record_event(
                 &run.id,
-                "thread_started",
-                &json!({ "threadId": thread_id }),
+                thread_event_kind,
+                &thread_event_payload,
             );
         }
 

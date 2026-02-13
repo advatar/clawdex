@@ -314,6 +314,8 @@ fn handle_request(
                     prompt,
                     title,
                     task_id,
+                    resume_from_run_id: None,
+                    fork_from_run_id: None,
                 },
                 broker.clone(),
             )?;
