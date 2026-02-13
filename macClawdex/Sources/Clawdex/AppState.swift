@@ -11,6 +11,12 @@ final class AppState: ObservableObject {
     @Published var mcpAllowlist: String = ""
     @Published var mcpDenylist: String = ""
 
+    // Peer assist (Antenna)
+    @Published var peerAssistEnabled: Bool = false
+    @Published var peerRelayURL: String = ""
+    @Published var peerCategoryENS: String = "clawdex.peers"
+    @Published var peerAnonKey: String = ""
+
     // Memory (config-backed)
     @Published var memoryEnabled: Bool = true
     @Published var memoryCitations: String = "auto" // auto | on | off

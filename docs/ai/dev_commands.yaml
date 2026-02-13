@@ -6,6 +6,9 @@ commands:
   - name: mac-build
     description: Build the macOS app without code signing
     cmd: xcodebuild -project macClawdex/Clawdex.xcodeproj -scheme Clawdex -configuration Debug -destination 'platform=macOS' build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=''
+  - name: mac-project-generate
+    description: Regenerate Clawdex.xcodeproj from macClawdex/project.yml (required after package/dependency edits)
+    cmd: cd macClawdex && xcodegen generate
   - name: daemon-health
     description: Check local clawdexd daemon health endpoint
     cmd: curl -sS http://127.0.0.1:18791/v1/health

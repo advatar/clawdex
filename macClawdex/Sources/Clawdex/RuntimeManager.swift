@@ -50,8 +50,20 @@ final class RuntimeManager: ObservableObject {
         if UserDefaults.standard.object(forKey: DefaultsKeys.parallelPrepassEnabled) == nil {
             UserDefaults.standard.set(false, forKey: DefaultsKeys.parallelPrepassEnabled)
         }
+        if UserDefaults.standard.object(forKey: DefaultsKeys.peerAssistEnabled) == nil {
+            UserDefaults.standard.set(false, forKey: DefaultsKeys.peerAssistEnabled)
+        }
+        if UserDefaults.standard.object(forKey: DefaultsKeys.peerCategoryENS) == nil {
+            UserDefaults.standard.set("clawdex.peers", forKey: DefaultsKeys.peerCategoryENS)
+        }
+
         appState.agentAutoStart = UserDefaults.standard.bool(forKey: DefaultsKeys.agentAutoStart)
         appState.parallelPrepassEnabled = UserDefaults.standard.bool(forKey: DefaultsKeys.parallelPrepassEnabled)
+        appState.peerAssistEnabled = UserDefaults.standard.bool(forKey: DefaultsKeys.peerAssistEnabled)
+        appState.peerRelayURL = UserDefaults.standard.string(forKey: DefaultsKeys.peerRelayURL) ?? ""
+        appState.peerCategoryENS = UserDefaults.standard.string(forKey: DefaultsKeys.peerCategoryENS) ?? "clawdex.peers"
+        appState.peerAnonKey = UserDefaults.standard.string(forKey: DefaultsKeys.peerAnonKey) ?? ""
+
         appState.launchAtLoginEnabled = LaunchAtLoginController.isEnabled()
         appState.hasOpenAIKey = (try? Keychain.loadOpenAIKey()) != nil
 
@@ -225,6 +237,53 @@ final class RuntimeManager: ObservableObject {
         }
 
         sendUserPayload(text: text, localImagePaths: cleaned)
+    }
+
+    @MainActor
+    func publishPeerHelpRequest(_ question: String) async throws -> PeerHelpPublishResult {
+        guard let appState else {
+            throw NSError(
+                domain: "Clawdex",
+                code: 3001,
+                userInfo: [NSLocalizedDescriptionKey: "App state unavailable."]
+            )
+        }
+
+        guard appState.peerAssistEnabled else {
+            throw NSError(
+                domain: "Clawdex",
+                code: 3002,
+                userInfo: [NSLocalizedDescriptionKey: "Peer assist is disabled in Settings."]
+            )
+        }
+
+        let relayRaw = appState.peerRelayURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !relayRaw.isEmpty, let relayURL = URL(string: relayRaw) else {
+            throw NSError(
+                domain: "Clawdex",
+                code: 3003,
+                userInfo: [NSLocalizedDescriptionKey: "Peer relay URL is missing or invalid."]
+            )
+        }
+
+        let category = appState.peerCategoryENS.trimmingCharacters(in: .whitespacesAndNewlines)
+        let anonKey = appState.peerAnonKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+        let sourceLabel = "clawdex-mac/\(appVersion)"
+        let capabilities = ["codex-runtime", "gateway-attachments", "plugins", "memory-hybrid-search"]
+
+        let result = try await AntennaPeerAssist.publishHelpRequest(
+            question: question,
+            relayURL: relayURL,
+            categoryENS: category,
+            anonKey: anonKey,
+            sourceLabel: sourceLabel,
+            capabilities: capabilities
+        )
+
+        appendLog("[app] Peer assist published event \(result.eventID) to \(result.topic) (replies: \(result.repliesTopic))")
+        return result
     }
 
     private func shouldRunParallelPrepass(prompt: String, localImagePaths: [String]) -> Bool {

@@ -98,6 +98,32 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Peer Assist (Antenna)") {
+                Toggle("Enable peer assist", isOn: $appState.peerAssistEnabled)
+                    .onChange(of: appState.peerAssistEnabled) { _, _ in
+                        persistPeerSettings()
+                    }
+
+                TextField("Relay URL (POST endpoint)", text: $appState.peerRelayURL)
+                    .onChange(of: appState.peerRelayURL) { _, _ in
+                        persistPeerSettings()
+                    }
+
+                TextField("Category ENS", text: $appState.peerCategoryENS)
+                    .onChange(of: appState.peerCategoryENS) { _, _ in
+                        persistPeerSettings()
+                    }
+
+                TextField("Anonymous key (optional)", text: $appState.peerAnonKey)
+                    .onChange(of: appState.peerAnonKey) { _, _ in
+                        persistPeerSettings()
+                    }
+
+                Text("Use `/peers <question>` in Chat to publish an MBP2P help request to peers.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Permissions") {
                 Toggle("Allow internet access", isOn: $appState.internetEnabled)
                 Toggle("Read-only workspace", isOn: $appState.workspaceReadOnly)
@@ -234,6 +260,14 @@ struct SettingsView: View {
                 runtime.requestPlugins()
             }
         }
+    }
+
+    private func persistPeerSettings() {
+        let defaults = UserDefaults.standard
+        defaults.set(appState.peerAssistEnabled, forKey: DefaultsKeys.peerAssistEnabled)
+        defaults.set(appState.peerRelayURL.trimmingCharacters(in: .whitespacesAndNewlines), forKey: DefaultsKeys.peerRelayURL)
+        defaults.set(appState.peerCategoryENS.trimmingCharacters(in: .whitespacesAndNewlines), forKey: DefaultsKeys.peerCategoryENS)
+        defaults.set(appState.peerAnonKey.trimmingCharacters(in: .whitespacesAndNewlines), forKey: DefaultsKeys.peerAnonKey)
     }
 
     private func refreshKeyStatus() {

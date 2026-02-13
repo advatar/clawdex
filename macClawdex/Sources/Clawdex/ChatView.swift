@@ -10,7 +10,7 @@ struct ChatView: View {
     @State private var showCommandPalette: Bool = false
     @State private var attachments: [ChatImageAttachment] = []
     @State private var messages: [ChatMessage] = [
-        ChatMessage(role: .system, text: "Clawdex (Codex-powered) — macOS app shell. Configure API key + workspace in Settings. Plugin commands: /plugin <id> <command> [input].")
+        ChatMessage(role: .system, text: "Clawdex (Codex-powered) — macOS app shell. Configure API key + workspace in Settings. Plugin commands: /plugin <id> <command> [input]. Peer assist: /peers <question>.")
     ]
 
     var body: some View {
@@ -118,6 +118,33 @@ struct ChatView: View {
         input = ""
         attachments = []
 
+        if let peerPrompt = parsePeerAssistCommand(from: text) {
+            if peerPrompt.isEmpty {
+                messages.append(ChatMessage(role: .system, text: "Peer assist usage: /peers <question>"))
+                return
+            }
+            if !localImages.isEmpty {
+                messages.append(ChatMessage(role: .system, text: "Peer assist does not support image attachments yet."))
+                return
+            }
+
+            messages.append(ChatMessage(role: .user, text: "/peers \(peerPrompt)"))
+            Task { @MainActor in
+                do {
+                    let published = try await runtime.publishPeerHelpRequest(peerPrompt)
+                    messages.append(
+                        ChatMessage(
+                            role: .system,
+                            text: "Peer request published. event=\(published.eventID) topic=\(published.topic) replies=\(published.repliesTopic) relay=\(published.relayURL.absoluteString)"
+                        )
+                    )
+                } catch {
+                    messages.append(ChatMessage(role: .system, text: "Peer assist failed: \(error.localizedDescription)"))
+                }
+            }
+            return
+        }
+
         let displayText: String
         if text.isEmpty {
             displayText = "Sent \(localImages.count) image(s)."
@@ -132,6 +159,17 @@ struct ChatView: View {
             runtime.start()
         }
         runtime.sendUserMessage(text, localImagePaths: localImages)
+    }
+
+    private func parsePeerAssistCommand(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "/peers" {
+            return ""
+        }
+        guard trimmed.hasPrefix("/peers ") else {
+            return nil
+        }
+        return String(trimmed.dropFirst("/peers".count)).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func label(for role: ChatMessage.Role) -> String {

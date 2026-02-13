@@ -7,4 +7,9 @@ enum DefaultsKeys {
     static let toolsVersion = "clawdex.toolsVersion"
     static let openclawPluginsVersion = "clawdex.openclawPluginsVersion"
     static let gatewayToken = "clawdex.gatewayToken"
+
+    static let peerAssistEnabled = "clawdex.peerAssistEnabled"
+    static let peerRelayURL = "clawdex.peerRelayURL"
+    static let peerCategoryENS = "clawdex.peerCategoryENS"
+    static let peerAnonKey = "clawdex.peerAnonKey"
 }

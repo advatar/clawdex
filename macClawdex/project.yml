@@ -9,6 +9,8 @@ configFiles:
 packages:
   DeepThink:
     path: ../Packages/DeepThink
+  AntennaProtocol:
+    path: ../../Antenna/swift/AntennaProtocol
 targets:
   Clawdex:
     type: application
@@ -16,6 +18,8 @@ targets:
     dependencies:
       - package: DeepThink
         product: ParallellVibe
+      - package: AntennaProtocol
+        product: AntennaProtocol
     sources:
       - path: Sources/Clawdex
     resources:
