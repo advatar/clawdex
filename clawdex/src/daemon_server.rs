@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use tiny_http::{Method, Response, Server, StatusCode};
 
@@ -24,6 +25,15 @@ use crate::tasks::{TaskEngine, TaskRunOptions};
 use crate::util::now_ms;
 
 const ADMIN_DASHBOARD_HTML: &str = include_str!("admin_dashboard.html");
+#[cfg(unix)]
+const DEFAULT_IPC_SOCKET_MODE: u32 = 0o600;
+
+#[derive(Debug)]
+struct IpcProxyRequest {
+    method: String,
+    path: String,
+    body: Value,
+}
 
 struct DaemonControl {
     sender: mpsc::Sender<DaemonCommand>,
@@ -60,6 +70,7 @@ pub fn run_daemon_server(
     paths: ClawdPaths,
     codex_path_override: Option<PathBuf>,
     bind: &str,
+    ipc_uds: Option<PathBuf>,
 ) -> Result<()> {
     let (command_tx, command_rx) = std::sync::mpsc::channel::<DaemonCommand>();
     let broker = Arc::new(ApprovalBroker::new(paths.clone()));
@@ -80,6 +91,16 @@ pub fn run_daemon_server(
     });
 
     let control = DaemonControl { sender: command_tx };
+    #[cfg(unix)]
+    let _ipc_guard = start_ipc_proxy_server(ipc_uds.clone(), bind.to_string(), shutdown.clone())?;
+    #[cfg(not(unix))]
+    if let Some(path) = ipc_uds.as_ref() {
+        eprintln!(
+            "[clawdexd] ignoring --ipc-uds {}; unix sockets are unavailable on this platform",
+            path.display()
+        );
+    }
+
     let server =
         Server::http(bind).map_err(|err| anyhow::anyhow!("bind daemon server {bind}: {err}"))?;
     for mut request in server.incoming_requests() {
@@ -91,6 +112,253 @@ pub fn run_daemon_server(
     }
     shutdown.store(true, Ordering::SeqCst);
     Ok(())
+}
+
+#[cfg(unix)]
+fn start_ipc_proxy_server(
+    ipc_uds: Option<PathBuf>,
+    bind: String,
+    shutdown: Arc<AtomicBool>,
+) -> Result<Option<thread::JoinHandle<()>>> {
+    use std::io::ErrorKind;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+
+    let Some(socket_path) = ipc_uds else {
+        return Ok(None);
+    };
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create ipc parent {}", parent.display()))?;
+    }
+    if socket_path.exists() {
+        std::fs::remove_file(&socket_path)
+            .with_context(|| format!("remove stale ipc socket {}", socket_path.display()))?;
+    }
+    let listener = UnixListener::bind(&socket_path)
+        .with_context(|| format!("bind daemon ipc socket {}", socket_path.display()))?;
+    listener
+        .set_nonblocking(true)
+        .context("set ipc listener nonblocking")?;
+    std::fs::set_permissions(
+        &socket_path,
+        std::fs::Permissions::from_mode(DEFAULT_IPC_SOCKET_MODE),
+    )
+    .with_context(|| format!("set ipc socket mode {}", socket_path.display()))?;
+
+    let http_base = format!("http://{}", bind.trim_end_matches('/'));
+    let handle = thread::spawn(move || {
+        while !shutdown.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((stream, _addr)) => {
+                    let base = http_base.clone();
+                    thread::spawn(move || {
+                        if let Err(err) = serve_ipc_proxy_connection(stream, &base) {
+                            eprintln!("[clawdexd][ipc] connection failed: {err}");
+                        }
+                    });
+                }
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(err) => {
+                    eprintln!("[clawdexd][ipc] accept failed: {err}");
+                    thread::sleep(Duration::from_millis(250));
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&socket_path);
+    });
+    Ok(Some(handle))
+}
+
+#[cfg(unix)]
+fn serve_ipc_proxy_connection(
+    mut stream: std::os::unix::net::UnixStream,
+    http_base: &str,
+) -> Result<()> {
+    use std::io::BufRead;
+
+    let reader = stream.try_clone().context("clone ipc stream")?;
+    let mut reader = std::io::BufReader::new(reader);
+    loop {
+        let mut line = String::new();
+        let bytes = reader
+            .read_line(&mut line)
+            .context("read ipc request line")?;
+        if bytes == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let response = match serde_json::from_str::<Value>(trimmed) {
+            Ok(request) => handle_ipc_jsonrpc_request(http_base, request),
+            Err(err) => Some(jsonrpc_error(
+                Value::Null,
+                -32700,
+                &format!("parse error: {err}"),
+            )),
+        };
+        if let Some(response) = response {
+            let line = serde_json::to_string(&response).context("serialize ipc response")?;
+            use std::io::Write;
+            writeln!(stream, "{line}").context("write ipc response")?;
+            stream.flush().ok();
+        }
+    }
+    Ok(())
+}
+
+fn handle_ipc_jsonrpc_request(http_base: &str, request: Value) -> Option<Value> {
+    let jsonrpc = request.get("jsonrpc").and_then(|v| v.as_str());
+    if jsonrpc != Some("2.0") {
+        return Some(jsonrpc_error(
+            request.get("id").cloned().unwrap_or(Value::Null),
+            -32600,
+            "invalid jsonrpc version",
+        ));
+    }
+
+    let id = request.get("id").cloned();
+    let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
+    if method.is_empty() {
+        return Some(jsonrpc_error(
+            id.unwrap_or(Value::Null),
+            -32600,
+            "missing method",
+        ));
+    }
+
+    let result = match method {
+        "daemon.request" => {
+            let proxy = match parse_ipc_proxy_request(request.get("params")) {
+                Ok(proxy) => proxy,
+                Err(err) => {
+                    return Some(jsonrpc_error(
+                        id.unwrap_or(Value::Null),
+                        -32602,
+                        &err.to_string(),
+                    ))
+                }
+            };
+            proxy_http_request(http_base, &proxy)
+        }
+        "health" => proxy_http_request(
+            http_base,
+            &IpcProxyRequest {
+                method: "GET".to_string(),
+                path: "/v1/health".to_string(),
+                body: Value::Null,
+            },
+        ),
+        _ => {
+            return Some(jsonrpc_error(
+                id.unwrap_or(Value::Null),
+                -32601,
+                "method not found",
+            ))
+        }
+    };
+
+    let Some(id) = id else {
+        // JSON-RPC notification: no response payload.
+        return None;
+    };
+    match result {
+        Ok(value) => Some(jsonrpc_result(id, value)),
+        Err(err) => Some(jsonrpc_error(id, -32000, &err.to_string())),
+    }
+}
+
+fn parse_ipc_proxy_request(params: Option<&Value>) -> Result<IpcProxyRequest> {
+    let params = params.context("params required")?;
+    let object = params.as_object().context("params must be an object")?;
+    let method = object
+        .get("httpMethod")
+        .or_else(|| object.get("method"))
+        .and_then(|v| v.as_str())
+        .context("params.httpMethod required")?
+        .trim()
+        .to_uppercase();
+    let path = object
+        .get("path")
+        .and_then(|v| v.as_str())
+        .context("params.path required")?
+        .trim()
+        .to_string();
+
+    if path.is_empty() || !path.starts_with('/') {
+        anyhow::bail!("params.path must start with '/'");
+    }
+    if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
+        anyhow::bail!("unsupported http method: {method}");
+    }
+
+    Ok(IpcProxyRequest {
+        method,
+        path,
+        body: object.get("body").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn proxy_http_request(http_base: &str, request: &IpcProxyRequest) -> Result<Value> {
+    let url = format!("{}{}", http_base.trim_end_matches('/'), request.path);
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("build ipc proxy client")?;
+    let mut builder = match request.method.as_str() {
+        "GET" => client.get(&url),
+        "POST" => client.post(&url),
+        "PUT" => client.put(&url),
+        "PATCH" => client.patch(&url),
+        "DELETE" => client.delete(&url),
+        _ => anyhow::bail!("unsupported http method: {}", request.method),
+    };
+    if request.method != "GET" && !request.body.is_null() {
+        builder = builder.json(&request.body);
+    }
+    let response = builder
+        .send()
+        .with_context(|| format!("proxy request {} {}", request.method, request.path))?;
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let text = response.text().unwrap_or_default();
+    let body = if text.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text))
+    };
+    Ok(json!({
+        "status": status,
+        "contentType": content_type,
+        "body": body,
+    }))
+}
+
+fn jsonrpc_result(id: Value, result: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result,
+    })
+}
+
+fn jsonrpc_error(id: Value, code: i64, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": code,
+            "message": message,
+        }
+    })
 }
 
 fn handle_request(
@@ -772,7 +1040,7 @@ fn json_error_response(message: &str, status: StatusCode) -> Response<std::io::C
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_admin_plugin_action, parse_permissions_update};
+    use super::{parse_admin_plugin_action, parse_ipc_proxy_request, parse_permissions_update};
     use serde_json::json;
 
     #[test]
@@ -807,5 +1075,28 @@ mod tests {
                 ("beta".to_string(), false)
             ])
         );
+    }
+
+    #[test]
+    fn parse_ipc_proxy_request_accepts_valid_request() {
+        let payload = json!({
+            "httpMethod": "post",
+            "path": "/v1/health",
+            "body": { "ping": true }
+        });
+        let parsed = parse_ipc_proxy_request(Some(&payload)).expect("parse ipc request");
+        assert_eq!(parsed.method, "POST");
+        assert_eq!(parsed.path, "/v1/health");
+        assert_eq!(parsed.body, json!({ "ping": true }));
+    }
+
+    #[test]
+    fn parse_ipc_proxy_request_rejects_relative_path() {
+        let payload = json!({
+            "httpMethod": "GET",
+            "path": "v1/health"
+        });
+        let err = parse_ipc_proxy_request(Some(&payload)).expect_err("parse should fail");
+        assert!(err.to_string().contains("must start with '/'"));
     }
 }
