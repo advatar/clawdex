@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::thread;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use codex_app_server_protocol::{
@@ -20,7 +21,7 @@ use crate::config::{load_config, ClawdConfig, ClawdPaths};
 use crate::runner::workspace_sandbox_policy;
 use crate::approvals::{ApprovalBroker, BrokerApprovalHandler, BrokerUserInputHandler};
 use crate::audit;
-use crate::task_db::{Task, TaskRun, TaskStore};
+use crate::task_db::{Task, TaskEvent, TaskRun, TaskStore};
 use crate::util::{now_ms, write_json_value};
 
 pub struct TaskEngine {
@@ -80,6 +81,62 @@ pub fn list_events_command(
     let store = TaskStore::open(&paths)?;
     let events = store.list_events(run_id, limit)?;
     Ok(json!({ "events": events }))
+}
+
+pub fn follow_events_command(
+    run_id: &str,
+    poll_ms: u64,
+    state_dir: Option<PathBuf>,
+    workspace: Option<PathBuf>,
+) -> Result<()> {
+    let (_cfg, paths) = load_config(state_dir, workspace)?;
+    let store = TaskStore::open(&paths)?;
+    let run = store
+        .get_run(run_id)?
+        .with_context(|| format!("run id not found: {run_id}"))?;
+
+    let mut cursor = 0_i64;
+    let mut seen_ids = std::collections::HashSet::new();
+
+    // Replay the recent event tail first so users get immediate context.
+    let mut initial_events = store.list_events(run_id, Some(200))?;
+    initial_events.reverse();
+    for event in initial_events {
+        print_follow_event(&event)?;
+        cursor = cursor.max(event.ts_ms);
+        seen_ids.insert(event.id);
+    }
+
+    let interval = Duration::from_millis(poll_ms.clamp(100, 10_000));
+    if is_terminal_run_status(&run.status) {
+        return Ok(());
+    }
+
+    loop {
+        let after = cursor.saturating_sub(1);
+        let events = store.list_events_after(run_id, after, 200)?;
+        let mut emitted = 0usize;
+        for event in events {
+            if seen_ids.contains(&event.id) {
+                continue;
+            }
+            print_follow_event(&event)?;
+            cursor = cursor.max(event.ts_ms);
+            seen_ids.insert(event.id);
+            emitted += 1;
+        }
+
+        let run = store
+            .get_run(run_id)?
+            .with_context(|| format!("run disappeared while following events: {run_id}"))?;
+        if emitted == 0 && is_terminal_run_status(&run.status) {
+            break;
+        }
+        if emitted == 0 {
+            thread::sleep(interval);
+        }
+    }
+    Ok(())
 }
 
 pub fn export_audit_packet_command(
@@ -415,6 +472,19 @@ fn resolve_approval_policy(cfg: &ClawdConfig) -> Option<AskForApproval> {
     Some(policy)
 }
 
+fn print_follow_event(event: &TaskEvent) -> Result<()> {
+    let payload = serde_json::to_string(&event.payload)?;
+    println!("{} {} {}", event.ts_ms, event.kind, payload);
+    Ok(())
+}
+
+fn is_terminal_run_status(status: &str) -> bool {
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "completed" | "failed" | "cancelled" | "canceled" | "interrupted"
+    )
+}
+
 struct TaskEventSink {
     store: Rc<RefCell<TaskStore>>,
     run_id: String,
@@ -599,6 +669,21 @@ fn prompt_text(prompt: &str) -> String {
     let mut input = String::new();
     let _ = io::stdin().read_line(&mut input);
     input.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_terminal_run_status;
+
+    #[test]
+    fn terminal_status_detection_handles_supported_values() {
+        assert!(is_terminal_run_status("completed"));
+        assert!(is_terminal_run_status("failed"));
+        assert!(is_terminal_run_status("cancelled"));
+        assert!(is_terminal_run_status("canceled"));
+        assert!(is_terminal_run_status("interrupted"));
+        assert!(!is_terminal_run_status("running"));
+    }
 }
 
 fn handle_task_request(

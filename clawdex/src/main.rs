@@ -157,6 +157,18 @@ enum TasksCommand {
         #[arg(long)]
         workspace: Option<PathBuf>,
     },
+    /// Follow task-run events until completion
+    Follow {
+        #[arg(long = "run-id")]
+        run_id: String,
+        /// Poll interval in milliseconds (clamped to 100-10000)
+        #[arg(long = "poll-ms", default_value_t = 750)]
+        poll_ms: u64,
+        #[arg(long = "state-dir")]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
     /// Run a simple HTTP task server (for UI integration)
     Server {
         #[arg(long, default_value = "127.0.0.1:18790")]
@@ -440,6 +452,12 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&value)?);
                 Ok(())
             }
+            TasksCommand::Follow {
+                run_id,
+                poll_ms,
+                state_dir,
+                workspace,
+            } => tasks::follow_events_command(&run_id, poll_ms, state_dir, workspace),
             TasksCommand::Server {
                 bind,
                 state_dir,

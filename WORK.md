@@ -498,7 +498,7 @@ If you want this as a literal implementation sequence for the next commits, here
 
 ## C. Streaming
 - [ ] Rewrite `CodexClient` to stream events and persist them
-- [ ] CLI “live view” that follows a run
+- [x] CLI “live view” that follows a run
 
 ## D. Approvals UX
 - [ ] Replace env-based approvals with Approval Broker

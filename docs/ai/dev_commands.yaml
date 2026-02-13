@@ -18,3 +18,6 @@ commands:
   - name: clawdex-cli
     description: Run the clawdex CLI from source
     cmd: cargo run --manifest-path clawdex/Cargo.toml -- <args>
+  - name: tasks-follow
+    description: Tail task-run events until the run reaches a terminal state
+    cmd: cargo run --manifest-path clawdex/Cargo.toml -- tasks follow --run-id <run-id>
