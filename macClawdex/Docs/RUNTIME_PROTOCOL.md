@@ -9,6 +9,11 @@ The starter macOS app talks to `clawdex` via **newline-delimited JSON** over std
 {"type":"user_message","text":"Hello"}
 ```
 
+### Subscribe to streamed turn events
+```json
+{"type":"subscribe_events","subscriptionId":"ui","kinds":["turn_started","turn_completed"]}
+```
+
 (Extend as needed)
 - `thread` (string) — optional thread/session key
 - `route`  — optional delivery route key (channel/to)
@@ -23,6 +28,11 @@ The starter macOS app talks to `clawdex` via **newline-delimited JSON** over std
 ### Error
 ```json
 {"type":"error","message":"Something went wrong"}
+```
+
+### Streamed event for a subscriber
+```json
+{"type":"ui_event","subscriptionId":"ui","eventKind":"turn_completed","event":{}}
 ```
 
 ## Notes

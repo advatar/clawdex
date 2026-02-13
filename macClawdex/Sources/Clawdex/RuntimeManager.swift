@@ -155,6 +155,7 @@ final class RuntimeManager: ObservableObject {
             appendLog("[app] Started clawdex (pid \(p.processIdentifier))")
             requestConfig()
             requestPlugins()
+            requestEventSubscription()
 
         } catch {
             appState.lastError = error.localizedDescription
@@ -381,6 +382,22 @@ final class RuntimeManager: ObservableObject {
     func requestPluginCommands() {
         let payload: [String: Any] = [
             "type": "list_plugin_commands"
+        ]
+        sendControlMessage(payload)
+    }
+
+    func requestEventSubscription() {
+        let payload: [String: Any] = [
+            "type": "subscribe_events",
+            "subscriptionId": "mac-ui",
+            "kinds": [
+                "turn_started",
+                "turn_completed",
+                "item_started",
+                "item_completed",
+                "agent_message_delta",
+                "error",
+            ],
         ]
         sendControlMessage(payload)
     }
