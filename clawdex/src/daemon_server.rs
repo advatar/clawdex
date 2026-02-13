@@ -398,8 +398,16 @@ fn handle_request(
         }
         (&Method::Post, "/v1/admin/plugins/install") => {
             let payload = parse_json_body_or_null(request).context("parse admin plugin install")?;
+            let spec = payload
+                .get("spec")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let npm = payload
                 .get("npm")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let git = payload
+                .get("git")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             let path = payload
@@ -415,8 +423,10 @@ fn handle_request(
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             let value = plugins::add_plugin_command(
+                spec,
                 path,
                 npm,
+                git,
                 link,
                 source,
                 Some(paths.state_dir.clone()),
@@ -1001,10 +1011,10 @@ fn parse_permissions_update(payload: &Value) -> Result<PermissionsUpdate> {
             let mode = mode_value
                 .as_str()
                 .with_context(|| format!("mcpServers.{server} must be a string"))?;
-            let normalized = mode.trim().to_lowercase().replace('-', "_");
-            if normalized.is_empty() {
+            if mode.trim().is_empty() {
                 continue;
             }
+            let normalized = permissions::normalize_server_policy_mode(mode)?;
             out.push((server.to_string(), normalized));
         }
         Some(out)

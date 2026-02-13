@@ -27,6 +27,8 @@ const BUNDLED_CLAUDE_PLUGINS_DIR_ENV: &str = "CLAWDEX_BUNDLED_CLAUDE_PLUGINS_DIR
 const DISABLE_BUNDLED_CLAUDE_PLUGINS_ENV: &str = "CLAWDEX_DISABLE_DEFAULT_CLAUDE_PLUGINS";
 const BUNDLED_CLAUDE_PLUGINS_SOURCE_LABEL: &str = "bundled-claude";
 const CLAWDEX_PLUGIN_ID_FRONTMATTER_KEY: &str = "clawdex-plugin-id";
+const CLAWDEX_PLUGIN_NAME_FRONTMATTER_KEY: &str = "clawdex-plugin-name";
+const CLAWDEX_PLUGIN_SOURCE_FRONTMATTER_KEY: &str = "clawdex-plugin-source";
 const ALLOW_VULNERABLE_PLUGINS_ENV: &str = "CLAWDEX_ALLOW_VULNERABLE_PLUGINS";
 const VULNERABLE_PLUGIN_BLOCKLIST: &[(&str, &str)] = &[
     (
@@ -286,6 +288,7 @@ enum PluginInstallMode {
 enum PluginInstallSource {
     Path(PathBuf),
     Npm { spec: String },
+    Git { url: String, subdir: Option<String> },
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -326,6 +329,7 @@ struct CommandSpec {
 struct CommandEntry {
     plugin_id: String,
     plugin_name: String,
+    plugin_source: Option<String>,
     command: String,
     description: Option<String>,
     source: String,
@@ -823,8 +827,10 @@ pub fn run_plugin_command_command(
 }
 
 pub fn add_plugin_command(
+    spec: Option<String>,
     path: Option<PathBuf>,
     npm: Option<String>,
+    git: Option<String>,
     link: bool,
     source: Option<String>,
     state_dir: Option<PathBuf>,
@@ -833,13 +839,7 @@ pub fn add_plugin_command(
     let (cfg, paths) = load_config(state_dir, workspace)?;
     let store = TaskStore::open(&paths)?;
     let policy = resolve_mcp_policy(&cfg);
-    let install_source = if let Some(spec) = npm {
-        PluginInstallSource::Npm { spec }
-    } else if let Some(path) = path {
-        PluginInstallSource::Path(path)
-    } else {
-        anyhow::bail!("missing plugin source");
-    };
+    let install_source = resolve_install_source(spec, path, npm, git)?;
     let plugin = install_plugin(
         &paths,
         &store,
@@ -852,6 +852,145 @@ pub fn add_plugin_command(
     )?;
     let assets = plugin_assets(Path::new(&plugin.path));
     Ok(json!({ "plugin": plugin, "assets": assets }))
+}
+
+fn resolve_install_source(
+    spec: Option<String>,
+    path: Option<PathBuf>,
+    npm: Option<String>,
+    git: Option<String>,
+) -> Result<PluginInstallSource> {
+    let mut specified = 0usize;
+    if spec.as_ref().is_some_and(|value| !value.trim().is_empty()) {
+        specified += 1;
+    }
+    if path.is_some() {
+        specified += 1;
+    }
+    if npm.as_ref().is_some_and(|value| !value.trim().is_empty()) {
+        specified += 1;
+    }
+    if git.as_ref().is_some_and(|value| !value.trim().is_empty()) {
+        specified += 1;
+    }
+    if specified == 0 {
+        anyhow::bail!("missing plugin source");
+    }
+    if specified > 1 {
+        anyhow::bail!("specify only one plugin source");
+    }
+
+    if let Some(path) = path {
+        return Ok(PluginInstallSource::Path(path));
+    }
+    if let Some(spec) = npm {
+        let trimmed = spec.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("missing npm spec");
+        }
+        return Ok(PluginInstallSource::Npm {
+            spec: trimmed.to_string(),
+        });
+    }
+    if let Some(raw) = git {
+        let (url, subdir) =
+            parse_git_source_spec(&raw).context("invalid --git source (expected URL or owner/repo[/subdir])")?;
+        return Ok(PluginInstallSource::Git { url, subdir });
+    }
+    if let Some(raw) = spec {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("missing plugin source");
+        }
+        let path_candidate = PathBuf::from(trimmed);
+        if path_candidate.exists()
+            || trimmed == "~"
+            || trimmed.starts_with("~/")
+            || trimmed.starts_with("./")
+            || trimmed.starts_with("../")
+            || trimmed.starts_with('/')
+        {
+            return Ok(PluginInstallSource::Path(path_candidate));
+        }
+        if let Some((url, subdir)) = parse_git_source_spec(trimmed) {
+            return Ok(PluginInstallSource::Git { url, subdir });
+        }
+        return Ok(PluginInstallSource::Path(path_candidate));
+    }
+
+    anyhow::bail!("missing plugin source")
+}
+
+fn parse_git_source_spec(raw: &str) -> Option<(String, Option<String>)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (location, subdir_hint) = match trimmed.split_once('#') {
+        Some((location, subdir)) => (location.trim(), Some(subdir.trim().to_string())),
+        None => (trimmed, None),
+    };
+    if location.is_empty() {
+        return None;
+    }
+    if looks_like_git_url(location) {
+        return Some((location.to_string(), clean_subdir_hint(subdir_hint)));
+    }
+    if let Some((url, parsed_subdir)) = parse_github_shorthand(location) {
+        let subdir = match (parsed_subdir, clean_subdir_hint(subdir_hint)) {
+            (Some(prefix), Some(suffix)) => Some(format!("{prefix}/{suffix}")),
+            (Some(prefix), None) => Some(prefix),
+            (None, Some(suffix)) => Some(suffix),
+            (None, None) => None,
+        };
+        return Some((url, subdir));
+    }
+    None
+}
+
+fn clean_subdir_hint(subdir: Option<String>) -> Option<String> {
+    subdir
+        .map(|value| value.trim().trim_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn looks_like_git_url(raw: &str) -> bool {
+    raw.starts_with("http://")
+        || raw.starts_with("https://")
+        || raw.starts_with("ssh://")
+        || raw.starts_with("git@")
+        || raw.ends_with(".git")
+}
+
+fn parse_github_shorthand(raw: &str) -> Option<(String, Option<String>)> {
+    if raw.contains("://") || raw.contains('@') {
+        return None;
+    }
+    let parts: Vec<&str> = raw.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let owner = parts[0];
+    let repo = parts[1];
+    if !is_github_token(owner) || !is_github_token(repo) {
+        return None;
+    }
+    let subdir = if parts.len() > 2 {
+        Some(parts[2..].join("/"))
+    } else {
+        None
+    };
+    Some((format!("https://github.com/{owner}/{repo}.git"), subdir))
+}
+
+fn is_github_token(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return false;
+    }
+    trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
 fn read_installed_version(paths: &ClawdPaths, plugin_id: &str, install_path: Option<&str>) -> Option<String> {
@@ -1132,6 +1271,7 @@ enum PreparedSourceKind {
     Path,
     Archive,
     Npm,
+    Git,
 }
 
 struct PreparedPlugin {
@@ -1293,6 +1433,69 @@ fn create_temp_dir(prefix: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+fn sanitize_relative_subdir(raw: &str) -> Result<PathBuf> {
+    let mut out = PathBuf::new();
+    for component in Path::new(raw).components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("invalid git subdir: {raw}");
+            }
+        }
+    }
+    if out.as_os_str().is_empty() {
+        anyhow::bail!("invalid git subdir: {raw}");
+    }
+    Ok(out)
+}
+
+fn run_git_clone(url: &str, dest_dir: &Path) -> Result<PathBuf> {
+    let clone_root = dest_dir.join("repo");
+    let output = Command::new("git")
+        .arg("clone")
+        .arg("--depth")
+        .arg("1")
+        .arg(url)
+        .arg(&clone_root)
+        .current_dir(dest_dir)
+        .output()
+        .context("git clone")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        anyhow::bail!("git clone failed: {}", detail);
+    }
+    Ok(clone_root)
+}
+
+fn resolve_git_plugin_root(repo_root: &Path, subdir: Option<&str>) -> Result<PathBuf> {
+    let Some(subdir) = subdir else {
+        return Ok(repo_root.to_path_buf());
+    };
+    let rel = sanitize_relative_subdir(subdir)?;
+    let candidate = repo_root.join(&rel);
+    if candidate.is_dir() {
+        return Ok(candidate);
+    }
+
+    // Convenience for anthropics/knowledge-work-plugins/<role> shorthands where roles
+    // may be nested under `plugins/<role>` depending on upstream layout.
+    if !subdir.contains('/') {
+        let fallback = repo_root.join("plugins").join(&rel);
+        if fallback.is_dir() {
+            return Ok(fallback);
+        }
+    }
+
+    anyhow::bail!("git source subdir not found: {subdir}");
+}
+
 fn run_npm_pack(spec: &str, dest_dir: &Path) -> Result<PathBuf> {
     let output = Command::new("npm")
         .arg("pack")
@@ -1427,6 +1630,33 @@ fn prepare_plugin_source(source: &PluginInstallSource) -> Result<PreparedPluginS
                 link_source: None,
             })
         }
+        PluginInstallSource::Git { url, subdir } => {
+            let trimmed = url.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!("missing git url");
+            }
+            let temp_dir = create_temp_dir("clawdex-git-")?;
+            let repo_root = run_git_clone(trimmed, &temp_dir)?;
+            let root = resolve_git_plugin_root(&repo_root, subdir.as_deref())?;
+            let manifest = load_plugin_manifest(&root)?;
+            let package = read_package_manifest(&root);
+            let spec = subdir
+                .as_ref()
+                .map(|subdir| format!("{trimmed}#{subdir}"))
+                .unwrap_or_else(|| trimmed.to_string());
+            Ok(PreparedPluginSource {
+                plugin: PreparedPlugin {
+                    root,
+                    manifest,
+                    package,
+                    temp_dir: Some(temp_dir),
+                },
+                kind: PreparedSourceKind::Git,
+                source_path: None,
+                spec: Some(spec),
+                link_source: None,
+            })
+        }
     }
 }
 
@@ -1541,6 +1771,11 @@ fn install_plugin(
             .as_ref()
             .map(|s| format!("npm:{s}"))
             .unwrap_or_else(|| "npm".to_string()),
+        PreparedSourceKind::Git => prepared
+            .spec
+            .as_ref()
+            .map(|s| format!("git:{s}"))
+            .unwrap_or_else(|| "git".to_string()),
     };
 
     let plugin = PluginRecord {
@@ -1571,6 +1806,7 @@ fn install_plugin(
             PreparedSourceKind::Path => "path".to_string(),
             PreparedSourceKind::Archive => "archive".to_string(),
             PreparedSourceKind::Npm => "npm".to_string(),
+            PreparedSourceKind::Git => "git".to_string(),
         },
         spec: prepared.spec.clone(),
         source_path: prepared
@@ -1737,7 +1973,13 @@ fn sync_plugin_skills(paths: &ClawdPaths, plugin: &PluginRecord, policy: &McpPol
             }
         }
         let skill_md = dest.join("SKILL.md");
-        ensure_namespaced_frontmatter(&skill_md, &namespaced, &plugin.id)?;
+        ensure_namespaced_frontmatter(
+            &skill_md,
+            &namespaced,
+            &plugin.id,
+            &plugin.name,
+            root.to_string_lossy().as_ref(),
+        )?;
     }
 
     let mut command_names = HashSet::new();
@@ -1763,7 +2005,13 @@ fn sync_plugin_skills(paths: &ClawdPaths, plugin: &PluginRecord, policy: &McpPol
                 .with_context(|| format!("remove {}", dest.display()))?;
         }
         ensure_dir(&dest)?;
-        let yaml = render_command_frontmatter(&plugin.id, &namespaced, template.description.as_deref())?;
+        let yaml = render_command_frontmatter(
+            &plugin.id,
+            &plugin.name,
+            root.to_string_lossy().as_ref(),
+            &namespaced,
+            template.description.as_deref(),
+        )?;
         let mut rendered_template = rewrite_claude_code_paths(&template.template);
         if rendered_template.contains("${CLAUDE_PLUGIN_ROOT}") {
             rendered_template = rendered_template.replace("${CLAUDE_PLUGIN_ROOT}", &root.to_string_lossy());
@@ -1981,7 +2229,13 @@ fn collect_skills_from_dir(dir: &Path, out: &mut Vec<SkillSource>) -> Result<()>
     Ok(())
 }
 
-fn ensure_namespaced_frontmatter(path: &Path, namespaced: &str, plugin_id: &str) -> Result<()> {
+fn ensure_namespaced_frontmatter(
+    path: &Path,
+    namespaced: &str,
+    plugin_id: &str,
+    plugin_name: &str,
+    plugin_source: &str,
+) -> Result<()> {
     let contents = read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let (frontmatter, body) = split_frontmatter(&contents);
     let mut mapping = frontmatter.unwrap_or_else(Mapping::new);
@@ -2008,6 +2262,17 @@ fn ensure_namespaced_frontmatter(path: &Path, namespaced: &str, plugin_id: &str)
         mapping.insert(plugin_key, YamlValue::String(plugin_id.to_string()));
     }
 
+    let plugin_name_key = YamlValue::String(CLAWDEX_PLUGIN_NAME_FRONTMATTER_KEY.to_string());
+    mapping.insert(
+        plugin_name_key,
+        YamlValue::String(plugin_name.trim().to_string()),
+    );
+    let plugin_source_key = YamlValue::String(CLAWDEX_PLUGIN_SOURCE_FRONTMATTER_KEY.to_string());
+    mapping.insert(
+        plugin_source_key,
+        YamlValue::String(plugin_source.trim().to_string()),
+    );
+
     let yaml = serde_yaml::to_string(&mapping).context("serialize skill frontmatter")?;
     let updated = format!("---\n{}---\n{}", yaml, body);
     fs::write(path, updated).with_context(|| format!("write {}", path.display()))?;
@@ -2033,7 +2298,13 @@ fn split_frontmatter(contents: &str) -> (Option<Mapping>, String) {
     (mapping, rest)
 }
 
-fn render_command_frontmatter(plugin_id: &str, name: &str, description: Option<&str>) -> Result<String> {
+fn render_command_frontmatter(
+    plugin_id: &str,
+    plugin_name: &str,
+    plugin_source: &str,
+    name: &str,
+    description: Option<&str>,
+) -> Result<String> {
     let mut mapping = Mapping::new();
     mapping.insert(
         YamlValue::String("name".to_string()),
@@ -2042,6 +2313,14 @@ fn render_command_frontmatter(plugin_id: &str, name: &str, description: Option<&
     mapping.insert(
         YamlValue::String(CLAWDEX_PLUGIN_ID_FRONTMATTER_KEY.to_string()),
         YamlValue::String(plugin_id.to_string()),
+    );
+    mapping.insert(
+        YamlValue::String(CLAWDEX_PLUGIN_NAME_FRONTMATTER_KEY.to_string()),
+        YamlValue::String(plugin_name.to_string()),
+    );
+    mapping.insert(
+        YamlValue::String(CLAWDEX_PLUGIN_SOURCE_FRONTMATTER_KEY.to_string()),
+        YamlValue::String(plugin_source.to_string()),
     );
     mapping.insert(
         YamlValue::String("disable-model-invocation".to_string()),
@@ -2285,6 +2564,7 @@ fn load_plugin_commands(root: &Path, plugin: &PluginRecord) -> Result<Vec<Comman
         entries.push(CommandEntry {
             plugin_id: plugin.id.clone(),
             plugin_name: plugin.name.clone(),
+            plugin_source: plugin.source.clone(),
             command: template.name,
             description: template.description,
             source: path.to_string_lossy().to_string(),
@@ -2835,6 +3115,53 @@ Do the thing.
         assert!(
             !marker_skill.exists(),
             "expected marker-owned skill dir to be removed"
+        );
+    }
+
+    #[test]
+    fn parse_git_source_spec_supports_github_shorthand_with_role_subdir() {
+        let parsed =
+            parse_git_source_spec("anthropics/knowledge-work-plugins/productivity").expect("parsed");
+        assert_eq!(
+            parsed.0,
+            "https://github.com/anthropics/knowledge-work-plugins.git"
+        );
+        assert_eq!(parsed.1.as_deref(), Some("productivity"));
+    }
+
+    #[test]
+    fn parse_git_source_spec_supports_fragment_subdir() {
+        let parsed = parse_git_source_spec("https://github.com/acme/tools.git#plugins/data")
+            .expect("parsed");
+        assert_eq!(parsed.0, "https://github.com/acme/tools.git");
+        assert_eq!(parsed.1.as_deref(), Some("plugins/data"));
+    }
+
+    #[test]
+    fn render_command_frontmatter_includes_plugin_provenance_fields() {
+        let yaml = render_command_frontmatter(
+            "productivity",
+            "Productivity",
+            "git:https://github.com/anthropics/knowledge-work-plugins.git#productivity",
+            "productivity:plan-week",
+            Some("Plan your week"),
+        )
+        .expect("frontmatter");
+        let map: Mapping = serde_yaml::from_str(&yaml).expect("yaml");
+        let plugin_id = map
+            .get(&YamlValue::String(CLAWDEX_PLUGIN_ID_FRONTMATTER_KEY.to_string()))
+            .and_then(|v| v.as_str());
+        let plugin_name = map
+            .get(&YamlValue::String(CLAWDEX_PLUGIN_NAME_FRONTMATTER_KEY.to_string()))
+            .and_then(|v| v.as_str());
+        let plugin_source = map
+            .get(&YamlValue::String(CLAWDEX_PLUGIN_SOURCE_FRONTMATTER_KEY.to_string()))
+            .and_then(|v| v.as_str());
+        assert_eq!(plugin_id, Some("productivity"));
+        assert_eq!(plugin_name, Some("Productivity"));
+        assert_eq!(
+            plugin_source,
+            Some("git:https://github.com/anthropics/knowledge-work-plugins.git#productivity")
         );
     }
 }

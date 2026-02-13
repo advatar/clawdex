@@ -88,13 +88,11 @@ pub fn set_permissions_command(
     if let Some(server_policies) = update.mcp_server_policies {
         let mut server_map = Map::new();
         for (server_name, mode) in server_policies {
-            if server_name.trim().is_empty() || mode.trim().is_empty() {
+            let server_name = server_name.trim();
+            if server_name.is_empty() || mode.trim().is_empty() {
                 continue;
             }
-            server_map.insert(
-                server_name,
-                Value::String(mode.trim().to_lowercase().replace('-', "_")),
-            );
+            server_map.insert(server_name.to_string(), Value::String(normalize_server_policy_mode(&mode)?));
         }
         let mut mcp_patch = Map::new();
         mcp_patch.insert("serverPolicies".to_string(), Value::Object(server_map));
@@ -149,4 +147,32 @@ pub fn parse_plugin_toggle(raw: &str) -> Result<(String, bool)> {
         return Err(anyhow::anyhow!("expected <pluginId>=<on|off>"));
     }
     Ok((name.to_string(), parse_on_off(value)?))
+}
+
+pub fn parse_server_policy(raw: &str) -> Result<(String, String)> {
+    let mut parts = raw.splitn(2, '=');
+    let name = parts.next().unwrap_or("").trim();
+    let mode = parts.next().unwrap_or("").trim();
+    if name.is_empty() || mode.is_empty() {
+        return Err(anyhow::anyhow!(
+            "expected <server>=<ask_every_time|allow_once|allow_always|deny>"
+        ));
+    }
+    Ok((name.to_string(), normalize_server_policy_mode(mode)?))
+}
+
+pub fn normalize_server_policy_mode(raw: &str) -> Result<String> {
+    let normalized = raw.trim().to_lowercase().replace('-', "_");
+    let canonical = match normalized.as_str() {
+        "ask" | "ask_every_time" | "ask_each_time" | "always_ask" => "ask_every_time",
+        "allow_once" | "once" => "allow_once",
+        "allow_always" | "allow" | "always" => "allow_always",
+        "deny" | "block" => "deny",
+        _ => {
+            return Err(anyhow::anyhow!(
+                "invalid MCP server policy mode `{raw}` (expected ask_every_time, allow_once, allow_always, or deny)"
+            ))
+        }
+    };
+    Ok(canonical.to_string())
 }

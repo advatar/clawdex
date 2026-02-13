@@ -2,6 +2,7 @@
 
 Active:
 - [x] Integrate `Packages/DeepThink` into `macClawdex` and add an optional parallel-agent prepass path in the app runtime.
+- [x] Upstream sync pass: bump `openclaw`/`codex` submodules to latest `main` and backport any newly applicable OpenClaw parity fixes.
 - [ ] WORK.md execution pass: close remaining task-runtime gaps starting with `tasks follow` live event tailing, then continue with run lifecycle controls (`cancel`/`resume`/`fork`).
   - [x] Add `clawdex tasks follow --run-id <id>` live event tailing and wire it into the CLI.
   - [x] Add `clawdex tasks cancel --run-id <id>` and wire cancellation to app-server `turn/interrupt`.
@@ -15,13 +16,19 @@ Active:
   - [x] Convert `ui_bridge` event flow to publish structured run events to subscribers (while keeping current message/error output compatibility).
   - [x] Document App Store connector constraints (built-in + remote connectors only; no local spawned MCP binaries).
   - [x] Reconcile stale narrative-phase checkboxes in `WORK.md` so only true remaining gaps stay unchecked.
+  - [ ] Close remaining WORK.md gaps:
+    - [ ] Finish plugin install parity: CLI/Admin `spec` + `--git` wiring, GitHub shorthand support, and skill provenance surfacing.
+    - [ ] Record cron daemon executions in the shared `task_runs/events` pipeline.
+    - [ ] Add gated memory writes with explicit scope (`global` / `workspace` / `plugin`).
+    - [ ] Add macOS UI action for exporting audit packets.
+    - [ ] Reconcile `WORK.md` checkboxes after implementation (including already-shipped approval/user-input/policy items).
 
 Upstream Sync (Submodules):
 - [x] Establish and follow a regular cadence to pull upstream changes into our forks and then bump the pinned submodule SHAs in this repo (`codex/` from `openai/main`, `openclaw/` from `openclaw/main`).
 - [x] On each `openclaw/` bump: scan upstream skills/tooling for new/changed tool usage (`openclaw/src/agents/tools`, `openclaw/src/gateway/protocol/schema`), update `compat/` schemas/specs, and add regression tests before porting required behavior into `clawdex/`.
 - [x] Codex sync policy is now explicit: prioritize `openclaw` parity bumps; review/bump `codex` opportunistically when integration deltas require it, and capture port tasks before implementation.
 - [x] Keep submodule bump commits isolated (one `chore(submodules)` commit), and land parity/feature ports as separate commits with tests.
-  - Latest bump: 2026-02-12 (codex `466be55ab`, openclaw `47cd7e29e`)
+  - Latest bump: 2026-02-13 (codex `1e75173eb`, openclaw `417509c53`)
   - [x] Backport OpenClaw gateway send parity update: allow attachment-only / media-only sends (`message` optional in gateway send params) with regression tests.
   - [x] Security sweep on each openclaw bump: review published GH advisories + merged security PRs, run dependency audit, and patch/backport applicable fixes.
   - [x] Add `plugins/get-shit-done/` submodule support to the bundled-plugin flow (auto-install + Codex skills sync), including parsing Claude Code-style command frontmatter and rewriting `~/.claude/...` paths to `${CLAUDE_PLUGIN_ROOT}/...` for portability.
@@ -32,6 +39,7 @@ Upstream Sync (Submodules):
   - [x] Backport OpenClaw install-script hardening: add `--ignore-scripts` to npm dependency installs during plugin setup.
   - [x] Backport OpenClaw gateway WS payload policy bump for image uploads (`maxPayload` 8 MiB, `maxBufferedBytes` 16 MiB) with regression coverage.
   - [x] Backport OpenClaw heartbeat scheduler hardening: daemon heartbeat tick errors are logged and rescheduled instead of terminating `clawdexd`.
+  - [x] Backport OpenClaw auth hardening: use constant-time secret comparison for configured gateway token/password checks.
 
 - [x] Add artifact service tools (xlsx/pptx/docx/pdf) with schema validation + hashing
 - [x] Record artifact events and list outputs at end of task runs

@@ -241,13 +241,17 @@ enum PluginsCommand {
         #[arg(long = "include-disabled")]
         include_disabled: bool,
     },
-    /// Install a plugin from a local path or npm spec
+    /// Install a plugin from a local path, npm spec, git source, or shorthand
     Add {
-        #[arg(long, required_unless_present = "npm")]
+        #[arg(value_name = "SOURCE")]
+        spec: Option<String>,
+        #[arg(long)]
         path: Option<PathBuf>,
-        #[arg(long, required_unless_present = "path", conflicts_with = "path")]
+        #[arg(long)]
         npm: Option<String>,
-        #[arg(long, conflicts_with = "npm")]
+        #[arg(long)]
+        git: Option<String>,
+        #[arg(long)]
         link: bool,
         #[arg(long)]
         source: Option<String>,
@@ -372,6 +376,8 @@ enum PermissionsCommand {
         mcp_deny: Option<String>,
         #[arg(long = "mcp-plugin")]
         mcp_plugin: Vec<String>,
+        #[arg(long = "mcp-server")]
+        mcp_server: Vec<String>,
         #[arg(long = "state-dir")]
         state_dir: Option<PathBuf>,
         #[arg(long)]
@@ -576,15 +582,25 @@ fn main() -> Result<()> {
                 Ok(())
             }
             PluginsCommand::Add {
+                spec,
                 path,
                 npm,
+                git,
                 link,
                 source,
                 state_dir,
                 workspace,
             } => {
-                let value =
-                    plugins::add_plugin_command(path, npm, link, source, state_dir, workspace)?;
+                let value = plugins::add_plugin_command(
+                    spec,
+                    path,
+                    npm,
+                    git,
+                    link,
+                    source,
+                    state_dir,
+                    workspace,
+                )?;
                 println!("{}", serde_json::to_string_pretty(&value)?);
                 Ok(())
             }
@@ -687,6 +703,7 @@ fn main() -> Result<()> {
                 mcp_allow,
                 mcp_deny,
                 mcp_plugin,
+                mcp_server,
                 state_dir,
                 workspace,
             } => {
@@ -706,6 +723,16 @@ fn main() -> Result<()> {
                             .collect::<Result<Vec<_>, _>>()?,
                     )
                 };
+                let mcp_server_policies = if mcp_server.is_empty() {
+                    None
+                } else {
+                    Some(
+                        mcp_server
+                            .iter()
+                            .map(|entry| permissions::parse_server_policy(entry))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )
+                };
                 let value = permissions::set_permissions_command(
                     permissions::PermissionsUpdate {
                         internet,
@@ -713,7 +740,7 @@ fn main() -> Result<()> {
                         mcp_allow,
                         mcp_deny,
                         mcp_plugins,
-                        mcp_server_policies: None,
+                        mcp_server_policies,
                     },
                     state_dir,
                     workspace,
