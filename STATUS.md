@@ -6,6 +6,7 @@ Active:
   - [x] Add `clawdex tasks follow --run-id <id>` live event tailing and wire it into the CLI.
   - [x] Add `clawdex tasks cancel --run-id <id>` and wire cancellation to app-server `turn/interrupt`.
   - [x] Expose cancellation in the legacy task HTTP server via `POST /v1/runs/{id}/cancel`.
+  - [x] Add regression test coverage for cancellation flagging (`cancel_run_command_sets_cancel_requested_flag`).
   - [x] Add `clawdex tasks resume --run-id <id>` wired to app-server `thread/resume`.
   - [x] Add `clawdex tasks fork --run-id <id>` wired to app-server `thread/fork`.
   - [x] Extend daemon `POST /v1/runs` to accept `resumeFromRunId` / `forkFromRunId` for async run continuation.

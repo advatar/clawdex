@@ -868,7 +868,11 @@ fn prompt_text(prompt: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_terminal_run_status;
+    use std::fs;
+
+    use super::{cancel_run_command, is_terminal_run_status, now_ms};
+    use crate::config::load_config;
+    use crate::task_db::TaskStore;
 
     #[test]
     fn terminal_status_detection_handles_supported_values() {
@@ -878,6 +882,48 @@ mod tests {
         assert!(is_terminal_run_status("canceled"));
         assert!(is_terminal_run_status("interrupted"));
         assert!(!is_terminal_run_status("running"));
+    }
+
+    #[test]
+    fn cancel_run_command_sets_cancel_requested_flag() {
+        let base = std::env::temp_dir().join(format!(
+            "clawdex-cancel-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let state_dir = base.join("state");
+        let workspace_dir = base.join("workspace");
+        fs::create_dir_all(&workspace_dir).expect("create workspace");
+
+        let (_cfg, paths) =
+            load_config(Some(state_dir.clone()), Some(workspace_dir.clone())).expect("load config");
+        let store = TaskStore::open(&paths).expect("open task store");
+        let task = store.create_task("cancel test").expect("create task");
+        let run = store
+            .create_run(
+                &task.id,
+                "running",
+                None,
+                Some("workspace-write".to_string()),
+                Some("OnRequest".to_string()),
+            )
+            .expect("create run");
+
+        let result = cancel_run_command(&run.id, Some(state_dir.clone()), Some(workspace_dir.clone()))
+            .expect("cancel run");
+        assert_eq!(
+            result.get("cancelRequested").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        let (_cfg, paths) =
+            load_config(Some(state_dir.clone()), Some(workspace_dir.clone())).expect("reload config");
+        let reopened = TaskStore::open(&paths).expect("reopen task store");
+        assert!(reopened
+            .is_run_cancel_requested(&run.id)
+            .expect("read cancel flag"));
+
+        let _ = fs::remove_dir_all(base);
     }
 }
 
