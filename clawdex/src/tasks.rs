@@ -895,6 +895,41 @@ fn handle_task_request(
             let tasks = store.list_tasks()?;
             Ok(json_response(json!({ "tasks": tasks }))?)
         }
+        _ if method == Method::Post && url.starts_with("/v1/runs/") && url.ends_with("/cancel") => {
+            let run_id = url
+                .trim_start_matches("/v1/runs/")
+                .trim_end_matches("/cancel")
+                .trim_matches('/');
+            if run_id.is_empty() {
+                return Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404)));
+            }
+            let store = TaskStore::open(paths)?;
+            let run = store
+                .get_run(run_id)?
+                .with_context(|| format!("run id not found: {run_id}"))?;
+            if is_terminal_run_status(&run.status) {
+                return Ok(json_response(json!({
+                    "ok": false,
+                    "cancelRequested": false,
+                    "runId": run_id,
+                    "status": run.status,
+                    "reason": "run is already terminal",
+                }))?);
+            }
+            let requested = store.request_run_cancel(run_id)?;
+            if requested {
+                let _ = store.record_event(
+                    run_id,
+                    "cancel_requested",
+                    &json!({ "requestedAtMs": now_ms() }),
+                );
+            }
+            Ok(json_response(json!({
+                "ok": requested,
+                "cancelRequested": requested,
+                "runId": run_id,
+            }))?)
+        }
         _ => {
             if method == Method::Get && url.starts_with("/v1/runs/") {
                 let run_id = url.trim_start_matches("/v1/runs/");
