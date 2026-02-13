@@ -28,6 +28,9 @@ struct PendingApproval: Identifiable, Hashable {
     let kind: String
     let createdAtMs: Int64
     let requestJson: String
+    let highRisk: Bool
+    let riskReasons: [String]
+    let confirmationPhrase: String?
 }
 
 struct UserInputOption: Hashable {
@@ -243,6 +246,9 @@ final class DaemonClient {
                   let runId = item["run_id"] as? String,
                   let kind = item["kind"] as? String else { return nil }
             let createdAtMs = int64Value(item["created_at_ms"]) ?? 0
+            let highRisk = item["high_risk"] as? Bool ?? false
+            let riskReasons = item["risk_reasons"] as? [String] ?? []
+            let confirmationPhrase = item["confirmation_phrase"] as? String
             let requestObj = item["request"] ?? [:]
             let requestData = try? JSONSerialization.data(withJSONObject: requestObj, options: [.prettyPrinted])
             let requestJson = requestData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
@@ -251,7 +257,10 @@ final class DaemonClient {
                 runId: runId,
                 kind: kind,
                 createdAtMs: createdAtMs,
-                requestJson: requestJson
+                requestJson: requestJson,
+                highRisk: highRisk,
+                riskReasons: riskReasons,
+                confirmationPhrase: confirmationPhrase
             )
         }
 
@@ -289,17 +298,39 @@ final class DaemonClient {
         return (approvals: approvals, inputs: inputs)
     }
 
-    func resolveApproval(id: String, decision: String) async throws -> Bool {
+    func resolveApproval(
+        id: String,
+        decision: String,
+        reason: String? = nil,
+        confirmation: String? = nil
+    ) async throws -> Bool {
         var request = URLRequest(url: baseURL.appendingPathComponent("/v1/approvals/\(id)"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["decision": decision])
+        var payload: [String: Any] = ["decision": decision]
+        if let reason {
+            let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                payload["reason"] = trimmed
+            }
+        }
+        if let confirmation {
+            let trimmed = confirmation.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                payload["confirmation"] = trimmed
+            }
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         let (data, _) = try await URLSession.shared.data(for: request)
         let obj = try parseObject(data: data)
         return obj["ok"] as? Bool ?? false
     }
 
-    func submitUserInput(id: String, answers: [String: [String]]) async throws -> Bool {
+    func submitUserInput(
+        id: String,
+        answers: [String: [String]],
+        action: String = "submit"
+    ) async throws -> Bool {
         var request = URLRequest(url: baseURL.appendingPathComponent("/v1/user-input/\(id)"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -307,7 +338,10 @@ final class DaemonClient {
         for (key, values) in answers {
             payloadAnswers[key] = ["answers": values]
         }
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["answers": payloadAnswers])
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "action": action,
+            "answers": payloadAnswers
+        ])
         let (data, _) = try await URLSession.shared.data(for: request)
         let obj = try parseObject(data: data)
         return obj["ok"] as? Bool ?? false

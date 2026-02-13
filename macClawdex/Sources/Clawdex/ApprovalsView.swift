@@ -41,9 +41,19 @@ final class ApprovalsViewModel: ObservableObject {
         pollTask = nil
     }
 
-    func decide(id: String, decision: ApprovalDecision) async -> Bool {
+    func decide(
+        id: String,
+        decision: ApprovalDecision,
+        reason: String? = nil,
+        confirmation: String? = nil
+    ) async -> Bool {
         do {
-            let ok = try await client.resolveApproval(id: id, decision: decision.rawValue)
+            let ok = try await client.resolveApproval(
+                id: id,
+                decision: decision.rawValue,
+                reason: reason,
+                confirmation: confirmation
+            )
             if ok {
                 await refresh()
             }
@@ -54,9 +64,9 @@ final class ApprovalsViewModel: ObservableObject {
         }
     }
 
-    func submit(inputId: String, answers: [String: [String]]) async -> Bool {
+    func submit(inputId: String, answers: [String: [String]], action: String = "submit") async -> Bool {
         do {
-            let ok = try await client.submitUserInput(id: inputId, answers: answers)
+            let ok = try await client.submitUserInput(id: inputId, answers: answers, action: action)
             if ok {
                 await refresh()
             }
@@ -74,6 +84,8 @@ struct ApprovalsView: View {
 
     @State private var selections: [String: [String: String]] = [:]
     @State private var textInputs: [String: [String: String]] = [:]
+    @State private var approvalReasons: [String: String] = [:]
+    @State private var approvalConfirmations: [String: String] = [:]
 
     private let otherOptionKey = "__other__"
 
@@ -151,22 +163,78 @@ struct ApprovalsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
+                        TextField(
+                            "Why approve/decline? (optional, saved to audit)",
+                            text: approvalReasonBinding(for: approval.id)
+                        )
+                        .textFieldStyle(.roundedBorder)
+
+                        if approval.highRisk {
+                            let phrase = approval.confirmationPhrase ?? "ALLOW_DELETE_OR_RENAME"
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("High-risk change detected")
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                                if !approval.riskReasons.isEmpty {
+                                    ForEach(approval.riskReasons, id: \.self) { reason in
+                                        Text("• \(reason)")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                Text("Type \(phrase) to approve")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                TextField(
+                                    phrase,
+                                    text: approvalConfirmationBinding(for: approval.id)
+                                )
+                                .textFieldStyle(.roundedBorder)
+                            }
+                        }
+
                         approvalDetails(approval)
 
                         HStack {
                             Button("Approve") {
                                 Task {
-                                    _ = await viewModel.decide(id: approval.id, decision: .accept)
+                                    let ok = await viewModel.decide(
+                                        id: approval.id,
+                                        decision: .accept,
+                                        reason: approvalReasons[approval.id],
+                                        confirmation: approvalConfirmations[approval.id]
+                                    )
+                                    if ok {
+                                        approvalReasons[approval.id] = nil
+                                        approvalConfirmations[approval.id] = nil
+                                    }
                                 }
                             }
+                            .disabled(!isApprovalConfirmationValid(approval))
                             Button("Decline") {
                                 Task {
-                                    _ = await viewModel.decide(id: approval.id, decision: .decline)
+                                    let ok = await viewModel.decide(
+                                        id: approval.id,
+                                        decision: .decline,
+                                        reason: approvalReasons[approval.id]
+                                    )
+                                    if ok {
+                                        approvalReasons[approval.id] = nil
+                                        approvalConfirmations[approval.id] = nil
+                                    }
                                 }
                             }
                             Button("Cancel") {
                                 Task {
-                                    _ = await viewModel.decide(id: approval.id, decision: .cancel)
+                                    let ok = await viewModel.decide(
+                                        id: approval.id,
+                                        decision: .cancel,
+                                        reason: approvalReasons[approval.id]
+                                    )
+                                    if ok {
+                                        approvalReasons[approval.id] = nil
+                                        approvalConfirmations[approval.id] = nil
+                                    }
                                 }
                             }
                             Spacer()
@@ -221,20 +289,53 @@ struct ApprovalsView: View {
                             .padding(.vertical, 4)
                         }
 
-                        Button("Submit Answers") {
-                            let answers = buildAnswers(for: input)
-                            let answeredCount = answers.count
-                            if answeredCount < input.questions.count {
-                                viewModel.statusMessage = "Please answer all questions before submitting."
-                                return
-                            }
-                            Task {
-                                let ok = await viewModel.submit(inputId: input.id, answers: answers)
-                                if ok {
-                                    selections[input.id] = nil
-                                    textInputs[input.id] = nil
+                        HStack {
+                            Button("Submit Answers") {
+                                let answers = buildAnswers(for: input)
+                                let answeredCount = answers.count
+                                if answeredCount < input.questions.count {
+                                    viewModel.statusMessage = "Please answer all questions before submitting."
+                                    return
+                                }
+                                Task {
+                                    let ok = await viewModel.submit(
+                                        inputId: input.id,
+                                        answers: answers,
+                                        action: "submit"
+                                    )
+                                    if ok {
+                                        selections[input.id] = nil
+                                        textInputs[input.id] = nil
+                                    }
                                 }
                             }
+                            Button("Skip") {
+                                Task {
+                                    let ok = await viewModel.submit(
+                                        inputId: input.id,
+                                        answers: [:],
+                                        action: "skip"
+                                    )
+                                    if ok {
+                                        selections[input.id] = nil
+                                        textInputs[input.id] = nil
+                                    }
+                                }
+                            }
+                            Button("Cancel") {
+                                Task {
+                                    let ok = await viewModel.submit(
+                                        inputId: input.id,
+                                        answers: [:],
+                                        action: "cancel"
+                                    )
+                                    if ok {
+                                        selections[input.id] = nil
+                                        textInputs[input.id] = nil
+                                    }
+                                }
+                            }
+                            Spacer()
                         }
                     }
                     .padding(12)
@@ -306,6 +407,38 @@ struct ApprovalsView: View {
                 textInputs[inputId] = inputs
             }
         )
+    }
+
+    private func approvalReasonBinding(for approvalId: String) -> Binding<String> {
+        Binding<String>(
+            get: {
+                approvalReasons[approvalId] ?? ""
+            },
+            set: { newValue in
+                approvalReasons[approvalId] = newValue
+            }
+        )
+    }
+
+    private func approvalConfirmationBinding(for approvalId: String) -> Binding<String> {
+        Binding<String>(
+            get: {
+                approvalConfirmations[approvalId] ?? ""
+            },
+            set: { newValue in
+                approvalConfirmations[approvalId] = newValue
+            }
+        )
+    }
+
+    private func isApprovalConfirmationValid(_ approval: PendingApproval) -> Bool {
+        if !approval.highRisk {
+            return true
+        }
+        let required = approval.confirmationPhrase ?? "ALLOW_DELETE_OR_RENAME"
+        let provided = approvalConfirmations[approval.id]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return provided == required
     }
 
     private func buildAnswers(for input: PendingUserInput) -> [String: [String]] {

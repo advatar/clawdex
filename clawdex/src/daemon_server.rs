@@ -8,10 +8,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tiny_http::{Method, Response, Server, StatusCode};
 
-use crate::approvals::{ApprovalBroker, ApprovalDecision};
+use crate::approvals::{
+    ApprovalBroker, ApprovalDecision, ResolveApprovalResult, UserInputResolution,
+};
 use crate::config::{
     merge_config_value, read_config_value, write_config_value, ClawdConfig, ClawdPaths,
 };
@@ -737,37 +739,104 @@ fn handle_request(
                 "cancel" => ApprovalDecision::Cancel,
                 _ => ApprovalDecision::Decline,
             };
-            let ok = broker.resolve_approval(id, decision);
-            Ok(json_response(json!({ "ok": ok }))?)
+            let mut evidence = Map::new();
+            if let Some(reason) = payload.get("reason").and_then(|v| v.as_str()) {
+                let trimmed = reason.trim();
+                if !trimmed.is_empty() {
+                    evidence.insert("reason".to_string(), Value::String(trimmed.to_string()));
+                }
+            }
+            if let Some(confirmation) = payload
+                .get("confirmation")
+                .or_else(|| payload.get("confirmationText"))
+                .and_then(|v| v.as_str())
+            {
+                let trimmed = confirmation.trim();
+                if !trimmed.is_empty() {
+                    evidence.insert(
+                        "confirmation".to_string(),
+                        Value::String(trimmed.to_string()),
+                    );
+                }
+            }
+            if let Some(source) = payload.get("source").and_then(|v| v.as_str()) {
+                let trimmed = source.trim();
+                if !trimmed.is_empty() {
+                    evidence.insert("source".to_string(), Value::String(trimmed.to_string()));
+                }
+            }
+            if let Some(extra) = payload.get("evidence").and_then(|v| v.as_object()) {
+                for (key, value) in extra {
+                    evidence.insert(key.clone(), value.clone());
+                }
+            }
+            if !evidence.is_empty() {
+                evidence.insert("decidedAtMs".to_string(), Value::from(now_ms()));
+            }
+            let result = broker.resolve_approval(
+                id,
+                decision,
+                if evidence.is_empty() {
+                    None
+                } else {
+                    Some(Value::Object(evidence))
+                },
+            );
+            let body = match result {
+                ResolveApprovalResult::Resolved => json!({ "ok": true }),
+                ResolveApprovalResult::NotFound => json!({
+                    "ok": false,
+                    "reason": "not_found",
+                }),
+                ResolveApprovalResult::Rejected { reason } => json!({
+                    "ok": false,
+                    "reason": "rejected",
+                    "message": reason,
+                }),
+            };
+            Ok(json_response(body)?)
         }
         _ if method == Method::Post && url.starts_with("/v1/user-input/") => {
             let id = url.trim_start_matches("/v1/user-input/");
             let body = read_body(request)?;
             let payload: Value = serde_json::from_str(&body).context("parse user input")?;
-            let answers_value = payload
-                .get("answers")
-                .and_then(|v| v.as_object())
-                .cloned()
-                .unwrap_or_default();
-            let mut answers = std::collections::HashMap::new();
-            for (key, value) in answers_value {
-                let list = value
-                    .get("answers")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                let mut strings = Vec::new();
-                for entry in list {
-                    if let Some(text) = entry.as_str() {
-                        strings.push(text.to_string());
+            let action = payload
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("submit")
+                .trim()
+                .to_ascii_lowercase();
+            let resolution = match action.as_str() {
+                "skip" => UserInputResolution::Skip,
+                "cancel" => UserInputResolution::Cancel,
+                _ => {
+                    let answers_value = payload
+                        .get("answers")
+                        .and_then(|v| v.as_object())
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut answers = std::collections::HashMap::new();
+                    for (key, value) in answers_value {
+                        let list = value
+                            .get("answers")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut strings = Vec::new();
+                        for entry in list {
+                            if let Some(text) = entry.as_str() {
+                                strings.push(text.to_string());
+                            }
+                        }
+                        answers.insert(
+                            key,
+                            codex_app_server_protocol::ToolRequestUserInputAnswer { answers: strings },
+                        );
                     }
+                    UserInputResolution::Submit(answers)
                 }
-                answers.insert(
-                    key,
-                    codex_app_server_protocol::ToolRequestUserInputAnswer { answers: strings },
-                );
-            }
-            let ok = broker.resolve_user_input(id, answers);
+            };
+            let ok = broker.resolve_user_input(id, resolution);
             Ok(json_response(json!({ "ok": ok }))?)
         }
         _ => Ok(Response::from_data(Vec::new()).with_status_code(StatusCode(404))),

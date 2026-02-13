@@ -8,7 +8,7 @@ use codex_app_server_protocol::{
     ToolRequestUserInputParams,
 };
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::task_db::TaskStore;
@@ -24,6 +24,11 @@ pub struct PendingApproval {
     pub kind: String,
     pub request: Value,
     pub created_at_ms: i64,
+    pub high_risk: bool,
+    #[serde(default)]
+    pub risk_reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation_phrase: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -41,10 +46,30 @@ pub enum ApprovalDecision {
     Cancel,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub enum ResolveApprovalResult {
+    Resolved,
+    NotFound,
+    Rejected { reason: String },
+}
+
+#[derive(Debug, Clone)]
+pub enum UserInputResolution {
+    Submit(HashMap<String, ToolRequestUserInputAnswer>),
+    Skip,
+    Cancel,
+}
+
+#[derive(Debug, Clone)]
+struct ApprovalResolution {
+    decision: ApprovalDecision,
+    evidence: Option<Value>,
+}
+
 pub struct ApprovalBroker {
     paths: ClawdPaths,
-    approvals: Mutex<HashMap<String, (PendingApproval, mpsc::Sender<ApprovalDecision>)>>,
-    inputs: Mutex<HashMap<String, (PendingUserInput, mpsc::Sender<HashMap<String, ToolRequestUserInputAnswer>>)>>,
+    approvals: Mutex<HashMap<String, (PendingApproval, mpsc::Sender<ApprovalResolution>)>>,
+    inputs: Mutex<HashMap<String, (PendingUserInput, mpsc::Sender<UserInputResolution>)>>,
 }
 
 impl ApprovalBroker {
@@ -70,30 +95,54 @@ impl ApprovalBroker {
             .unwrap_or_default()
     }
 
-    pub fn resolve_approval(&self, id: &str, decision: ApprovalDecision) -> bool {
-        let sender = match self.approvals.lock() {
-            Ok(mut map) => map.remove(id).map(|(_, sender)| sender),
-            Err(_) => None,
+    pub fn resolve_approval(
+        &self,
+        id: &str,
+        decision: ApprovalDecision,
+        evidence: Option<Value>,
+    ) -> ResolveApprovalResult {
+        let (pending, sender) = match self.approvals.lock() {
+            Ok(mut map) => {
+                let Some((pending, sender)) = map.get(id).cloned() else {
+                    return ResolveApprovalResult::NotFound;
+                };
+                if let ApprovalDecision::Accept = decision {
+                    if pending.high_risk {
+                        let provided = confirmation_text(evidence.as_ref());
+                        let required = pending.confirmation_phrase.as_deref().unwrap_or_default();
+                        if provided.as_deref() != Some(required) {
+                            return ResolveApprovalResult::Rejected {
+                                reason: format!(
+                                    "high-risk approval requires explicit confirmation phrase: {required}"
+                                ),
+                            };
+                        }
+                    }
+                }
+                map.remove(id);
+                (pending, sender)
+            }
+            Err(_) => return ResolveApprovalResult::NotFound,
         };
-        if let Some(sender) = sender {
-            let _ = sender.send(decision);
-            true
-        } else {
-            false
-        }
+
+        let _ = sender.send(ApprovalResolution {
+            decision,
+            evidence: normalize_evidence(evidence, &pending),
+        });
+        ResolveApprovalResult::Resolved
     }
 
     pub fn resolve_user_input(
         &self,
         id: &str,
-        answers: HashMap<String, ToolRequestUserInputAnswer>,
+        resolution: UserInputResolution,
     ) -> bool {
         let sender = match self.inputs.lock() {
             Ok(mut map) => map.remove(id).map(|(_, sender)| sender),
             Err(_) => None,
         };
         if let Some(sender) = sender {
-            let _ = sender.send(answers);
+            let _ = sender.send(resolution);
             true
         } else {
             false
@@ -139,49 +188,120 @@ impl ApprovalBroker {
         let pending = PendingUserInput {
             id: id.clone(),
             run_id: run_id.to_string(),
-            params: request,
+            params: request.clone(),
             created_at_ms: now_ms(),
         };
         if let Ok(mut map) = self.inputs.lock() {
             map.insert(id.clone(), (pending, tx));
         }
 
-        let result = rx
+        let resolution = rx
             .recv_timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS))
-            .unwrap_or_default();
+            .unwrap_or(UserInputResolution::Cancel);
+        if let Ok(mut map) = self.inputs.lock() {
+            map.remove(&id);
+        }
 
-        result
+        let (decision, event_payload, answers, evidence) = match &resolution {
+            UserInputResolution::Submit(answers) => (
+                "submit",
+                json!({
+                    "threadId": params.thread_id,
+                    "turnId": params.turn_id,
+                    "itemId": params.item_id,
+                    "action": "submit",
+                    "answers": answers,
+                }),
+                answers.clone(),
+                json!({
+                    "action": "submit",
+                    "answers": answers,
+                }),
+            ),
+            UserInputResolution::Skip => (
+                "skip",
+                json!({
+                    "threadId": params.thread_id,
+                    "turnId": params.turn_id,
+                    "itemId": params.item_id,
+                    "action": "skip",
+                    "answers": {},
+                }),
+                HashMap::new(),
+                json!({ "action": "skip" }),
+            ),
+            UserInputResolution::Cancel => (
+                "cancel",
+                json!({
+                    "threadId": params.thread_id,
+                    "turnId": params.turn_id,
+                    "itemId": params.item_id,
+                    "action": "cancel",
+                    "answers": {},
+                }),
+                HashMap::new(),
+                json!({ "action": "cancel" }),
+            ),
+        };
+        if let Ok(store) = TaskStore::open(&self.paths) {
+            let _ = store.record_event(run_id, "tool_user_input", &event_payload);
+            let _ = store.record_approval(
+                run_id,
+                "tool_user_input",
+                &request,
+                Some(decision),
+                Some(&evidence),
+            );
+        }
+
+        answers
     }
 
     fn request_approval(&self, run_id: &str, kind: &str, request: Value) -> ApprovalDecision {
         let request_for_record = request.clone();
         let (tx, rx) = mpsc::channel();
         let id = Uuid::new_v4().to_string();
+        let (high_risk, risk_reasons, confirmation_phrase) = approval_risk(kind, &request);
         let pending = PendingApproval {
             id: id.clone(),
             run_id: run_id.to_string(),
             kind: kind.to_string(),
             request,
             created_at_ms: now_ms(),
+            high_risk,
+            risk_reasons,
+            confirmation_phrase,
         };
         if let Ok(mut map) = self.approvals.lock() {
             map.insert(id.clone(), (pending, tx));
         }
 
-        let decision = rx
+        let resolution = rx
             .recv_timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS))
-            .unwrap_or(ApprovalDecision::Decline);
+            .unwrap_or(ApprovalResolution {
+                decision: ApprovalDecision::Decline,
+                evidence: Some(json!({ "reason": "timeout" })),
+            });
+        if let Ok(mut map) = self.approvals.lock() {
+            map.remove(&id);
+        }
 
-        let decision_str = match decision {
+        let decision_str = match resolution.decision {
             ApprovalDecision::Accept => "accept",
             ApprovalDecision::Cancel => "cancel",
             ApprovalDecision::Decline => "decline",
         };
         if let Ok(store) = TaskStore::open(&self.paths) {
-            let _ = store.record_approval(run_id, kind, &request_for_record, Some(decision_str));
+            let _ = store.record_approval(
+                run_id,
+                kind,
+                &request_for_record,
+                Some(decision_str),
+                resolution.evidence.as_ref(),
+            );
         }
 
-        decision
+        resolution.decision
     }
 }
 
@@ -231,5 +351,107 @@ impl crate::app_server::UserInputHandler for BrokerUserInputHandler {
         params: &ToolRequestUserInputParams,
     ) -> HashMap<String, ToolRequestUserInputAnswer> {
         self.broker.request_user_input(&self.run_id, params)
+    }
+}
+
+fn approval_risk(kind: &str, request: &Value) -> (bool, Vec<String>, Option<String>) {
+    if kind != "file_change" {
+        return (false, Vec::new(), None);
+    }
+    let mut risks = Vec::new();
+    if reason_suggests_delete_or_rename(request) {
+        risks.push("reason mentions delete/rename".to_string());
+    }
+    if payload_contains_delete_or_rename(request) {
+        risks.push("payload indicates delete/rename".to_string());
+    }
+    if patch_contains_delete_or_rename(request) {
+        risks.push("diff indicates delete/rename".to_string());
+    }
+    if risks.is_empty() {
+        return (false, risks, None);
+    }
+    (true, risks, Some("ALLOW_DELETE_OR_RENAME".to_string()))
+}
+
+fn reason_suggests_delete_or_rename(request: &Value) -> bool {
+    let Some(reason) = request.get("reason").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let lower = reason.to_lowercase();
+    lower.contains("delete")
+        || lower.contains("remove")
+        || lower.contains("rename")
+        || lower.contains("move")
+}
+
+fn payload_contains_delete_or_rename(request: &Value) -> bool {
+    let Some(obj) = request.as_object() else {
+        return false;
+    };
+    for key in ["fileChanges", "file_changes", "changes"] {
+        let Some(value) = obj.get(key) else {
+            continue;
+        };
+        if match_delete_or_rename_value(value) {
+            return true;
+        }
+    }
+    false
+}
+
+fn match_delete_or_rename_value(value: &Value) -> bool {
+    match value {
+        Value::String(raw) => {
+            let lower = raw.to_lowercase();
+            lower.contains("delete")
+                || lower.contains("removed")
+                || lower.contains("rename")
+                || lower.contains("moved")
+        }
+        Value::Array(items) => items.iter().any(match_delete_or_rename_value),
+        Value::Object(map) => map.values().any(match_delete_or_rename_value),
+        _ => false,
+    }
+}
+
+fn patch_contains_delete_or_rename(request: &Value) -> bool {
+    let raw = request
+        .get("diff")
+        .or_else(|| request.get("patch"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    raw.contains("deleted file mode")
+        || raw.contains("rename from ")
+        || raw.contains("rename to ")
+        || raw.contains("\n--- /dev/null")
+}
+
+fn confirmation_text(evidence: Option<&Value>) -> Option<String> {
+    let evidence = evidence?.as_object()?;
+    evidence
+        .get("confirmation")
+        .or_else(|| evidence.get("confirmationText"))
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().to_string())
+}
+
+fn normalize_evidence(evidence: Option<Value>, pending: &PendingApproval) -> Option<Value> {
+    let mut map = Map::new();
+    if let Some(Value::Object(src)) = evidence {
+        map.extend(src);
+    }
+    map.insert("highRisk".to_string(), Value::Bool(pending.high_risk));
+    if !pending.risk_reasons.is_empty() {
+        map.insert("riskReasons".to_string(), json!(pending.risk_reasons));
+    }
+    if let Some(phrase) = pending.confirmation_phrase.as_ref() {
+        map.insert("requiredConfirmation".to_string(), Value::String(phrase.clone()));
+    }
+    if map.is_empty() {
+        None
+    } else {
+        Some(Value::Object(map))
     }
 }

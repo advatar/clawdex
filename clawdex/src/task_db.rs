@@ -63,6 +63,7 @@ pub struct ApprovalRecord {
     pub request: Value,
     pub decision: Option<String>,
     pub decided_at_ms: Option<i64>,
+    pub decision_evidence: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +161,7 @@ impl TaskStore {
                 request_json TEXT NOT NULL,
                 decision TEXT,
                 decided_at_ms INTEGER,
+                evidence_json TEXT,
                 FOREIGN KEY(task_run_id) REFERENCES task_runs(id)
             );
 
@@ -192,6 +194,23 @@ impl TaskStore {
             CREATE INDEX IF NOT EXISTS idx_plugins_enabled ON plugins(enabled, updated_at_ms);
             CREATE INDEX IF NOT EXISTS idx_run_controls_cancel ON run_controls(cancel_requested, cancel_requested_at_ms);
             "#,
+        )?;
+        self.ensure_approval_evidence_column()?;
+        Ok(())
+    }
+
+    fn ensure_approval_evidence_column(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(approvals)")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == "evidence_json" {
+                return Ok(());
+            }
+        }
+        self.conn.execute(
+            "ALTER TABLE approvals ADD COLUMN evidence_json TEXT",
+            [],
         )?;
         Ok(())
     }
@@ -487,13 +506,27 @@ impl TaskStore {
         kind: &str,
         request: &Value,
         decision: Option<&str>,
+        decision_evidence: Option<&Value>,
     ) -> Result<()> {
         let now = now_ms();
         let id = Uuid::new_v4().to_string();
         let request_json = serde_json::to_string(request).context("serialize approval request")?;
+        let evidence_json = decision_evidence
+            .map(serde_json::to_string)
+            .transpose()
+            .context("serialize approval evidence")?;
         self.conn.execute(
-            "INSERT INTO approvals(id, task_run_id, ts_ms, kind, request_json, decision, decided_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, run_id, now, kind, request_json, decision, decision.map(|_| now)],
+            "INSERT INTO approvals(id, task_run_id, ts_ms, kind, request_json, decision, decided_at_ms, evidence_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                run_id,
+                now,
+                kind,
+                request_json,
+                decision,
+                decision.map(|_| now),
+                evidence_json
+            ],
         )?;
         audit::append_approval(&self.audit_dir, run_id, kind, request, decision)?;
         Ok(())
@@ -545,11 +578,14 @@ impl TaskStore {
 
     pub fn list_approvals(&self, run_id: &str) -> Result<Vec<ApprovalRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, task_run_id, ts_ms, kind, request_json, decision, decided_at_ms FROM approvals WHERE task_run_id = ? ORDER BY ts_ms ASC",
+            "SELECT id, task_run_id, ts_ms, kind, request_json, decision, decided_at_ms, evidence_json FROM approvals WHERE task_run_id = ? ORDER BY ts_ms ASC",
         )?;
         let rows = stmt.query_map(params![run_id], |row| {
             let request_json: String = row.get(4)?;
             let request: Value = serde_json::from_str(&request_json).unwrap_or(Value::Null);
+            let evidence_json: Option<String> = row.get(7)?;
+            let decision_evidence = evidence_json
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
             Ok(ApprovalRecord {
                 id: row.get(0)?,
                 task_run_id: row.get(1)?,
@@ -558,6 +594,7 @@ impl TaskStore {
                 request,
                 decision: row.get(5)?,
                 decided_at_ms: row.get(6)?,
+                decision_evidence,
             })
         })?;
         let mut approvals = Vec::new();

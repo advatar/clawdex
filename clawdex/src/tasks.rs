@@ -717,7 +717,7 @@ impl TaskApprovalHandler {
         let _ = self
             .store
             .borrow()
-            .record_approval(&self.run_id, kind, request, Some(decision));
+            .record_approval(&self.run_id, kind, request, Some(decision), None);
     }
 }
 
@@ -796,17 +796,33 @@ impl TaskUserInputHandler {
         Self { store, run_id }
     }
 
-    fn record_input(&self, params: &ToolRequestUserInputParams, answers: &HashMap<String, ToolRequestUserInputAnswer>) {
+    fn record_input(
+        &self,
+        params: &ToolRequestUserInputParams,
+        answers: &HashMap<String, ToolRequestUserInputAnswer>,
+        action: &str,
+    ) {
         let payload = json!({
             "threadId": params.thread_id,
             "turnId": params.turn_id,
             "itemId": params.item_id,
+            "action": action,
             "answers": answers,
         });
-        let _ = self
-            .store
-            .borrow()
-            .record_event(&self.run_id, "tool_user_input", &payload);
+        let request = serde_json::to_value(params).unwrap_or(Value::Null);
+        let evidence = json!({
+            "action": action,
+            "answers": answers,
+        });
+        let store = self.store.borrow();
+        let _ = store.record_event(&self.run_id, "tool_user_input", &payload);
+        let _ = store.record_approval(
+            &self.run_id,
+            "tool_user_input",
+            &request,
+            Some(action),
+            Some(&evidence),
+        );
     }
 }
 
@@ -816,6 +832,7 @@ impl UserInputHandler for TaskUserInputHandler {
         params: &ToolRequestUserInputParams,
     ) -> HashMap<String, ToolRequestUserInputAnswer> {
         println!("\n[input] Codex requested user input");
+        println!("Type /skip to skip, or /cancel to cancel this prompt.");
         let mut answers = HashMap::new();
         for question in &params.questions {
             println!("\n{}", question.header);
@@ -828,6 +845,14 @@ impl UserInputHandler for TaskUserInputHandler {
                     println!("  {}) Other", options.len() + 1);
                 }
                 let selection = prompt_text("Select option: ");
+                if selection.eq_ignore_ascii_case("/skip") {
+                    self.record_input(params, &answers, "skip");
+                    return HashMap::new();
+                }
+                if selection.eq_ignore_ascii_case("/cancel") {
+                    self.record_input(params, &answers, "cancel");
+                    return HashMap::new();
+                }
                 let answer = selection.trim().to_string();
                 answers.insert(
                     question.id.clone(),
@@ -835,6 +860,14 @@ impl UserInputHandler for TaskUserInputHandler {
                 );
             } else {
                 let response = prompt_text("Answer: ");
+                if response.eq_ignore_ascii_case("/skip") {
+                    self.record_input(params, &answers, "skip");
+                    return HashMap::new();
+                }
+                if response.eq_ignore_ascii_case("/cancel") {
+                    self.record_input(params, &answers, "cancel");
+                    return HashMap::new();
+                }
                 answers.insert(
                     question.id.clone(),
                     ToolRequestUserInputAnswer {
@@ -843,7 +876,7 @@ impl UserInputHandler for TaskUserInputHandler {
                 );
             }
         }
-        self.record_input(params, &answers);
+        self.record_input(params, &answers, "submit");
         answers
     }
 }
