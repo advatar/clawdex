@@ -43,7 +43,7 @@ services:
       - workspace_dir
   - name: macclawdex-app
     owner: macClawdex
-    description: SwiftUI macOS app shell. Publishes MBP2P peer-assist events to a user-configured Antenna relay (manual `/peers` plus optional auto triggers for second-opinion/stuck/discussion cadence).
+    description: SwiftUI macOS app shell. Publishes MBP2P peer-assist events with multi-relay bootstrap, decentralized discovery, and fallback publish attempts (manual `/peers` plus optional auto triggers for second-opinion/stuck/discussion cadence).
     command: Clawdex.app (Xcode scheme: Clawdex)
     ports: []
     health: none
@@ -51,4 +51,17 @@ services:
       - clawdex-daemon
       - clawdex-gateway
       - /Volumes/XCodeX/Antenna/swift/AntennaProtocol
-      - user_configured_antenna_relay_http_endpoint
+      - antenna-relay
+      - user_configured_primary_antenna_relay_http_endpoint
+      - optional_user_configured_antenna_bootstrap_relays
+  - name: antenna-relay
+    owner: antenna
+    description: Deployable Rust relay/discovery node for MBP2P envelopes with gossip discovery and rendezvous replication.
+    command: cargo run --manifest-path /Volumes/XCodeX/Antenna/rust/antenna-relay/Cargo.toml -- --bind 127.0.0.1:7878 --public-url http://127.0.0.1:7878
+    ports:
+      - name: http
+        port: 7878
+        protocol: http
+    health: /v1/health
+    dependencies:
+      - outbound_http_to_bootstrap_relays

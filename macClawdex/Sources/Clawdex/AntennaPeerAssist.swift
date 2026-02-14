@@ -40,6 +40,7 @@ enum AntennaPeerAssist {
     static func publishHelpRequest(
         question: String,
         relayURL: URL,
+        bootstrapRelays: [URL],
         categoryENS: String,
         anonKey: String,
         sourceLabel: String,
@@ -69,7 +70,7 @@ enum AntennaPeerAssist {
         )
 
         var event = MBEvent(
-            kind: "help_request",
+            kind: "helpRequest",
             category: trimmedCategory,
             thread: nil,
             parents: [],
@@ -93,26 +94,18 @@ enum AntennaPeerAssist {
 
         let topic = MBTopics.helpTopic(trimmedCategory)
         let envelope = MBEnvelope(topic: topic, event: event)
-        let body = try MBJSON.encode(envelope)
-
-        var request = URLRequest(url: relayURL)
-        request.httpMethod = "POST"
-        request.httpBody = body
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        let (responseData, response) = try await URLSession.shared.data(for: request)
-        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-        if !(200...299).contains(statusCode) {
-            let text = String(data: responseData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            throw AntennaPeerAssistError.relayRejected(status: statusCode, body: text)
-        }
+        let publishOutcome = try await MBRelayClient.publishEnvelope(
+            envelope,
+            primaryRelay: relayURL,
+            bootstrapRelays: bootstrapRelays,
+            discover: true
+        )
 
         return PeerHelpPublishResult(
             eventID: eventID,
             topic: topic,
             repliesTopic: repliesTopic,
-            relayURL: relayURL
+            relayURL: publishOutcome.relayURL
         )
     }
 
@@ -145,6 +138,7 @@ enum AntennaPeerAssist {
     static func publishHelpRequest(
         question _: String,
         relayURL _: URL,
+        bootstrapRelays _: [URL],
         categoryENS _: String,
         anonKey _: String,
         sourceLabel _: String,

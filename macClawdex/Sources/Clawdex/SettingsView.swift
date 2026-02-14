@@ -104,8 +104,13 @@ struct SettingsView: View {
                         persistPeerSettings()
                     }
 
-                TextField("Relay URL (POST endpoint)", text: $appState.peerRelayURL)
+                TextField("Primary relay URL", text: $appState.peerRelayURL)
                     .onChange(of: appState.peerRelayURL) { _, _ in
+                        persistPeerSettings()
+                    }
+
+                TextField("Bootstrap relays (comma-separated)", text: $appState.peerBootstrapRelays)
+                    .onChange(of: appState.peerBootstrapRelays) { _, _ in
                         persistPeerSettings()
                     }
 
@@ -136,7 +141,7 @@ struct SettingsView: View {
                     persistPeerSettings()
                 }
 
-                Text("Use `/peers <question>` for manual posts. Auto modes can also publish peer requests when you ask for a second opinion, when Clawdex appears stuck, or at the discussion cadence.")
+                Text("Use `/peers <question>` for manual posts. Configure a primary relay plus optional bootstrap relays for decentralized discovery/fallback. Auto modes can also publish peer requests when you ask for a second opinion, when Clawdex appears stuck, or at the discussion cadence.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -283,6 +288,7 @@ struct SettingsView: View {
         let defaults = UserDefaults.standard
         defaults.set(appState.peerAssistEnabled, forKey: DefaultsKeys.peerAssistEnabled)
         defaults.set(appState.peerRelayURL.trimmingCharacters(in: .whitespacesAndNewlines), forKey: DefaultsKeys.peerRelayURL)
+        defaults.set(appState.peerBootstrapRelays.trimmingCharacters(in: .whitespacesAndNewlines), forKey: DefaultsKeys.peerBootstrapRelays)
         defaults.set(appState.peerCategoryENS.trimmingCharacters(in: .whitespacesAndNewlines), forKey: DefaultsKeys.peerCategoryENS)
         defaults.set(appState.peerAnonKey.trimmingCharacters(in: .whitespacesAndNewlines), forKey: DefaultsKeys.peerAnonKey)
         defaults.set(appState.peerAutoHelpEnabled, forKey: DefaultsKeys.peerAutoHelpEnabled)

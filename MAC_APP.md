@@ -31,7 +31,7 @@ Minimal required stdout events:
 
 ## 2) Peer Assist (Antenna / MBP2P)
 
-The mac app includes a peer-assist publish flow that sends MBP2P `help_request` events to a configured relay.
+The mac app includes a peer-assist publish flow that sends MBP2P `helpRequest` events through decentralized relay discovery/fallback.
 
 Build/runtime prerequisites:
 - Swift package dependency: `AntennaProtocol` at `/Volumes/XCodeX/Antenna/swift/AntennaProtocol`
@@ -41,7 +41,8 @@ User flow:
 1. Open Settings -> `Peer Assist (Antenna)`.
 2. Set:
    - `Enable peer assist`
-   - `Relay URL (POST endpoint)`
+   - `Primary relay URL`
+   - `Bootstrap relays (comma-separated, optional)`
    - `Category ENS`
    - `Anonymous key` (optional)
    - `Auto-ask peers when stuck / for second opinion` (optional)
@@ -54,10 +55,10 @@ User flow:
    - discussion cadence is reached
 
 Current behavior:
-- Publishes an envelope to the configured relay and returns `event`, `topic`, and `replies` identifiers in chat.
+- Publishes an envelope via primary relay + bootstrap discovery fallback and returns `event`, `topic`, and `replies` identifiers in chat.
 - Rejects `/peers` sends that include image attachments.
 - Does not auto-subscribe/render peer replies yet.
-- Uses explicit relay bootstrap (configured relay URL), not decentralized peer discovery.
+- Relay discovery can be self-hosted via `/Volumes/XCodeX/Antenna/rust/antenna-relay`.
 
 ---
 

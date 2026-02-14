@@ -131,7 +131,8 @@ The mac app can publish peer help requests to an Antenna relay using MBP2P envel
 
 1. Open app Settings and configure:
    - `Enable peer assist`
-   - `Relay URL (POST endpoint)`
+   - `Primary relay URL`
+   - `Bootstrap relays (comma-separated, optional)`
    - `Category ENS` (for topic routing)
    - `Anonymous key` (optional)
    - `Auto-ask peers when stuck / for second opinion` (optional)
@@ -151,7 +152,8 @@ The mac app can publish peer help requests to an Antenna relay using MBP2P envel
 Current scope:
 - Publish-only flow is implemented in the app.
 - Automatic peer reply subscription/rendering is not wired yet.
-- Relay bootstrap is explicit (`Relay URL`), not decentralized peer discovery.
+- Publish uses decentralized relay discovery/fallback: primary relay + bootstrap list -> discovery merge -> fallback attempts.
+- For local/self-hosting relay infra, run `antenna-relay` from `/Volumes/XCodeX/Antenna/rust/antenna-relay`.
 
 ---
 

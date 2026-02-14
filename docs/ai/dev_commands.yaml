@@ -12,6 +12,15 @@ commands:
   - name: antenna-protocol-test
     description: Run AntennaProtocol package tests used by macOS peer-assist publishing
     cmd: swift test --package-path /Volumes/XCodeX/Antenna/swift/AntennaProtocol
+  - name: antenna-relay-build
+    description: Build the deployable Rust Antenna relay/discovery server
+    cmd: cargo build --manifest-path /Volumes/XCodeX/Antenna/rust/antenna-relay/Cargo.toml
+  - name: antenna-relay-test
+    description: Run unit tests for the Rust Antenna relay/discovery server
+    cmd: cargo test --manifest-path /Volumes/XCodeX/Antenna/rust/antenna-relay/Cargo.toml
+  - name: antenna-relay-run
+    description: Run a local Antenna relay node with explicit public URL and optional bootstrap peers
+    cmd: cargo run --manifest-path /Volumes/XCodeX/Antenna/rust/antenna-relay/Cargo.toml -- --bind 127.0.0.1:7878 --public-url http://127.0.0.1:7878 --bootstrap http://127.0.0.1:7878
   - name: daemon-health
     description: Check local clawdexd daemon health endpoint
     cmd: curl -sS http://127.0.0.1:18791/v1/health

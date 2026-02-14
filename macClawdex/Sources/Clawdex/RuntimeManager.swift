@@ -73,6 +73,7 @@ final class RuntimeManager: ObservableObject {
         appState.parallelPrepassEnabled = UserDefaults.standard.bool(forKey: DefaultsKeys.parallelPrepassEnabled)
         appState.peerAssistEnabled = UserDefaults.standard.bool(forKey: DefaultsKeys.peerAssistEnabled)
         appState.peerRelayURL = UserDefaults.standard.string(forKey: DefaultsKeys.peerRelayURL) ?? ""
+        appState.peerBootstrapRelays = UserDefaults.standard.string(forKey: DefaultsKeys.peerBootstrapRelays) ?? ""
         appState.peerCategoryENS = UserDefaults.standard.string(forKey: DefaultsKeys.peerCategoryENS) ?? "clawdex.peers"
         appState.peerAnonKey = UserDefaults.standard.string(forKey: DefaultsKeys.peerAnonKey) ?? ""
         appState.peerAutoHelpEnabled = UserDefaults.standard.bool(forKey: DefaultsKeys.peerAutoHelpEnabled)
@@ -281,6 +282,8 @@ final class RuntimeManager: ObservableObject {
                 userInfo: [NSLocalizedDescriptionKey: "Peer relay URL is missing or invalid."]
             )
         }
+        let bootstrapRelays = splitList(appState.peerBootstrapRelays)
+            .compactMap { URL(string: $0) }
 
         let category = appState.peerCategoryENS.trimmingCharacters(in: .whitespacesAndNewlines)
         let anonKey = appState.peerAnonKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -292,6 +295,7 @@ final class RuntimeManager: ObservableObject {
         let result = try await AntennaPeerAssist.publishHelpRequest(
             question: question,
             relayURL: relayURL,
+            bootstrapRelays: bootstrapRelays,
             categoryENS: category,
             anonKey: anonKey,
             sourceLabel: sourceLabel,

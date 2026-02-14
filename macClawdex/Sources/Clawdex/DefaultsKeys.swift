@@ -10,6 +10,7 @@ enum DefaultsKeys {
 
     static let peerAssistEnabled = "clawdex.peerAssistEnabled"
     static let peerRelayURL = "clawdex.peerRelayURL"
+    static let peerBootstrapRelays = "clawdex.peerBootstrapRelays"
     static let peerCategoryENS = "clawdex.peerCategoryENS"
     static let peerAnonKey = "clawdex.peerAnonKey"
     static let peerAutoHelpEnabled = "clawdex.peerAutoHelpEnabled"

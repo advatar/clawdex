@@ -14,6 +14,7 @@ final class AppState: ObservableObject {
     // Peer assist (Antenna)
     @Published var peerAssistEnabled: Bool = false
     @Published var peerRelayURL: String = ""
+    @Published var peerBootstrapRelays: String = ""
     @Published var peerCategoryENS: String = "clawdex.peers"
     @Published var peerAnonKey: String = ""
     @Published var peerAutoHelpEnabled: Bool = true
