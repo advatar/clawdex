@@ -1,6 +1,7 @@
 # Status
 
 Active:
+- [x] Fix current build blockers reported in local environments: make Antenna peer-assist compile without `AntennaProtocol` present and remove `ParallellVibeExample` `main.swift`/`@main` ambiguity.
 - [x] Add proactive peer-engagement behavior in `macClawdex` so peer assist can trigger automatically for stuck/second-opinion cases and optional discussion-mode posts (not only `/peers`).
 - [x] Integrate `Packages/DeepThink` into `macClawdex` and add an optional parallel-agent prepass path in the app runtime.
 - [x] Integrate AntennaProtocol in macClawdex and ship a peer-assist flow for reaching external agent peers (relay-published MBP2P help requests).

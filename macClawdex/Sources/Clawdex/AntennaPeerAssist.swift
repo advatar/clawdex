@@ -1,5 +1,4 @@
 import Foundation
-import AntennaProtocol
 
 struct PeerHelpPublishResult: Sendable {
     let eventID: String
@@ -13,6 +12,7 @@ enum AntennaPeerAssistError: LocalizedError {
     case invalidCategory
     case emptyQuestion
     case relayRejected(status: Int, body: String)
+    case antennaUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -27,9 +27,14 @@ enum AntennaPeerAssistError: LocalizedError {
                 return "Peer relay rejected request (HTTP \(status))."
             }
             return "Peer relay rejected request (HTTP \(status)): \(body)"
+        case .antennaUnavailable:
+            return "AntennaProtocol is unavailable in this build."
         }
     }
 }
+
+#if canImport(AntennaProtocol)
+import AntennaProtocol
 
 enum AntennaPeerAssist {
     static func publishHelpRequest(
@@ -135,3 +140,17 @@ enum AntennaPeerAssist {
         return formatter.string(from: Date())
     }
 }
+#else
+enum AntennaPeerAssist {
+    static func publishHelpRequest(
+        question _: String,
+        relayURL _: URL,
+        categoryENS _: String,
+        anonKey _: String,
+        sourceLabel _: String,
+        capabilities _: [String]
+    ) async throws -> PeerHelpPublishResult {
+        throw AntennaPeerAssistError.antennaUnavailable
+    }
+}
+#endif
