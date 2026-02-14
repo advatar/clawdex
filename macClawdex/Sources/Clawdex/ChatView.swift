@@ -9,8 +9,9 @@ struct ChatView: View {
     @State private var input: String = ""
     @State private var showCommandPalette: Bool = false
     @State private var attachments: [ChatImageAttachment] = []
+    @State private var lastUserPromptForPeerAssist: String = ""
     @State private var messages: [ChatMessage] = [
-        ChatMessage(role: .system, text: "Clawdex (Codex-powered) — macOS app shell. Configure API key + workspace in Settings. Plugin commands: /plugin <id> <command> [input]. Peer assist: /peers <question>.")
+        ChatMessage(role: .system, text: "Clawdex (Codex-powered) — macOS app shell. Configure API key + workspace in Settings. Plugin commands: /plugin <id> <command> [input]. Peer assist: /peers <question> (plus optional automatic peer engagement in Settings).")
     ]
 
     var body: some View {
@@ -24,6 +25,9 @@ struct ChatView: View {
         .frame(minWidth: 760, minHeight: 520)
         .onReceive(runtime.assistantMessagePublisher) { text in
             messages.append(ChatMessage(role: .assistant, text: text))
+            Task { @MainActor in
+                await maybeAutoAskPeersFromAssistantMessage(text)
+            }
         }
         .onReceive(runtime.errorPublisher) { err in
             messages.append(ChatMessage(role: .system, text: "Error: \(err)"))
@@ -154,11 +158,18 @@ struct ChatView: View {
             displayText = "\(text) [\(localImages.count) image(s)]"
         }
         messages.append(ChatMessage(role: .user, text: displayText))
+        if !text.isEmpty {
+            lastUserPromptForPeerAssist = text
+        }
 
         if !runtime.isRunning {
             runtime.start()
         }
         runtime.sendUserMessage(text, localImagePaths: localImages)
+
+        Task { @MainActor in
+            await maybeAutoAskPeersFromUserMessage(text: text, localImagePaths: localImages)
+        }
     }
 
     private func parsePeerAssistCommand(from text: String) -> String? {
@@ -170,6 +181,83 @@ struct ChatView: View {
             return nil
         }
         return String(trimmed.dropFirst("/peers".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @MainActor
+    private func maybeAutoAskPeersFromUserMessage(text: String, localImagePaths: [String]) async {
+        guard localImagePaths.isEmpty else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if isSecondOpinionIntent(trimmed) {
+            let question = """
+            Second-opinion request for this user prompt: "\(shortened(trimmed, maxLength: 320))". Suggest an alternate approach, likely risks, and an execution order.
+            """
+            if let note = await runtime.publishAutoPeerHelpIfEnabled(trigger: "second-opinion", question: question) {
+                messages.append(ChatMessage(role: .system, text: note))
+            }
+            return
+        }
+
+        if let note = await runtime.publishPeerDiscussionIfEnabled(seedText: trimmed) {
+            messages.append(ChatMessage(role: .system, text: note))
+        }
+    }
+
+    @MainActor
+    private func maybeAutoAskPeersFromAssistantMessage(_ text: String) async {
+        guard isLikelyStuckAssistantMessage(text) else { return }
+        guard !lastUserPromptForPeerAssist.isEmpty else { return }
+
+        let question = """
+        Clawdex appears stuck on this request: "\(shortened(lastUserPromptForPeerAssist, maxLength: 320))". Last response was: "\(shortened(text, maxLength: 260))". Share a concrete unblock plan.
+        """
+        if let note = await runtime.publishAutoPeerHelpIfEnabled(trigger: "stuck", question: question) {
+            messages.append(ChatMessage(role: .system, text: note))
+        }
+    }
+
+    private func isSecondOpinionIntent(_ text: String) -> Bool {
+        let normalized = text.lowercased()
+        let markers = [
+            "second opinion",
+            "sanity check",
+            "another take",
+            "alternative approach",
+            "what do peers think",
+            "ask peers",
+            "peer opinion"
+        ]
+        return markers.contains { normalized.contains($0) }
+    }
+
+    private func isLikelyStuckAssistantMessage(_ text: String) -> Bool {
+        let normalized = text.lowercased()
+        let markers = [
+            "i can't",
+            "i cannot",
+            "i am unable",
+            "i'm unable",
+            "not enough information",
+            "i do not have enough context",
+            "i don't have enough context",
+            "i'm stuck",
+            "i am stuck"
+        ]
+        return markers.contains { normalized.contains($0) }
+    }
+
+    private func shortened(_ text: String, maxLength: Int) -> String {
+        let collapsed = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .split(separator: " ")
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if collapsed.count <= maxLength {
+            return collapsed
+        }
+        let end = collapsed.index(collapsed.startIndex, offsetBy: maxLength)
+        return String(collapsed[..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func label(for role: ChatMessage.Role) -> String {

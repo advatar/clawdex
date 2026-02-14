@@ -43,7 +43,7 @@ services:
       - workspace_dir
   - name: macclawdex-app
     owner: macClawdex
-    description: SwiftUI macOS app shell. Publishes optional peer-assist MBP2P help events to a user-configured Antenna relay endpoint.
+    description: SwiftUI macOS app shell. Publishes MBP2P peer-assist events to a user-configured Antenna relay (manual `/peers` plus optional auto triggers for second-opinion/stuck/discussion cadence).
     command: Clawdex.app (Xcode scheme: Clawdex)
     ports: []
     health: none

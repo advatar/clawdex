@@ -119,7 +119,24 @@ struct SettingsView: View {
                         persistPeerSettings()
                     }
 
-                Text("Use `/peers <question>` in Chat to publish an MBP2P help request to peers.")
+                Toggle("Auto-ask peers when stuck / for second opinion", isOn: $appState.peerAutoHelpEnabled)
+                    .onChange(of: appState.peerAutoHelpEnabled) { _, _ in
+                        persistPeerSettings()
+                    }
+
+                Toggle("Join peer discussions automatically", isOn: $appState.peerDiscussionEnabled)
+                    .onChange(of: appState.peerDiscussionEnabled) { _, _ in
+                        persistPeerSettings()
+                    }
+
+                Stepper(value: $appState.peerDiscussionIntervalMinutes, in: 5...720) {
+                    Text("Discussion cadence (minutes): \(appState.peerDiscussionIntervalMinutes)")
+                }
+                .onChange(of: appState.peerDiscussionIntervalMinutes) { _, _ in
+                    persistPeerSettings()
+                }
+
+                Text("Use `/peers <question>` for manual posts. Auto modes can also publish peer requests when you ask for a second opinion, when Clawdex appears stuck, or at the discussion cadence.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -268,6 +285,9 @@ struct SettingsView: View {
         defaults.set(appState.peerRelayURL.trimmingCharacters(in: .whitespacesAndNewlines), forKey: DefaultsKeys.peerRelayURL)
         defaults.set(appState.peerCategoryENS.trimmingCharacters(in: .whitespacesAndNewlines), forKey: DefaultsKeys.peerCategoryENS)
         defaults.set(appState.peerAnonKey.trimmingCharacters(in: .whitespacesAndNewlines), forKey: DefaultsKeys.peerAnonKey)
+        defaults.set(appState.peerAutoHelpEnabled, forKey: DefaultsKeys.peerAutoHelpEnabled)
+        defaults.set(appState.peerDiscussionEnabled, forKey: DefaultsKeys.peerDiscussionEnabled)
+        defaults.set(max(5, appState.peerDiscussionIntervalMinutes), forKey: DefaultsKeys.peerDiscussionIntervalMinutes)
     }
 
     private func refreshKeyStatus() {

@@ -44,12 +44,20 @@ User flow:
    - `Relay URL (POST endpoint)`
    - `Category ENS`
    - `Anonymous key` (optional)
+   - `Auto-ask peers when stuck / for second opinion` (optional)
+   - `Join peer discussions automatically` (optional)
+   - `Discussion cadence (minutes)` (optional)
 3. In chat, send `/peers <question>`.
+4. Optional auto-posts run when:
+   - the user asks for a second opinion
+   - Clawdex appears stuck
+   - discussion cadence is reached
 
 Current behavior:
 - Publishes an envelope to the configured relay and returns `event`, `topic`, and `replies` identifiers in chat.
 - Rejects `/peers` sends that include image attachments.
 - Does not auto-subscribe/render peer replies yet.
+- Uses explicit relay bootstrap (configured relay URL), not decentralized peer discovery.
 
 ---
 

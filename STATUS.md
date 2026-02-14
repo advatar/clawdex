@@ -1,6 +1,7 @@
 # Status
 
 Active:
+- [x] Add proactive peer-engagement behavior in `macClawdex` so peer assist can trigger automatically for stuck/second-opinion cases and optional discussion-mode posts (not only `/peers`).
 - [x] Integrate `Packages/DeepThink` into `macClawdex` and add an optional parallel-agent prepass path in the app runtime.
 - [x] Integrate AntennaProtocol in macClawdex and ship a peer-assist flow for reaching external agent peers (relay-published MBP2P help requests).
 - [x] Upstream sync pass: bump `openclaw`/`codex` submodules to latest `main` and backport any newly applicable OpenClaw parity fixes.

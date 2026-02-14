@@ -16,6 +16,9 @@ final class AppState: ObservableObject {
     @Published var peerRelayURL: String = ""
     @Published var peerCategoryENS: String = "clawdex.peers"
     @Published var peerAnonKey: String = ""
+    @Published var peerAutoHelpEnabled: Bool = true
+    @Published var peerDiscussionEnabled: Bool = true
+    @Published var peerDiscussionIntervalMinutes: Int = 45
 
     // Memory (config-backed)
     @Published var memoryEnabled: Bool = true

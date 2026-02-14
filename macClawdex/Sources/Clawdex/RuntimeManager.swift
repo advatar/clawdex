@@ -25,6 +25,8 @@ final class RuntimeManager: ObservableObject {
     private var gatewayStdoutPipe: Pipe?
     private var gatewayStderrPipe: Pipe?
     private var workspaceURL: URL?
+    private var lastAutoPeerHelpAt: Date?
+    private var lastAutoPeerDiscussionAt: Date?
 
     private var cancellables = Set<AnyCancellable>()
     private let toolsInstallLock = NSLock()
@@ -36,6 +38,7 @@ final class RuntimeManager: ObservableObject {
     private let toolsVersion = "0.3.0"
     private let openclawPluginsVersion = "2"
     private let openclawPluginsSourceLabel = "bundled-openclaw"
+    private let autoPeerHelpCooldownSeconds: TimeInterval = 8 * 60
     private let blockedBundledOpenClawPlugins: [String: String] = [
         "matrix": "Blocked due to GHSA-p8p7-x288-28g6 (`request` SSRF) in transitive dependency chain."
     ]
@@ -56,6 +59,15 @@ final class RuntimeManager: ObservableObject {
         if UserDefaults.standard.object(forKey: DefaultsKeys.peerCategoryENS) == nil {
             UserDefaults.standard.set("clawdex.peers", forKey: DefaultsKeys.peerCategoryENS)
         }
+        if UserDefaults.standard.object(forKey: DefaultsKeys.peerAutoHelpEnabled) == nil {
+            UserDefaults.standard.set(true, forKey: DefaultsKeys.peerAutoHelpEnabled)
+        }
+        if UserDefaults.standard.object(forKey: DefaultsKeys.peerDiscussionEnabled) == nil {
+            UserDefaults.standard.set(true, forKey: DefaultsKeys.peerDiscussionEnabled)
+        }
+        if UserDefaults.standard.object(forKey: DefaultsKeys.peerDiscussionIntervalMinutes) == nil {
+            UserDefaults.standard.set(45, forKey: DefaultsKeys.peerDiscussionIntervalMinutes)
+        }
 
         appState.agentAutoStart = UserDefaults.standard.bool(forKey: DefaultsKeys.agentAutoStart)
         appState.parallelPrepassEnabled = UserDefaults.standard.bool(forKey: DefaultsKeys.parallelPrepassEnabled)
@@ -63,6 +75,10 @@ final class RuntimeManager: ObservableObject {
         appState.peerRelayURL = UserDefaults.standard.string(forKey: DefaultsKeys.peerRelayURL) ?? ""
         appState.peerCategoryENS = UserDefaults.standard.string(forKey: DefaultsKeys.peerCategoryENS) ?? "clawdex.peers"
         appState.peerAnonKey = UserDefaults.standard.string(forKey: DefaultsKeys.peerAnonKey) ?? ""
+        appState.peerAutoHelpEnabled = UserDefaults.standard.bool(forKey: DefaultsKeys.peerAutoHelpEnabled)
+        appState.peerDiscussionEnabled = UserDefaults.standard.bool(forKey: DefaultsKeys.peerDiscussionEnabled)
+        let discussionMinutes = UserDefaults.standard.integer(forKey: DefaultsKeys.peerDiscussionIntervalMinutes)
+        appState.peerDiscussionIntervalMinutes = max(5, discussionMinutes == 0 ? 45 : discussionMinutes)
 
         appState.launchAtLoginEnabled = LaunchAtLoginController.isEnabled()
         appState.hasOpenAIKey = (try? Keychain.loadOpenAIKey()) != nil
@@ -284,6 +300,86 @@ final class RuntimeManager: ObservableObject {
 
         appendLog("[app] Peer assist published event \(result.eventID) to \(result.topic) (replies: \(result.repliesTopic))")
         return result
+    }
+
+    @MainActor
+    func publishAutoPeerHelpIfEnabled(trigger: String, question: String) async -> String? {
+        guard let appState else { return nil }
+        guard appState.peerAutoHelpEnabled else { return nil }
+        guard canPublishPeerAssist(appState: appState) else { return nil }
+
+        let now = Date()
+        if let lastAutoPeerHelpAt, now.timeIntervalSince(lastAutoPeerHelpAt) < autoPeerHelpCooldownSeconds {
+            return nil
+        }
+
+        let normalizedQuestion = normalizePeerQuestion(question, maxLength: 900)
+        guard !normalizedQuestion.isEmpty else { return nil }
+
+        do {
+            let published = try await publishPeerHelpRequest(normalizedQuestion)
+            lastAutoPeerHelpAt = now
+            return "Peer auto-request (\(trigger)) published. event=\(published.eventID) topic=\(published.topic) replies=\(published.repliesTopic)"
+        } catch {
+            appendLog("[app] Peer auto-request failed (\(trigger)): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    @MainActor
+    func publishPeerDiscussionIfEnabled(seedText: String) async -> String? {
+        guard let appState else { return nil }
+        guard appState.peerDiscussionEnabled else { return nil }
+        guard canPublishPeerAssist(appState: appState) else { return nil }
+
+        let intervalMinutes = max(5, appState.peerDiscussionIntervalMinutes)
+        let intervalSeconds = TimeInterval(intervalMinutes * 60)
+        let now = Date()
+        if let lastAutoPeerDiscussionAt, now.timeIntervalSince(lastAutoPeerDiscussionAt) < intervalSeconds {
+            return nil
+        }
+
+        let topic = normalizePeerQuestion(seedText, maxLength: 220)
+        guard !topic.isEmpty else { return nil }
+
+        let question = """
+        Open discussion: share one unusual perspective, one risk, and one practical next step for this topic: "\(topic)".
+        """
+
+        do {
+            let published = try await publishPeerHelpRequest(question)
+            lastAutoPeerDiscussionAt = now
+            return "Peer discussion post published. event=\(published.eventID) topic=\(published.topic) replies=\(published.repliesTopic)"
+        } catch {
+            appendLog("[app] Peer discussion publish failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    @MainActor
+    private func canPublishPeerAssist(appState: AppState) -> Bool {
+        guard appState.peerAssistEnabled else { return false }
+        let relayRaw = appState.peerRelayURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !relayRaw.isEmpty, let relayURL = URL(string: relayRaw) else { return false }
+        guard let scheme = relayURL.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            return false
+        }
+        let category = appState.peerCategoryENS.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !category.isEmpty
+    }
+
+    private func normalizePeerQuestion(_ raw: String, maxLength: Int) -> String {
+        let collapsed = raw
+            .replacingOccurrences(of: "\n", with: " ")
+            .split(separator: " ")
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !collapsed.isEmpty else { return "" }
+        if collapsed.count <= maxLength {
+            return collapsed
+        }
+        let end = collapsed.index(collapsed.startIndex, offsetBy: maxLength)
+        return String(collapsed[..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func shouldRunParallelPrepass(prompt: String, localImagePaths: [String]) -> Bool {

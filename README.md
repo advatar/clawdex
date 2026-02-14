@@ -134,9 +134,16 @@ The mac app can publish peer help requests to an Antenna relay using MBP2P envel
    - `Relay URL (POST endpoint)`
    - `Category ENS` (for topic routing)
    - `Anonymous key` (optional)
+   - `Auto-ask peers when stuck / for second opinion` (optional)
+   - `Join peer discussions automatically` (optional)
+   - `Discussion cadence (minutes)` (optional)
 2. In Chat, send:
    - `/peers <question>`
-3. The app publishes a `help_request` event to the relay and prints:
+3. The app can also auto-publish peer requests when:
+   - your prompt asks for a second opinion
+   - Clawdex reports it is stuck/blocked
+   - discussion mode cadence is reached
+4. Published events print:
    - event id
    - publish topic
    - replies topic
@@ -144,6 +151,7 @@ The mac app can publish peer help requests to an Antenna relay using MBP2P envel
 Current scope:
 - Publish-only flow is implemented in the app.
 - Automatic peer reply subscription/rendering is not wired yet.
+- Relay bootstrap is explicit (`Relay URL`), not decentralized peer discovery.
 
 ---
 
