@@ -11,7 +11,10 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
-use crate::config::{resolve_heartbeat_enabled, resolve_heartbeat_interval_ms, ClawdConfig, ClawdPaths};
+use crate::config::{
+    resolve_context_max_input_chars, resolve_heartbeat_enabled, resolve_heartbeat_interval_ms,
+    ClawdConfig, ClawdPaths,
+};
 use crate::cron::{
     build_cron_job, collect_due_jobs, drain_pending_jobs, is_job_due_value, job_prompt,
     load_job_value, mark_job_running, record_run, CronJob,
@@ -19,10 +22,10 @@ use crate::cron::{
 use crate::gateway;
 use crate::heartbeat;
 use crate::memory;
-use crate::sessions;
 use crate::runner::{CodexRunner, CodexRunnerConfig};
+use crate::sessions;
 use crate::task_db::TaskStore;
-use crate::util::now_ms;
+use crate::util::{apply_text_budget, now_ms};
 
 #[derive(Debug, Clone)]
 struct DeliveryPlan {
@@ -86,6 +89,7 @@ pub fn run_daemon_loop(
     let heartbeat_enabled = resolve_heartbeat_enabled(&cfg);
     let interval = resolve_heartbeat_interval_ms(&cfg);
     let mut next_heartbeat = now_ms() + interval as i64;
+    let context_max_input_chars = resolve_context_max_input_chars(&cfg);
 
     let memory_sync_minutes = cfg
         .memory
@@ -109,6 +113,7 @@ pub fn run_daemon_loop(
                 approval_policy,
                 &workspace_policy,
                 &workspace,
+                context_max_input_chars,
                 receiver,
             );
         }
@@ -129,6 +134,7 @@ pub fn run_daemon_loop(
                 approval_policy,
                 &workspace_policy,
                 &workspace,
+                context_max_input_chars,
             )?;
         }
 
@@ -142,6 +148,7 @@ pub fn run_daemon_loop(
                 approval_policy,
                 &workspace_policy,
                 &workspace,
+                context_max_input_chars,
             )?;
         }
 
@@ -170,6 +177,7 @@ fn drain_daemon_commands(
     base_approval_policy: AskForApproval,
     base_workspace_policy: &crate::config::WorkspacePolicy,
     base_workspace: &PathBuf,
+    context_max_input_chars: Option<usize>,
     receiver: &mpsc::Receiver<DaemonCommand>,
 ) {
     while let Ok(cmd) = receiver.try_recv() {
@@ -187,6 +195,7 @@ fn drain_daemon_commands(
                     base_approval_policy,
                     base_workspace_policy,
                     base_workspace,
+                    context_max_input_chars,
                 );
                 let _ = respond_to.send(result);
             }
@@ -202,6 +211,7 @@ fn run_cron_job_now(
     base_approval_policy: AskForApproval,
     base_workspace_policy: &crate::config::WorkspacePolicy,
     base_workspace: &PathBuf,
+    context_max_input_chars: Option<usize>,
 ) -> DaemonRunResult {
     let now = now_ms();
     let job_value = match load_job_value(paths, job_id) {
@@ -246,6 +256,7 @@ fn run_cron_job_now(
         base_approval_policy,
         base_workspace_policy,
         base_workspace,
+        context_max_input_chars,
     ) {
         Ok(()) => DaemonRunResult {
             ok: true,
@@ -267,6 +278,7 @@ fn execute_job(
     base_approval_policy: AskForApproval,
     base_workspace_policy: &crate::config::WorkspacePolicy,
     base_workspace: &PathBuf,
+    context_max_input_chars: Option<usize>,
 ) -> Result<()> {
     let started_at = now_ms();
     let policy = job_policy_overrides(job);
@@ -280,6 +292,16 @@ fn execute_job(
         &workspace_policy,
         &workspace,
         started_at,
+    );
+    record_cron_task_event(
+        &mut task_run,
+        "controller_state",
+        json!({
+            "state": "plan",
+            "phase": "cron_job_ready",
+            "jobId": job.id,
+            "runAtMs": started_at,
+        }),
     );
 
     let Some(prompt) = job_prompt(job, started_at) else {
@@ -295,6 +317,17 @@ fn execute_job(
             "cron_job_skipped",
             json!({ "jobId": job.id, "reason": "missing payload message" }),
         );
+        record_cron_task_event(
+            &mut task_run,
+            "controller_state",
+            json!({
+                "state": "verify",
+                "phase": "job_skipped",
+                "jobId": job.id,
+                "status": "skipped",
+                "reason": "missing payload message",
+            }),
+        );
         finish_cron_task_run(
             &mut task_run,
             "completed",
@@ -308,6 +341,19 @@ fn execute_job(
         );
         return Ok(());
     };
+    let prompt_budget = apply_text_budget(&prompt, context_max_input_chars);
+    if prompt_budget.truncated {
+        record_cron_task_event(
+            &mut task_run,
+            "context_budget_applied",
+            json!({
+                "maxInputChars": prompt_budget.max_chars,
+                "originalChars": prompt_budget.original_chars,
+                "finalChars": prompt_budget.final_chars,
+                "jobId": job.id,
+            }),
+        );
+    }
 
     let _lock = match acquire_job_lock(paths, &job.id)? {
         Some(lock) => lock,
@@ -323,6 +369,17 @@ fn execute_job(
                 &mut task_run,
                 "cron_job_skipped",
                 json!({ "jobId": job.id, "reason": "locked" }),
+            );
+            record_cron_task_event(
+                &mut task_run,
+                "controller_state",
+                json!({
+                    "state": "verify",
+                    "phase": "job_skipped",
+                    "jobId": job.id,
+                    "status": "skipped",
+                    "reason": "locked",
+                }),
             );
             finish_cron_task_run(
                 &mut task_run,
@@ -340,16 +397,31 @@ fn execute_job(
     };
 
     mark_job_running(paths, &job.id, started_at)?;
+    record_cron_task_event(
+        &mut task_run,
+        "controller_state",
+        json!({
+            "state": "act",
+            "phase": "turn_start",
+            "jobId": job.id,
+            "sessionTarget": job.session_target,
+        }),
+    );
     let outcome = if job.session_target == "isolated" {
         runner.run_isolated_with_policy(
             &job.id,
-            &prompt,
+            &prompt_budget.text,
             approval_policy,
             &workspace_policy,
             workspace.clone(),
         )
     } else {
-        runner.run_main_with_policy(&prompt, approval_policy, &workspace_policy, workspace.clone())
+        runner.run_main_with_policy(
+            &prompt_budget.text,
+            approval_policy,
+            &workspace_policy,
+            workspace.clone(),
+        )
     };
     let outcome = match outcome {
         Ok(outcome) => outcome,
@@ -368,10 +440,18 @@ fn execute_job(
                     "durationMs": duration_ms,
                 })),
             );
+            record_cron_task_event(&mut task_run, "turn_failed", json!({ "error": error_text }));
             record_cron_task_event(
                 &mut task_run,
-                "turn_failed",
-                json!({ "error": error_text }),
+                "controller_state",
+                json!({
+                    "state": "verify",
+                    "phase": "turn_failed",
+                    "jobId": job.id,
+                    "status": "failed",
+                    "reason": "execution failed",
+                    "error": error_text,
+                }),
             );
             finish_cron_task_run(
                 &mut task_run,
@@ -470,6 +550,17 @@ fn execute_job(
             "error": error,
         }),
     );
+    record_cron_task_event(
+        &mut task_run,
+        "controller_state",
+        json!({
+            "state": "verify",
+            "phase": "turn_completed",
+            "jobId": job.id,
+            "status": status,
+            "reason": reason,
+        }),
+    );
     let run_status = if status == "delivery_failed" {
         "failed"
     } else {
@@ -513,7 +604,10 @@ fn start_cron_task_run(
         Ok(None) => match store.create_task(&title) {
             Ok(task) => task,
             Err(err) => {
-                eprintln!("[clawdex][cron] failed to create task for {}: {err}", job.id);
+                eprintln!(
+                    "[clawdex][cron] failed to create task for {}: {err}",
+                    job.id
+                );
                 return None;
             }
         },
@@ -531,7 +625,10 @@ fn start_cron_task_run(
     ) {
         Ok(run) => run,
         Err(err) => {
-            eprintln!("[clawdex][cron] failed to create task run for {}: {err}", job.id);
+            eprintln!(
+                "[clawdex][cron] failed to create task run for {}: {err}",
+                job.id
+            );
             return None;
         }
     };
@@ -568,7 +665,12 @@ fn finish_cron_task_run(
 }
 
 fn cron_task_title(job: &CronJob) -> String {
-    if let Some(name) = job.name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+    if let Some(name) = job
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
         format!("[cron:{}] {}", job.id, name)
     } else {
         format!("[cron:{}]", job.id)
@@ -585,7 +687,11 @@ fn cron_sandbox_label(workspace_policy: &crate::config::WorkspacePolicy) -> &'st
     }
 }
 
-fn execute_heartbeat(runner: &mut CodexRunner, cfg: &ClawdConfig, paths: &ClawdPaths) -> Result<()> {
+fn execute_heartbeat(
+    runner: &mut CodexRunner,
+    cfg: &ClawdConfig,
+    paths: &ClawdPaths,
+) -> Result<()> {
     let entry = heartbeat::wake(cfg, paths, Some("interval".to_string()))?;
     let status = entry
         .get("payload")
@@ -597,7 +703,14 @@ fn execute_heartbeat(runner: &mut CodexRunner, cfg: &ClawdConfig, paths: &ClawdP
     }
 
     let prompt = heartbeat::resolve_prompt(cfg);
-    let outcome = runner.run_main(&prompt)?;
+    let prompt_budget = apply_text_budget(&prompt, resolve_context_max_input_chars(cfg));
+    if prompt_budget.truncated {
+        eprintln!(
+            "[clawdex][heartbeat] prompt truncated by context budget ({} -> {} chars)",
+            prompt_budget.original_chars, prompt_budget.final_chars
+        );
+    }
+    let outcome = runner.run_main(&prompt_budget.text)?;
     let response = outcome.message.trim().to_string();
     let _ = deliver_heartbeat_response(cfg, paths, &response)?;
     Ok(())
@@ -615,7 +728,9 @@ fn resolve_delivery_plan(job: &CronJob) -> DeliveryPlan {
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let payload_deliver = payload.and_then(|p| p.get("deliver")).and_then(|v| v.as_bool());
+    let payload_deliver = payload
+        .and_then(|p| p.get("deliver"))
+        .and_then(|v| v.as_bool());
     let payload_best_effort = payload
         .and_then(|p| p.get("bestEffortDeliver"))
         .and_then(|v| v.as_bool());
@@ -702,7 +817,11 @@ fn resolve_delivery_target(
     })
 }
 
-fn deliver_heartbeat_response(cfg: &ClawdConfig, paths: &ClawdPaths, response: &str) -> Result<bool> {
+fn deliver_heartbeat_response(
+    cfg: &ClawdConfig,
+    paths: &ClawdPaths,
+    response: &str,
+) -> Result<bool> {
     let trimmed = response.trim();
     if trimmed.is_empty() || trimmed == "HEARTBEAT_OK" {
         return Ok(false);
@@ -770,8 +889,16 @@ pub fn deliver_heartbeat_response_for_test(
     deliver_heartbeat_response(cfg, paths, response)
 }
 
-fn handle_incoming_message(runner: &mut CodexRunner, paths: &ClawdPaths, entry: serde_json::Value) -> Result<()> {
-    let text = entry.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
+fn handle_incoming_message(
+    runner: &mut CodexRunner,
+    paths: &ClawdPaths,
+    entry: serde_json::Value,
+) -> Result<()> {
+    let text = entry
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
     if text.is_empty() {
         return Ok(());
     }

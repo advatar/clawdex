@@ -5,6 +5,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 
+#[derive(Debug, Clone)]
+pub struct TextBudgetResult {
+    pub text: String,
+    pub max_chars: Option<usize>,
+    pub original_chars: usize,
+    pub final_chars: usize,
+    pub truncated: bool,
+}
+
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -83,4 +92,67 @@ pub fn read_json_lines(path: &Path, limit: Option<usize>) -> Result<Vec<serde_js
         }
     }
     Ok(out)
+}
+
+pub fn apply_text_budget(text: &str, max_chars: Option<usize>) -> TextBudgetResult {
+    let original_chars = text.chars().count();
+    let limit = max_chars.and_then(|value| (value > 0).then_some(value));
+    let Some(limit) = limit else {
+        return TextBudgetResult {
+            text: text.to_string(),
+            max_chars: None,
+            original_chars,
+            final_chars: original_chars,
+            truncated: false,
+        };
+    };
+
+    if original_chars <= limit {
+        return TextBudgetResult {
+            text: text.to_string(),
+            max_chars: Some(limit),
+            original_chars,
+            final_chars: original_chars,
+            truncated: false,
+        };
+    }
+
+    let mut clipped = String::new();
+    for (idx, ch) in text.chars().enumerate() {
+        if idx >= limit {
+            break;
+        }
+        clipped.push(ch);
+    }
+
+    TextBudgetResult {
+        text: clipped,
+        max_chars: Some(limit),
+        original_chars,
+        final_chars: limit,
+        truncated: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_budget_keeps_input_when_under_limit() {
+        let result = apply_text_budget("hello", Some(10));
+        assert!(!result.truncated);
+        assert_eq!(result.text, "hello");
+        assert_eq!(result.original_chars, 5);
+        assert_eq!(result.final_chars, 5);
+    }
+
+    #[test]
+    fn text_budget_truncates_to_char_boundary() {
+        let result = apply_text_budget("abc😀def", Some(4));
+        assert!(result.truncated);
+        assert_eq!(result.text, "abc😀");
+        assert_eq!(result.original_chars, 7);
+        assert_eq!(result.final_chars, 4);
+    }
 }

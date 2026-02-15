@@ -14,6 +14,7 @@ pub struct ClawdConfig {
     pub cron: Option<CronConfig>,
     pub heartbeat: Option<HeartbeatConfig>,
     pub memory: Option<MemoryConfig>,
+    pub context: Option<ContextConfig>,
     pub codex: Option<CodexConfig>,
     pub gateway: Option<GatewayConfig>,
 }
@@ -100,6 +101,13 @@ pub struct MemoryConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ContextConfig {
+    #[serde(alias = "maxInputChars")]
+    #[serde(alias = "max_input_chars")]
+    pub max_input_chars: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemorySyncConfig {
     #[serde(alias = "intervalMinutes")]
     #[serde(alias = "interval_minutes")]
@@ -177,6 +185,27 @@ impl McpPolicy {
             return true;
         }
         self.allow.contains(&key)
+    }
+
+    pub fn allows_any<'a, I>(&self, names: I) -> bool
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let keys = names
+            .into_iter()
+            .map(normalize_mcp_name)
+            .filter(|key| !key.is_empty())
+            .collect::<Vec<_>>();
+
+        if keys.iter().any(|key| self.deny.contains(key)) {
+            return false;
+        }
+
+        if self.allow.is_empty() {
+            return true;
+        }
+
+        keys.iter().any(|key| self.allow.contains(key))
     }
 
     pub fn is_plugin_enabled(&self, plugin_id: &str) -> bool {
@@ -275,10 +304,7 @@ pub fn load_config(
         eprintln!("[clawdex][plugins] default install failed: {err}");
     }
 
-    Ok((
-        config,
-        paths,
-    ))
+    Ok((config, paths))
 }
 
 pub fn resolve_workspace_dir(
@@ -317,10 +343,7 @@ pub fn default_state_dir() -> Result<PathBuf> {
 }
 
 pub fn resolve_memory_enabled(cfg: &ClawdConfig) -> bool {
-    cfg.memory
-        .as_ref()
-        .and_then(|m| m.enabled)
-        .unwrap_or(true)
+    cfg.memory.as_ref().and_then(|m| m.enabled).unwrap_or(true)
 }
 
 pub fn resolve_network_access(cfg: &ClawdConfig) -> bool {
@@ -399,6 +422,13 @@ pub fn resolve_heartbeat_interval_ms(cfg: &ClawdConfig) -> u64 {
     interval.max(30_000)
 }
 
+pub fn resolve_context_max_input_chars(cfg: &ClawdConfig) -> Option<usize> {
+    cfg.context
+        .as_ref()
+        .and_then(|c| c.max_input_chars)
+        .filter(|value| *value > 0)
+}
+
 pub fn resolve_citations_mode(cfg: &ClawdConfig) -> String {
     cfg.memory
         .as_ref()
@@ -413,11 +443,7 @@ pub fn resolve_embeddings_config(cfg: &ClawdConfig) -> EmbeddingsConfig {
         .and_then(|m| m.embeddings.clone())
         .unwrap_or_default();
 
-    let memory_enabled = cfg
-        .memory
-        .as_ref()
-        .and_then(|m| m.enabled)
-        .unwrap_or(true);
+    let memory_enabled = cfg.memory.as_ref().and_then(|m| m.enabled).unwrap_or(true);
     if !memory_enabled {
         return resolved;
     }
@@ -479,14 +505,13 @@ fn parse_codex_overrides(overrides: &[String]) -> std::collections::HashMap<Stri
 }
 
 fn normalize_override_key(raw: &str) -> String {
-    raw.trim()
-        .to_lowercase()
-        .replace('-', "_")
-        .replace(' ', "")
+    raw.trim().to_lowercase().replace('-', "_").replace(' ', "")
 }
 
 fn resolve_codex_provider(overrides: &std::collections::HashMap<String, String>) -> Option<String> {
-    if let Some(provider) = get_override_value(overrides, &["model_provider", "modelprovider", "provider"]) {
+    if let Some(provider) =
+        get_override_value(overrides, &["model_provider", "modelprovider", "provider"])
+    {
         let trimmed = provider.trim().to_lowercase();
         if !trimmed.is_empty() {
             return Some(trimmed);
@@ -568,9 +593,7 @@ pub fn resolve_workspace_path(paths: &ClawdPaths, rel: &str) -> Result<PathBuf> 
     } else {
         paths.workspace_dir.join(candidate)
     };
-    let abs = abs
-        .canonicalize()
-        .unwrap_or_else(|_| abs.clone());
+    let abs = abs.canonicalize().unwrap_or_else(|_| abs.clone());
     let root = select_allowed_root(&abs, &paths.workspace_policy.allowed_roots)
         .context("path outside allowed workspace roots")?;
     let rel = abs
@@ -650,8 +673,7 @@ fn default_deny_patterns() -> Vec<String> {
 fn build_deny_set(patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
-        let glob = Glob::new(pattern)
-            .with_context(|| format!("invalid deny pattern {pattern}"))?;
+        let glob = Glob::new(pattern).with_context(|| format!("invalid deny pattern {pattern}"))?;
         builder.add(glob);
     }
     Ok(builder.build().context("compile deny patterns")?)
@@ -685,7 +707,9 @@ pub fn merge_config_value(base: &mut serde_json::Value, patch: &serde_json::Valu
         (serde_json::Value::Object(base_map), serde_json::Value::Object(patch_map)) => {
             for (key, value) in patch_map {
                 merge_config_value(
-                    base_map.entry(key.clone()).or_insert(serde_json::Value::Null),
+                    base_map
+                        .entry(key.clone())
+                        .or_insert(serde_json::Value::Null),
                     value,
                 );
             }

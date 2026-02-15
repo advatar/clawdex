@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::thread;
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -17,12 +17,14 @@ use serde_json::{json, Value};
 use tiny_http::{Method, Response, Server, StatusCode};
 
 use crate::app_server::{ApprovalHandler, ApprovalMode, CodexClient, EventSink, UserInputHandler};
-use crate::config::{load_config, ClawdConfig, ClawdPaths, WorkspacePolicy};
-use crate::runner::workspace_sandbox_policy;
 use crate::approvals::{ApprovalBroker, BrokerApprovalHandler, BrokerUserInputHandler};
 use crate::audit;
+use crate::config::{
+    load_config, resolve_context_max_input_chars, ClawdConfig, ClawdPaths, WorkspacePolicy,
+};
+use crate::runner::workspace_sandbox_policy;
 use crate::task_db::{Task, TaskEvent, TaskRun, TaskStore};
-use crate::util::{now_ms, write_json_value};
+use crate::util::{apply_text_budget, now_ms, write_json_value};
 
 pub struct TaskEngine {
     cfg: ClawdConfig,
@@ -208,9 +210,14 @@ pub fn export_audit_packet_command(
     Ok(packet)
 }
 
-pub fn run_task_server(bind: &str, state_dir: Option<PathBuf>, workspace: Option<PathBuf>) -> Result<()> {
+pub fn run_task_server(
+    bind: &str,
+    state_dir: Option<PathBuf>,
+    workspace: Option<PathBuf>,
+) -> Result<()> {
     let (_cfg, paths) = load_config(state_dir, workspace)?;
-    let server = Server::http(bind).map_err(|err| anyhow::anyhow!("bind task server {bind}: {err}"))?;
+    let server =
+        Server::http(bind).map_err(|err| anyhow::anyhow!("bind task server {bind}: {err}"))?;
 
     for mut request in server.incoming_requests() {
         let response = match handle_task_request(&paths, &mut request) {
@@ -449,10 +456,7 @@ impl TaskEngine {
             "CODEX_WORKSPACE_DIR".to_string(),
             self.paths.workspace_dir.to_string_lossy().to_string(),
         ));
-        env.push((
-            "CLAWDEX_TASK_RUN_ID".to_string(),
-            run.id.clone(),
-        ));
+        env.push(("CLAWDEX_TASK_RUN_ID".to_string(), run.id.clone()));
 
         let config_overrides = self
             .cfg
@@ -483,7 +487,8 @@ impl TaskEngine {
             Box::new(TaskUserInputHandler::new(store_rc.clone(), run.id.clone()))
         };
 
-        let mut client = CodexClient::spawn(&codex_path, &config_overrides, &env, ApprovalMode::AutoDeny)?;
+        let mut client =
+            CodexClient::spawn(&codex_path, &config_overrides, &env, ApprovalMode::AutoDeny)?;
         client.set_event_sink(Some(Box::new(event_sink)));
         client.set_approval_handler(Some(approval_handler));
         client.set_user_input_handler(Some(user_input_handler));
@@ -532,10 +537,40 @@ impl TaskEngine {
         {
             let store = store_rc.borrow();
             let _ = store.update_run_thread(&run.id, &thread_id);
+            let _ = store.record_event(&run.id, thread_event_kind, &thread_event_payload);
             let _ = store.record_event(
                 &run.id,
-                thread_event_kind,
-                &thread_event_payload,
+                "controller_state",
+                &json!({
+                    "state": "plan",
+                    "phase": "thread_ready",
+                    "threadId": thread_id,
+                }),
+            );
+        }
+
+        let prompt_budget = apply_text_budget(&prompt, resolve_context_max_input_chars(&self.cfg));
+        {
+            let store = store_rc.borrow();
+            if prompt_budget.truncated {
+                let _ = store.record_event(
+                    &run.id,
+                    "context_budget_applied",
+                    &json!({
+                        "maxInputChars": prompt_budget.max_chars,
+                        "originalChars": prompt_budget.original_chars,
+                        "finalChars": prompt_budget.final_chars,
+                    }),
+                );
+            }
+            let _ = store.record_event(
+                &run.id,
+                "controller_state",
+                &json!({
+                    "state": "act",
+                    "phase": "turn_start",
+                    "threadId": thread_id,
+                }),
             );
         }
 
@@ -545,7 +580,7 @@ impl TaskEngine {
         let outcome = client.run_turn_with_inputs_interruptible(
             &thread_id,
             vec![codex_app_server_protocol::UserInput::Text {
-                text: prompt,
+                text: prompt_budget.text,
                 text_elements: Vec::new(),
             }],
             approval_policy,
@@ -572,12 +607,23 @@ impl TaskEngine {
         let store = store_rc.borrow();
         match outcome {
             Ok(turn_outcome) => {
-                let status = if turn_outcome.status == codex_app_server_protocol::TurnStatus::Interrupted {
-                    "cancelled"
-                } else {
-                    "completed"
-                };
+                let status =
+                    if turn_outcome.status == codex_app_server_protocol::TurnStatus::Interrupted {
+                        "cancelled"
+                    } else {
+                        "completed"
+                    };
                 store.update_run_status(&run.id, status)?;
+                store.record_event(
+                    &run.id,
+                    "controller_state",
+                    &json!({
+                        "state": "verify",
+                        "phase": "turn_completed",
+                        "status": status,
+                        "threadId": thread_id,
+                    }),
+                )?;
                 store.record_event(
                     &run.id,
                     "turn_completed",
@@ -618,9 +664,16 @@ impl TaskEngine {
                 store.update_run_status(&run.id, "failed")?;
                 store.record_event(
                     &run.id,
-                    "turn_failed",
-                    &json!({ "error": err.to_string() }),
+                    "controller_state",
+                    &json!({
+                        "state": "verify",
+                        "phase": "turn_failed",
+                        "status": "failed",
+                        "threadId": thread_id,
+                        "error": err.to_string(),
+                    }),
                 )?;
+                store.record_event(&run.id, "turn_failed", &json!({ "error": err.to_string() }))?;
                 Err(err)
             }
         }
@@ -820,7 +873,10 @@ impl TaskEventSink {
 
 impl EventSink for TaskEventSink {
     fn record_event(&mut self, kind: &str, payload: &Value) {
-        let _ = self.store.borrow().record_event(&self.run_id, kind, payload);
+        let _ = self
+            .store
+            .borrow()
+            .record_event(&self.run_id, kind, payload);
     }
 }
 
@@ -837,14 +893,18 @@ struct TaskApprovalHandler {
 
 impl TaskApprovalHandler {
     fn new(store: Rc<RefCell<TaskStore>>, run_id: String, mode: ApprovalPromptMode) -> Self {
-        Self { store, run_id, mode }
+        Self {
+            store,
+            run_id,
+            mode,
+        }
     }
 
     fn record_decision(&self, kind: &str, request: &Value, decision: &str) {
-        let _ = self
-            .store
-            .borrow()
-            .record_approval(&self.run_id, kind, request, Some(decision), None);
+        let _ =
+            self.store
+                .borrow()
+                .record_approval(&self.run_id, kind, request, Some(decision), None);
     }
 }
 
@@ -983,7 +1043,9 @@ impl UserInputHandler for TaskUserInputHandler {
                 let answer = selection.trim().to_string();
                 answers.insert(
                     question.id.clone(),
-                    ToolRequestUserInputAnswer { answers: vec![answer] },
+                    ToolRequestUserInputAnswer {
+                        answers: vec![answer],
+                    },
                 );
             } else {
                 let response = prompt_text("Answer: ");
@@ -1069,15 +1131,19 @@ mod tests {
             )
             .expect("create run");
 
-        let result = cancel_run_command(&run.id, Some(state_dir.clone()), Some(workspace_dir.clone()))
-            .expect("cancel run");
+        let result = cancel_run_command(
+            &run.id,
+            Some(state_dir.clone()),
+            Some(workspace_dir.clone()),
+        )
+        .expect("cancel run");
         assert_eq!(
             result.get("cancelRequested").and_then(|v| v.as_bool()),
             Some(true)
         );
 
-        let (_cfg, paths) =
-            load_config(Some(state_dir.clone()), Some(workspace_dir.clone())).expect("reload config");
+        let (_cfg, paths) = load_config(Some(state_dir.clone()), Some(workspace_dir.clone()))
+            .expect("reload config");
         let reopened = TaskStore::open(&paths).expect("reopen task store");
         assert!(reopened
             .is_run_cancel_requested(&run.id)
@@ -1151,11 +1217,8 @@ fn handle_task_request(
 
 fn json_response(value: Value) -> Result<Response<std::io::Cursor<Vec<u8>>>> {
     let data = serde_json::to_vec(&value)?;
-    let header = tiny_http::Header::from_bytes(
-        &b"Content-Type"[..],
-        &b"application/json"[..],
-    )
-    .map_err(|_| anyhow::anyhow!("invalid content-type header"))?;
+    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+        .map_err(|_| anyhow::anyhow!("invalid content-type header"))?;
     Ok(Response::from_data(data).with_header(header))
 }
 

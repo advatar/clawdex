@@ -6,10 +6,10 @@ use serde_json::{json, Map, Value};
 use codex_protocol::mcp::{CallToolResult, Tool};
 use jsonschema::{Draft, JSONSchema};
 
-use crate::config::{
-    resolve_cron_enabled, resolve_heartbeat_enabled, ClawdConfig, ClawdPaths,
-};
 use crate::artifacts;
+use crate::config::{
+    resolve_cron_enabled, resolve_heartbeat_enabled, resolve_mcp_policy, ClawdConfig, ClawdPaths,
+};
 use crate::cron;
 use crate::daemon_client;
 use crate::gateway;
@@ -169,7 +169,11 @@ pub fn run_mcp_server(
             continue;
         }
         let Some(method) = method else {
-            write_jsonrpc_error(&mut stdout, id, JsonRpcError::invalid_request("missing method"))?;
+            write_jsonrpc_error(
+                &mut stdout,
+                id,
+                JsonRpcError::invalid_request("missing method"),
+            )?;
             continue;
         };
 
@@ -438,10 +442,14 @@ fn handle_tool_call(
         .get("name")
         .and_then(|v| v.as_str())
         .ok_or_else(|| JsonRpcError::invalid_params("tools/call requires name"))?;
-    let mut arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let mut arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     if !arguments.is_object() {
         return Err(JsonRpcError::invalid_params("arguments must be an object"));
     }
+    enforce_tool_policy(cfg, name)?;
     validate_tool_arguments(name, &arguments)?;
 
     let result = match name {
@@ -505,11 +513,13 @@ fn handle_tool_call(
             if job_id.is_empty() {
                 return Err(JsonRpcError::invalid_params("missing jobId"));
             }
-            cron::runs(paths, &arguments)
-                .map_err(|err| JsonRpcError::internal(err.to_string()))?
+            cron::runs(paths, &arguments).map_err(|err| JsonRpcError::internal(err.to_string()))?
         }
         "memory_search" => {
-            let query = arguments.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let query = arguments
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if query.trim().is_empty() {
                 return Err(JsonRpcError::invalid_params("missing query"));
             }
@@ -555,8 +565,9 @@ fn handle_tool_call(
             gateway::send_message(paths, &arguments)
                 .map_err(|err| JsonRpcError::internal(err.to_string()))?
         }
-        "channels.list" => gateway::list_channels(paths)
-            .map_err(|err| JsonRpcError::internal(err.to_string()))?,
+        "channels.list" => {
+            gateway::list_channels(paths).map_err(|err| JsonRpcError::internal(err.to_string()))?
+        }
         "channels.resolve_target" => gateway::resolve_target(paths, &arguments)
             .map_err(|err| JsonRpcError::internal(err.to_string()))?,
         "artifact.create_xlsx" => artifacts::create_xlsx(paths, &arguments)
@@ -571,17 +582,77 @@ fn handle_tool_call(
             if !heartbeat_enabled {
                 json!({ "ok": false, "reason": "heartbeat disabled" })
             } else {
-                let reason = arguments.get("reason").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let reason = arguments
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 heartbeat::wake(cfg, paths, reason)
                     .map_err(|err| JsonRpcError::internal(err.to_string()))?
             }
         }
-        _ => return Err(JsonRpcError::invalid_params(format!("unknown tool: {name}"))),
+        _ => {
+            return Err(JsonRpcError::invalid_params(format!(
+                "unknown tool: {name}"
+            )))
+        }
     };
 
     let sanitized = sanitize_tool_response(name, result);
     validate_tool_response(name, &sanitized)?;
     Ok(success_result(sanitized))
+}
+
+fn enforce_tool_policy(
+    cfg: &ClawdConfig,
+    tool_name: &str,
+) -> std::result::Result<(), JsonRpcError> {
+    let policy = resolve_mcp_policy(cfg);
+    let server = policy_server_for_tool(tool_name);
+    let aliases = policy_aliases_for_tool(tool_name, server);
+    if !policy.allows_any(aliases.iter().map(String::as_str)) {
+        return Err(JsonRpcError::invalid_params(format!(
+            "MCP policy blocks tool `{tool_name}` (allow/deny rules)"
+        )));
+    }
+
+    let mode = policy.server_policy(server);
+    match mode {
+        "deny" => Err(JsonRpcError::invalid_params(format!(
+            "MCP server policy denies `{server}`"
+        ))),
+        "allow_always" => Ok(()),
+        "allow_once" | "ask_every_time" => Err(JsonRpcError::invalid_params(format!(
+            "MCP server policy `{mode}` for `{server}` is not supported in built-in stdio mode; use `allow_always` or `deny`"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+fn policy_server_for_tool(tool_name: &str) -> &'static str {
+    if tool_name.starts_with("cron.") {
+        "cron"
+    } else if tool_name.starts_with("memory_") || tool_name.starts_with("memory.") {
+        "memory"
+    } else if tool_name.starts_with("message.") || tool_name.starts_with("channels.") {
+        "gateway"
+    } else if tool_name.starts_with("artifact.") {
+        "artifacts"
+    } else if tool_name.starts_with("heartbeat.") {
+        "heartbeat"
+    } else {
+        "clawdex"
+    }
+}
+
+fn policy_aliases_for_tool(tool_name: &str, server: &str) -> Vec<String> {
+    let mut aliases = vec![
+        tool_name.to_string(),
+        server.to_string(),
+        "clawdex".to_string(),
+    ];
+    aliases.sort();
+    aliases.dedup();
+    aliases
 }
 
 fn success_result(value: Value) -> Value {
@@ -598,10 +669,9 @@ fn success_result(value: Value) -> Value {
 fn sanitize_tool_response(name: &str, value: Value) -> Value {
     match name {
         "cron.list" => sanitize_cron_list_response(value),
-        "cron.status" => sanitize_object_fields(
-            value,
-            &["enabled", "storePath", "jobs", "nextWakeAtMs"],
-        ),
+        "cron.status" => {
+            sanitize_object_fields(value, &["enabled", "storePath", "jobs", "nextWakeAtMs"])
+        }
         "cron.add" | "cron.update" => sanitize_cron_job(value),
         "cron.remove" => sanitize_object_fields(value, &["ok", "removed"]),
         "cron.run" => sanitize_object_fields(value, &["ok", "ran", "reason"]),
@@ -626,7 +696,15 @@ fn sanitize_tool_response(name: &str, value: Value) -> Value {
         ),
         "message.send" => sanitize_object_fields(
             value,
-            &["ok", "dryRun", "result", "error", "bestEffort", "queued", "message"],
+            &[
+                "ok",
+                "dryRun",
+                "result",
+                "error",
+                "bestEffort",
+                "queued",
+                "message",
+            ],
         ),
         "channels.list" => sanitize_channels_list_response(value),
         "channels.resolve_target" => sanitize_object_fields(
@@ -679,20 +757,22 @@ fn sanitize_cron_runs_response(value: Value) -> Value {
         if let Some(Value::Array(entries)) = map.get("entries") {
             let sanitized = entries
                 .iter()
-                .map(|entry| sanitize_object_fields_ref(
-                    entry,
-                    &[
-                        "ts",
-                        "jobId",
-                        "action",
-                        "status",
-                        "error",
-                        "summary",
-                        "runAtMs",
-                        "durationMs",
-                        "nextRunAtMs",
-                    ],
-                ))
+                .map(|entry| {
+                    sanitize_object_fields_ref(
+                        entry,
+                        &[
+                            "ts",
+                            "jobId",
+                            "action",
+                            "status",
+                            "error",
+                            "summary",
+                            "runAtMs",
+                            "durationMs",
+                            "nextRunAtMs",
+                        ],
+                    )
+                })
                 .collect::<Vec<_>>();
             out.insert("entries".to_string(), Value::Array(sanitized));
         }
@@ -804,7 +884,10 @@ fn sanitize_cron_payload(value: &Value) -> Value {
 }
 
 fn sanitize_cron_isolation(value: &Value) -> Value {
-    sanitize_object_fields_ref(value, &["postToMainPrefix", "postToMainMode", "postToMainMaxChars"])
+    sanitize_object_fields_ref(
+        value,
+        &["postToMainPrefix", "postToMainMode", "postToMainMaxChars"],
+    )
 }
 
 fn sanitize_cron_state(value: &Value) -> Value {
@@ -850,7 +933,14 @@ fn sanitize_memory_search_response(value: Value) -> Value {
                 .collect::<Vec<_>>();
             out.insert("results".to_string(), Value::Array(sanitized));
         }
-        for key in ["provider", "model", "fallback", "citations", "disabled", "error"] {
+        for key in [
+            "provider",
+            "model",
+            "fallback",
+            "citations",
+            "disabled",
+            "error",
+        ] {
             if let Some(value) = map.get(key) {
                 out.insert(key.to_string(), value.clone());
             }
@@ -1028,13 +1118,7 @@ fn normalize_args_for_validation(name: &str, arguments: &Value) -> Value {
             );
         }
         "memory_write" => {
-            normalize_aliases(
-                map,
-                &[
-                    ("memory_scope", "scope"),
-                    ("plugin_id", "pluginId"),
-                ],
-            );
+            normalize_aliases(map, &[("memory_scope", "scope"), ("plugin_id", "pluginId")]);
         }
         "message.send" => {
             normalize_aliases(
@@ -1105,7 +1189,10 @@ fn normalize_cron_job_for_validation(map: &mut Map<String, Value>, apply_default
                     _ => None,
                 };
                 if let Some(target) = target {
-                    map.insert("sessionTarget".to_string(), Value::String(target.to_string()));
+                    map.insert(
+                        "sessionTarget".to_string(),
+                        Value::String(target.to_string()),
+                    );
                 }
             }
         }
@@ -1199,8 +1286,58 @@ fn parse_at_ms_value(value: &Value) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use serde_json::{json, Value};
+
+    fn cfg_with_mcp_policy(
+        allow: Option<Vec<&str>>,
+        deny: Option<Vec<&str>>,
+        server_policies: Option<Vec<(&str, &str)>>,
+    ) -> ClawdConfig {
+        let mut cfg = ClawdConfig::default();
+        cfg.permissions = Some(crate::config::PermissionsConfig {
+            internet: None,
+            mcp: Some(crate::config::McpPermissionsConfig {
+                allow: allow.map(|entries| entries.into_iter().map(str::to_string).collect()),
+                deny: deny.map(|entries| entries.into_iter().map(str::to_string).collect()),
+                plugins: None,
+                server_policies: server_policies.map(|entries| {
+                    entries
+                        .into_iter()
+                        .map(|(name, mode)| (name.to_string(), mode.to_string()))
+                        .collect::<HashMap<_, _>>()
+                }),
+            }),
+        });
+        cfg
+    }
+
+    #[test]
+    fn policy_allows_builtin_tool_by_default() {
+        let cfg = ClawdConfig::default();
+        assert!(enforce_tool_policy(&cfg, "memory_search").is_ok());
+    }
+
+    #[test]
+    fn policy_blocks_tool_family_when_denied() {
+        let cfg = cfg_with_mcp_policy(None, Some(vec!["memory"]), None);
+        assert!(enforce_tool_policy(&cfg, "memory_search").is_err());
+    }
+
+    #[test]
+    fn policy_allowlist_limits_builtin_tools() {
+        let cfg = cfg_with_mcp_policy(Some(vec!["memory"]), None, None);
+        assert!(enforce_tool_policy(&cfg, "memory_search").is_ok());
+        assert!(enforce_tool_policy(&cfg, "cron.list").is_err());
+    }
+
+    #[test]
+    fn policy_rejects_non_allow_always_server_modes_for_builtin_tools() {
+        let cfg = cfg_with_mcp_policy(None, None, Some(vec![("memory", "allow_once")]));
+        assert!(enforce_tool_policy(&cfg, "memory_search").is_err());
+    }
 
     #[test]
     fn validates_memory_search_aliases() {
@@ -1414,7 +1551,10 @@ mod tests {
             "memory_write",
             json!({ "ok": true, "scope": "workspace", "path": "memory/writes/workspace/a.md", "indexed": true }),
         );
-        assert_response_ok("message.send", json!({ "ok": true, "result": { "id": "msg" } }));
+        assert_response_ok(
+            "message.send",
+            json!({ "ok": true, "result": { "id": "msg" } }),
+        );
         assert_response_ok(
             "channels.list",
             json!({

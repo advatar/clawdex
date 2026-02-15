@@ -258,6 +258,9 @@ Example `config.json5`:
       batch_size: 32
     }
   },
+  context: {
+    maxInputChars: 12000
+  },
   codex: {
     path: "/path/to/codex",
     approval_policy: "on-request",
@@ -297,8 +300,10 @@ Workspace policy notes:
 - `workspace_policy.deny_patterns` blocks tool access via `resolve_workspace_path`.
 - `workspace_policy.read_only` switches Codex sandbox to read-only.
 - `permissions.internet` toggles sandbox network access.
-- `permissions.mcp.allow` / `permissions.mcp.deny` gate MCP servers when exporting plugin configs.
+- `permissions.mcp.allow` / `permissions.mcp.deny` gate plugin MCP export *and* built-in MCP tool dispatch (`clawdex mcp-server`).
+- `permissions.mcp.serverPolicies` is enforced for built-in MCP tool families (`cron`, `memory`, `gateway`, `artifacts`, `heartbeat`); `allow_once`/`ask_every_time` are rejected in stdio mode (use `allow_always` or `deny`).
 - `permissions.mcp.plugins` overrides MCP enablement per plugin id (true/false).
+- `context.maxInputChars` applies an input budget to long task/daemon prompts before turn execution.
 
 ---
 

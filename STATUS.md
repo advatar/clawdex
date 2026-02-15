@@ -1,6 +1,10 @@
 # Status
 
 Active:
+- [x] Close LLM-OS alignment gaps (policy enforcement, explicit controller states, context budgeting).
+  - [x] Enforce `permissions.mcp` allow/deny + per-server policy at built-in MCP tool dispatch.
+  - [x] Add explicit `plan -> act -> verify` controller-state events for task/cron runs.
+  - [x] Add configurable context budget controls and apply them to long prompt inputs.
 - [x] Add a dedicated self-hosted GitHub Actions workflow for Clawhatch scans on a labeled laptop runner and document setup/runbook.
 - [x] Add automated Clawhatch security scan in CI (push/PR + daily schedule) scoped to clawdex workspace context (OpenClaw-specific config checks limited).
 - [x] Add decentralized Antenna peer networking support: multi-relay bootstrap/fallback in mac app + Rust relay/discovery service integration.
