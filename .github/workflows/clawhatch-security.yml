@@ -28,7 +28,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          npx --yes clawhatch scan --path openclaw --workspace . --json > clawhatch-report.json
+          npx --yes clawhatch scan --path clawdex --workspace . --json > clawhatch-report.json
           status=$?
           if [ ! -s clawhatch-report.json ]; then
             echo '{}' > clawhatch-report.json
@@ -47,6 +47,8 @@ jobs:
           {
             echo "### Clawhatch scan"
             echo ""
+            echo "- Scope: \`--path clawdex --workspace .\`"
+            echo "- Note: Clawhatch is OpenClaw-oriented; OpenClaw-specific config checks are limited for clawdex."
             echo "- Exit code: \`${{ steps.scan.outputs.exit_code }}\`"
             echo "- Score: \`${{ steps.scan.outputs.score }}\`"
             echo "- Findings: critical=$critical, high=$high, medium=$medium, low=$low"

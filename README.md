@@ -18,10 +18,12 @@ This README focuses on local development and the `clawdex` CLI surface.
    - pushes to `main`
    - a daily schedule (06:00 UTC)
 2. Workflow path: `.github/workflows/clawhatch-security.yml`
-3. Local equivalent command:
+3. Scan scope is the `clawdex` implementation context (`--path clawdex --workspace .`).
+4. `clawhatch` is OpenClaw-oriented, so OpenClaw-specific config checks are limited in this repo.
+5. Local equivalent command:
 
 ```bash
-npx -y clawhatch scan --path openclaw --workspace . --json > clawhatch-report.json
+npx -y clawhatch scan --path clawdex --workspace . --json > clawhatch-report.json
 ```
 
 ---
