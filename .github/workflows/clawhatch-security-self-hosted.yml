@@ -1,0 +1,87 @@
+name: Clawhatch Security Scan (Self-hosted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      scan_path:
+        description: Local path on the runner machine to scan
+        required: false
+        default: "~/.codex/clawdex"
+      scan_workspace:
+        description: Workspace path for additional file checks
+        required: false
+        default: "."
+  schedule:
+    - cron: "30 6 * * *"
+
+jobs:
+  clawhatch-self-hosted:
+    runs-on: [self-hosted, macOS, clawdex-laptop]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run Clawhatch scan (self-hosted machine context)
+        id: scan
+        shell: bash
+        run: |
+          set +e
+          SCAN_PATH="${{ github.event.inputs.scan_path }}"
+          SCAN_WORKSPACE="${{ github.event.inputs.scan_workspace }}"
+          if [ -z "$SCAN_PATH" ]; then
+            SCAN_PATH="$HOME/.codex/clawdex"
+          fi
+          if [ -z "$SCAN_WORKSPACE" ]; then
+            SCAN_WORKSPACE="."
+          fi
+
+          npx --yes clawhatch scan --path "$SCAN_PATH" --workspace "$SCAN_WORKSPACE" --json > clawhatch-report-self-hosted.json
+          status=$?
+          if [ ! -s clawhatch-report-self-hosted.json ]; then
+            echo '{}' > clawhatch-report-self-hosted.json
+          fi
+          score=$(node -e "const fs=require('fs');const p='clawhatch-report-self-hosted.json';const r=JSON.parse(fs.readFileSync(p,'utf8'));process.stdout.write(String(r.score ?? 'unknown'));")
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          echo "score=$score" >> "$GITHUB_OUTPUT"
+          echo "scan_path=$SCAN_PATH" >> "$GITHUB_OUTPUT"
+          echo "scan_workspace=$SCAN_WORKSPACE" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Summarize scan
+        shell: bash
+        run: |
+          node <<'NODE' >> "$GITHUB_STEP_SUMMARY"
+          const fs = require("fs");
+          const report = JSON.parse(fs.readFileSync("clawhatch-report-self-hosted.json", "utf8"));
+          const findings = Array.isArray(report.findings) ? report.findings : [];
+          const count = (sev) => findings.filter((f) => f && f.severity === sev).length;
+          console.log("### Clawhatch scan (self-hosted)");
+          console.log("");
+          console.log(`- Runner host: \`${process.env.HOSTNAME || "unknown"}\``);
+          console.log(`- Scope path: \`${process.env.SCAN_PATH || "unknown"}\``);
+          console.log(`- Workspace: \`${process.env.SCAN_WORKSPACE || "unknown"}\``);
+          console.log(`- Exit code: \`${process.env.EXIT_CODE || "unknown"}\``);
+          console.log(`- Score: \`${process.env.SCORE || "unknown"}\``);
+          console.log(`- Findings: critical=${count("CRITICAL")}, high=${count("HIGH")}, medium=${count("MEDIUM")}, low=${count("LOW")}`);
+          console.log("- Note: Clawhatch is OpenClaw-oriented; OpenClaw-specific config checks are limited for clawdex.");
+          NODE
+        env:
+          EXIT_CODE: ${{ steps.scan.outputs.exit_code }}
+          SCORE: ${{ steps.scan.outputs.score }}
+          SCAN_PATH: ${{ steps.scan.outputs.scan_path }}
+          SCAN_WORKSPACE: ${{ steps.scan.outputs.scan_workspace }}
+
+      - name: Upload scan report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: clawhatch-report-self-hosted
+          path: clawhatch-report-self-hosted.json
+          retention-days: 14

@@ -1,6 +1,7 @@
 # Status
 
 Active:
+- [x] Add a dedicated self-hosted GitHub Actions workflow for Clawhatch scans on a labeled laptop runner and document setup/runbook.
 - [x] Add automated Clawhatch security scan in CI (push/PR + daily schedule) scoped to clawdex workspace context (OpenClaw-specific config checks limited).
 - [x] Add decentralized Antenna peer networking support: multi-relay bootstrap/fallback in mac app + Rust relay/discovery service integration.
 - [x] Fix current build blockers reported in local environments: make Antenna peer-assist compile without `AntennaProtocol` present and remove `ParallellVibeExample` `main.swift`/`@main` ambiguity.

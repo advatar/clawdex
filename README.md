@@ -25,6 +25,17 @@ This README focuses on local development and the `clawdex` CLI surface.
 ```bash
 npx -y clawhatch scan --path clawdex --workspace . --json > clawhatch-report.json
 ```
+6. Optional self-hosted laptop workflow:
+   - Workflow path: `.github/workflows/clawhatch-security-self-hosted.yml`
+   - Runner labels required: `self-hosted`, `macOS`, `clawdex-laptop`
+   - GitHub repo settings path: **Settings → Actions → Runners → New self-hosted runner**
+   - Keep runner online using service mode on the laptop:
+
+```bash
+./config.sh --url https://github.com/<owner>/<repo> --token <token> --labels clawdex-laptop
+./svc.sh install
+./svc.sh start
+```
 
 ---
 

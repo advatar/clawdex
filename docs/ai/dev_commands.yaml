@@ -60,3 +60,6 @@ commands:
   - name: clawhatch-scan
     description: Run Clawhatch security scan for clawdex workspace context and write a JSON report (OpenClaw-specific config checks are limited).
     cmd: npx -y clawhatch scan --path clawdex --workspace . --json > clawhatch-report.json
+  - name: clawhatch-scan-local-state
+    description: Run Clawhatch against local clawdex runtime state (useful for self-hosted runner validation on a laptop).
+    cmd: npx -y clawhatch scan --path ~/.codex/clawdex --workspace . --json > clawhatch-report-self-hosted.json
