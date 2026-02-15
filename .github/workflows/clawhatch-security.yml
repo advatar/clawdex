@@ -1,0 +1,61 @@
+name: Clawhatch Security Scan
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  clawhatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run Clawhatch scan
+        id: scan
+        shell: bash
+        run: |
+          set +e
+          npx --yes clawhatch scan --path openclaw --workspace . --json > clawhatch-report.json
+          status=$?
+          if [ ! -s clawhatch-report.json ]; then
+            echo '{}' > clawhatch-report.json
+          fi
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          echo "score=$(jq -r '.score // \"unknown\"' clawhatch-report.json)" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Summarize scan
+        shell: bash
+        run: |
+          critical=$(jq '[.findings[]? | select(.severity == "CRITICAL")] | length' clawhatch-report.json)
+          high=$(jq '[.findings[]? | select(.severity == "HIGH")] | length' clawhatch-report.json)
+          medium=$(jq '[.findings[]? | select(.severity == "MEDIUM")] | length' clawhatch-report.json)
+          low=$(jq '[.findings[]? | select(.severity == "LOW")] | length' clawhatch-report.json)
+          {
+            echo "### Clawhatch scan"
+            echo ""
+            echo "- Exit code: \`${{ steps.scan.outputs.exit_code }}\`"
+            echo "- Score: \`${{ steps.scan.outputs.score }}\`"
+            echo "- Findings: critical=$critical, high=$high, medium=$medium, low=$low"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload scan report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: clawhatch-report
+          path: clawhatch-report.json
+          retention-days: 14

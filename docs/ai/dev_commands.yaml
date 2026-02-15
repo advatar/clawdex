@@ -57,3 +57,6 @@ commands:
   - name: permissions-set-mcp-server
     description: Set per-MCP-server policy mode (ask_every_time|allow_once|allow_always|deny)
     cmd: cargo run --manifest-path clawdex/Cargo.toml -- permissions set --mcp-server '<server>=ask_every_time'
+  - name: clawhatch-scan
+    description: Run Clawhatch security scan against this repo and write a JSON report (used by CI automation).
+    cmd: npx -y clawhatch scan --path openclaw --workspace . --json > clawhatch-report.json

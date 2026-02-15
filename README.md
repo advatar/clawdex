@@ -12,6 +12,20 @@ This README focuses on local development and the `clawdex` CLI surface.
 
 ---
 
+**Automated Clawhatch Scan**
+1. GitHub Actions now runs `clawhatch` automatically on:
+   - every pull request
+   - pushes to `main`
+   - a daily schedule (06:00 UTC)
+2. Workflow path: `.github/workflows/clawhatch-security.yml`
+3. Local equivalent command:
+
+```bash
+npx -y clawhatch scan --path openclaw --workspace . --json > clawhatch-report.json
+```
+
+---
+
 **Repo Layout**
 1. `clawdex/` is the Rust CLI/runtime (this repo’s primary implementation).
 2. `codex/` is the Codex submodule (used by `clawdex ui-bridge`).
