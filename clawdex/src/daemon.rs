@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use codex_app_server_protocol::AskForApproval;
+use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,7 +18,7 @@ use crate::config::{
 };
 use crate::cron::{
     build_cron_job, collect_due_jobs, drain_pending_jobs, is_job_due_value, job_prompt,
-    load_job_value, mark_job_running, record_run, CronJob,
+    load_job_value, mark_job_running, normalize_http_webhook_url, record_run, CronJob,
 };
 use crate::gateway;
 use crate::heartbeat;
@@ -28,7 +29,15 @@ use crate::task_db::TaskStore;
 use crate::util::{apply_text_budget, now_ms};
 
 #[derive(Debug, Clone)]
+enum DeliveryMode {
+    None,
+    Announce,
+    Webhook,
+}
+
+#[derive(Debug, Clone)]
 struct DeliveryPlan {
+    mode: DeliveryMode,
     channel: Option<String>,
     to: Option<String>,
     best_effort: bool,
@@ -108,6 +117,7 @@ pub fn run_daemon_loop(
 
         if let Some(receiver) = commands.as_ref() {
             drain_daemon_commands(
+                &cfg,
                 &mut runner,
                 &paths,
                 approval_policy,
@@ -128,6 +138,7 @@ pub fn run_daemon_loop(
         let pending_jobs = drain_pending_jobs(&paths)?;
         for job in pending_jobs {
             execute_job(
+                &cfg,
                 &mut runner,
                 &paths,
                 &job,
@@ -142,6 +153,7 @@ pub fn run_daemon_loop(
         let (due_jobs, _entries) = collect_due_jobs(&paths, now, "due", None)?;
         for job in due_jobs {
             execute_job(
+                &cfg,
                 &mut runner,
                 &paths,
                 &job,
@@ -172,6 +184,7 @@ pub fn run_daemon_loop(
 }
 
 fn drain_daemon_commands(
+    cfg: &ClawdConfig,
     runner: &mut CodexRunner,
     paths: &ClawdPaths,
     base_approval_policy: AskForApproval,
@@ -188,6 +201,7 @@ fn drain_daemon_commands(
                 respond_to,
             } => {
                 let result = run_cron_job_now(
+                    cfg,
                     runner,
                     paths,
                     &job_id,
@@ -204,6 +218,7 @@ fn drain_daemon_commands(
 }
 
 fn run_cron_job_now(
+    cfg: &ClawdConfig,
     runner: &mut CodexRunner,
     paths: &ClawdPaths,
     job_id: &str,
@@ -250,6 +265,7 @@ fn run_cron_job_now(
     };
 
     match execute_job(
+        cfg,
         runner,
         paths,
         &job,
@@ -272,6 +288,7 @@ fn run_cron_job_now(
 }
 
 fn execute_job(
+    cfg: &ClawdConfig,
     runner: &mut CodexRunner,
     paths: &ClawdPaths,
     job: &CronJob,
@@ -478,46 +495,81 @@ fn execute_job(
     let mut error: Option<String> = None;
 
     let plan = resolve_delivery_plan(job);
-    if plan.requested {
-        let mut channel = plan.channel.clone();
-        let mut to = plan.to.clone();
-        let mut account_id: Option<String> = None;
+    match plan.mode {
+        DeliveryMode::None => {}
+        DeliveryMode::Announce => {
+            let mut channel = plan.channel.clone();
+            let mut to = plan.to.clone();
+            let mut account_id: Option<String> = None;
 
-        if channel.as_deref() == Some("last") || to.is_none() {
-            if let Some(resolved) = resolve_delivery_target(paths, channel.clone(), to.clone()) {
-                channel = Some(resolved.channel);
-                to = Some(resolved.to);
-                account_id = resolved.account_id;
+            if channel.as_deref() == Some("last") || to.is_none() {
+                if let Some(resolved) = resolve_delivery_target(paths, channel.clone(), to.clone()) {
+                    channel = Some(resolved.channel);
+                    to = Some(resolved.to);
+                    account_id = resolved.account_id;
+                }
             }
-        }
 
-        if channel.is_none() || to.is_none() {
-            if plan.best_effort {
-                status = "skipped";
-                reason = "no delivery target (best effort)";
-            } else {
-                status = "delivery_failed";
-                reason = "no delivery target";
-                error = Some("no delivery target".to_string());
-            }
-        } else {
-            let args = json!({
-                "channel": channel,
-                "to": to,
-                "accountId": account_id,
-                "text": summary,
-                "bestEffort": plan.best_effort,
-                "idempotencyKey": format!("cron:{}:{}", job.id, started_at),
-            });
-            if let Err(err) = gateway::send_message(paths, &args) {
-                let err_text = err.to_string();
-                error = Some(err_text.clone());
+            if channel.is_none() || to.is_none() {
                 if plan.best_effort {
                     status = "skipped";
-                    reason = "message.send failed (best effort)";
+                    reason = "no delivery target (best effort)";
                 } else {
                     status = "delivery_failed";
-                    reason = "message.send failed";
+                    reason = "no delivery target";
+                    error = Some("no delivery target".to_string());
+                }
+            } else {
+                let args = json!({
+                    "channel": channel,
+                    "to": to,
+                    "accountId": account_id,
+                    "text": summary,
+                    "bestEffort": plan.best_effort,
+                    "idempotencyKey": format!("cron:{}:{}", job.id, started_at),
+                });
+                if let Err(err) = gateway::send_message(paths, &args) {
+                    let err_text = err.to_string();
+                    error = Some(err_text.clone());
+                    if plan.best_effort {
+                        status = "skipped";
+                        reason = "message.send failed (best effort)";
+                    } else {
+                        status = "delivery_failed";
+                        reason = "message.send failed";
+                    }
+                }
+            }
+        }
+        DeliveryMode::Webhook => {
+            if !summary.is_empty() {
+                if let Some(target_url) = plan.to.as_ref() {
+                    let payload = json!({
+                        "jobId": job.id,
+                        "action": "finished",
+                        "status": "ok",
+                        "summary": summary,
+                        "runAtMs": started_at,
+                        "durationMs": duration_ms,
+                    });
+                    if let Err(err) = post_cron_webhook(cfg, target_url, &payload) {
+                        let err_text = err.to_string();
+                        error = Some(err_text.clone());
+                        if plan.best_effort {
+                            status = "skipped";
+                            reason = "cron webhook failed (best effort)";
+                        } else {
+                            status = "delivery_failed";
+                            reason = "cron webhook failed";
+                        }
+                    }
+                } else if plan.best_effort {
+                    status = "skipped";
+                    reason = "no webhook target (best effort)";
+                } else {
+                    status = "delivery_failed";
+                    reason = "no webhook target";
+                    error = Some("no webhook target".to_string());
                 }
             }
         }
@@ -736,24 +788,40 @@ fn resolve_delivery_plan(job: &CronJob) -> DeliveryPlan {
         .and_then(|v| v.as_bool());
 
     if let Some(delivery) = job.delivery.as_ref() {
-        let normalized_mode = match delivery.mode.to_lowercase().as_str() {
-            "announce" => "announce".to_string(),
-            "deliver" => "announce".to_string(),
-            "none" => "none".to_string(),
-            other => other.to_string(),
+        let mode = match delivery.mode.trim().to_lowercase().as_str() {
+            "announce" | "deliver" => DeliveryMode::Announce,
+            "webhook" => DeliveryMode::Webhook,
+            _ => DeliveryMode::None,
         };
-        let channel = delivery
-            .channel
-            .clone()
-            .or(payload_channel)
-            .or_else(|| Some("last".to_string()));
-        let to = delivery.to.clone().or(payload_to);
-        let requested = normalized_mode == "announce";
         let best_effort = delivery
             .best_effort
             .or(payload_best_effort)
             .unwrap_or(false);
+        let requested = !matches!(mode, DeliveryMode::None);
+        let channel = if matches!(mode, DeliveryMode::Announce) {
+            delivery
+                .channel
+                .clone()
+                .or(payload_channel)
+                .or_else(|| Some("last".to_string()))
+        } else {
+            None
+        };
+        let to = if matches!(mode, DeliveryMode::Webhook) {
+            delivery
+                .to
+                .as_deref()
+                .and_then(normalize_http_webhook_url)
+                .or_else(|| {
+                    payload_to
+                        .as_deref()
+                        .and_then(normalize_http_webhook_url)
+                })
+        } else {
+            delivery.to.clone().or(payload_to)
+        };
         return DeliveryPlan {
+            mode,
             channel,
             to,
             best_effort,
@@ -777,11 +845,42 @@ fn resolve_delivery_plan(job: &CronJob) -> DeliveryPlan {
     let to = payload_to.or(job.to.clone());
     let best_effort = payload_best_effort.unwrap_or(job.best_effort);
     DeliveryPlan {
+        mode: if requested {
+            DeliveryMode::Announce
+        } else {
+            DeliveryMode::None
+        },
         channel,
         to,
         best_effort,
         requested,
     }
+}
+
+fn post_cron_webhook(cfg: &ClawdConfig, target_url: &str, payload: &Value) -> Result<()> {
+    let client = Client::builder()
+        .timeout(Duration::from_millis(10_000))
+        .build()
+        .context("build cron webhook client")?;
+    let mut request = client
+        .post(target_url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(payload);
+    if let Some(token) = cfg
+        .cron
+        .as_ref()
+        .and_then(|cron| cron.webhook_token.as_ref())
+        .map(|token| token.trim())
+        .filter(|token| !token.is_empty())
+    {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request.send().context("send cron webhook request")?;
+    if !response.status().is_success() {
+        anyhow::bail!("cron webhook delivery failed: HTTP {}", response.status());
+    }
+    Ok(())
 }
 
 struct ResolvedTarget {

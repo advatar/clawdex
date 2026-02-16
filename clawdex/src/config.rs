@@ -44,6 +44,9 @@ pub struct McpPermissionsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CronConfig {
     pub enabled: Option<bool>,
+    pub webhook: Option<String>,
+    #[serde(alias = "webhookToken")]
+    pub webhook_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

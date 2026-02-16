@@ -4,6 +4,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use chrono_tz::Tz;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
@@ -259,14 +260,37 @@ fn normalize_payload(mut payload: Map<String, Value>) -> Map<String, Value> {
     payload
 }
 
+fn normalize_delivery_mode(raw_mode: &str) -> String {
+    let trimmed = raw_mode.trim().to_lowercase();
+    if trimmed == "deliver" {
+        "announce".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn delivery_mode(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(|delivery| delivery.get("mode"))
+        .and_then(|mode| mode.as_str())
+        .map(normalize_delivery_mode)
+}
+
+pub(crate) fn normalize_http_webhook_url(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parsed = Url::parse(trimmed).ok()?;
+    match parsed.scheme() {
+        "http" | "https" => Some(parsed.to_string()),
+        _ => None,
+    }
+}
+
 fn normalize_delivery(mut delivery: Map<String, Value>) -> Map<String, Value> {
     if let Some(Value::String(mode)) = delivery.get("mode").cloned() {
-        let trimmed = mode.trim().to_lowercase();
-        let normalized = if trimmed == "deliver" {
-            "announce".to_string()
-        } else {
-            trimmed
-        };
+        let normalized = normalize_delivery_mode(&mode);
         delivery.insert("mode".to_string(), Value::String(normalized));
     }
 
@@ -285,6 +309,14 @@ fn normalize_delivery(mut delivery: Map<String, Value>) -> Map<String, Value> {
             delivery.remove("to");
         } else if trimmed != to {
             delivery.insert("to".to_string(), Value::String(trimmed));
+        }
+    }
+
+    if delivery_mode(Some(&Value::Object(delivery.clone()))).as_deref() == Some("webhook") {
+        if let Some(Value::String(to)) = delivery.get("to").cloned() {
+            if let Some(normalized) = normalize_http_webhook_url(&to) {
+                delivery.insert("to".to_string(), Value::String(normalized));
+            }
         }
     }
 
@@ -646,7 +678,8 @@ fn validate_job_spec(map: &Map<String, Value>) -> Result<()> {
         .and_then(|v| v.get("kind"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let has_delivery = map.get("delivery").is_some();
+    let delivery = map.get("delivery");
+    let has_delivery = delivery.is_some();
 
     if session_target == "main" && payload_kind != "systemEvent" {
         anyhow::bail!("main cron jobs require payload.kind=\"systemEvent\"");
@@ -654,8 +687,19 @@ fn validate_job_spec(map: &Map<String, Value>) -> Result<()> {
     if session_target == "isolated" && payload_kind != "agentTurn" {
         anyhow::bail!("isolated cron jobs require payload.kind=\"agentTurn\"");
     }
-    if has_delivery && session_target != "isolated" {
-        anyhow::bail!("cron delivery is only supported for sessionTarget=\"isolated\"");
+    if has_delivery {
+        let mode = delivery_mode(delivery).unwrap_or_else(|| "announce".to_string());
+        if mode == "webhook" {
+            let webhook_target = delivery
+                .and_then(|value| value.get("to"))
+                .and_then(|value| value.as_str())
+                .and_then(normalize_http_webhook_url);
+            if webhook_target.is_none() {
+                anyhow::bail!("cron webhook delivery requires delivery.to to be a valid http(s) URL");
+            }
+        } else if session_target != "isolated" {
+            anyhow::bail!("cron channel delivery config is only supported for sessionTarget=\"isolated\"");
+        }
     }
     Ok(())
 }
@@ -756,8 +800,11 @@ fn load_jobs(paths: &ClawdPaths) -> Result<Vec<Value>> {
             }
         }
 
-        if session_target == "main" && map.remove("delivery").is_some() {
-            mutated = true;
+        if session_target == "main" {
+            let keep_webhook = delivery_mode(map.get("delivery")).as_deref() == Some("webhook");
+            if !keep_webhook && map.remove("delivery").is_some() {
+                mutated = true;
+            }
         }
     }
 
@@ -1252,7 +1299,10 @@ pub fn update_job(paths: &ClawdPaths, args: &Value) -> Result<Value> {
         .map(|v| v == "main")
         .unwrap_or(false)
     {
-        job.remove("delivery");
+        let keep_webhook = delivery_mode(job.get("delivery")).as_deref() == Some("webhook");
+        if !keep_webhook {
+            job.remove("delivery");
+        }
     }
 
     job.insert("updatedAtMs".to_string(), Value::Number(now.into()));
@@ -1659,9 +1709,23 @@ pub fn collect_due_jobs(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use crate::config::load_config;
     use super::ScheduleSpec;
     use chrono::{TimeZone, Utc};
     use serde_json::json;
+    use uuid::Uuid;
+
+    fn temp_paths() -> crate::config::ClawdPaths {
+        let base = std::env::temp_dir().join(format!("clawdex-cron-test-{}", Uuid::new_v4()));
+        let state_dir = base.join("state");
+        let workspace_dir = base.join("workspace");
+        fs::create_dir_all(&workspace_dir).expect("create workspace");
+        let (_cfg, paths) =
+            load_config(Some(state_dir), Some(workspace_dir)).expect("create temp paths");
+        paths
+    }
 
     fn ms(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> i64 {
         Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
@@ -1844,5 +1908,108 @@ mod tests {
         assert_eq!(delivery.get("mode").and_then(|v| v.as_str()), Some("announce"));
         assert_eq!(delivery.get("channel").and_then(|v| v.as_str()), Some("slack"));
         assert_eq!(delivery.get("to").and_then(|v| v.as_str()), Some("U123"));
+    }
+
+    #[test]
+    fn normalize_delivery_mode_webhook_trims_and_validates_target() {
+        let input = json!({
+            "name": "job",
+            "schedule": { "kind": "at", "at": "2026-02-04T12:00:00Z" },
+            "sessionTarget": "main",
+            "wakeMode": "now",
+            "delivery": { "mode": " WeBhOoK ", "to": "  https://example.invalid/cron-finished  " },
+            "payload": { "kind": "systemEvent", "text": "ping" }
+        });
+        let normalized = super::normalize_job_input(&input, true).expect("normalize");
+        let delivery = normalized.get("delivery").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(delivery.get("mode").and_then(|v| v.as_str()), Some("webhook"));
+        assert_eq!(
+            delivery.get("to").and_then(|v| v.as_str()),
+            Some("https://example.invalid/cron-finished")
+        );
+    }
+
+    #[test]
+    fn validate_job_spec_allows_main_webhook_delivery() {
+        let input = json!({
+            "name": "job",
+            "schedule": { "kind": "at", "at": "2026-02-04T12:00:00Z" },
+            "sessionTarget": "main",
+            "wakeMode": "now",
+            "delivery": { "mode": "webhook", "to": "https://example.invalid/cron-finished" },
+            "payload": { "kind": "systemEvent", "text": "ping" }
+        });
+        let normalized = super::normalize_job_input(&input, true).expect("normalize");
+        assert!(super::validate_job_spec(&normalized).is_ok());
+    }
+
+    #[test]
+    fn validate_job_spec_rejects_invalid_webhook_delivery_target() {
+        let input = json!({
+            "name": "job",
+            "schedule": { "kind": "at", "at": "2026-02-04T12:00:00Z" },
+            "sessionTarget": "main",
+            "wakeMode": "now",
+            "delivery": { "mode": "webhook", "to": "ftp://example.invalid/cron-finished" },
+            "payload": { "kind": "systemEvent", "text": "ping" }
+        });
+        let normalized = super::normalize_job_input(&input, true).expect("normalize");
+        let err = super::validate_job_spec(&normalized).expect_err("invalid webhook should fail");
+        assert!(
+            err.to_string()
+                .contains("cron webhook delivery requires delivery.to to be a valid http(s) URL")
+        );
+    }
+
+    #[test]
+    fn load_jobs_keeps_main_webhook_and_drops_main_channel_delivery() {
+        let paths = temp_paths();
+        let jobs_path = paths.cron_dir.join("jobs.json");
+        let jobs = json!({
+            "version": 1,
+            "jobs": [
+                {
+                    "id": "keep-webhook",
+                    "name": "keep-webhook",
+                    "enabled": true,
+                    "schedule": { "kind": "at", "atMs": 1000 },
+                    "sessionTarget": "main",
+                    "wakeMode": "now",
+                    "delivery": { "mode": "webhook", "to": "https://example.invalid/cron-finished" },
+                    "payload": { "kind": "systemEvent", "text": "ping" },
+                    "state": {}
+                },
+                {
+                    "id": "drop-announce",
+                    "name": "drop-announce",
+                    "enabled": true,
+                    "schedule": { "kind": "at", "atMs": 1000 },
+                    "sessionTarget": "main",
+                    "wakeMode": "now",
+                    "delivery": { "mode": "announce", "channel": "slack", "to": "U123" },
+                    "payload": { "kind": "systemEvent", "text": "ping" },
+                    "state": {}
+                }
+            ]
+        });
+        fs::write(&jobs_path, serde_json::to_string_pretty(&jobs).unwrap()).expect("write jobs");
+
+        let loaded = super::load_jobs(&paths).expect("load jobs");
+        let keep = loaded
+            .iter()
+            .find(|entry| entry.get("id").and_then(|v| v.as_str()) == Some("keep-webhook"))
+            .expect("keep-webhook");
+        let drop = loaded
+            .iter()
+            .find(|entry| entry.get("id").and_then(|v| v.as_str()) == Some("drop-announce"))
+            .expect("drop-announce");
+
+        assert_eq!(
+            keep.get("delivery")
+                .and_then(|v| v.get("mode"))
+                .and_then(|v| v.as_str()),
+            Some("webhook")
+        );
+        assert!(drop.get("delivery").is_none());
     }
 }

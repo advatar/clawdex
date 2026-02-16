@@ -241,7 +241,10 @@ Example `config.json5`:
       }
     }
   },
-  cron: { enabled: true },
+  cron: {
+    enabled: true,
+    webhookToken: "<optional-bearer-token-for-cron-webhooks>"
+  },
   heartbeat: { enabled: true, interval_ms: 1800000 },
   memory: {
     enabled: true,

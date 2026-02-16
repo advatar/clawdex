@@ -27,7 +27,7 @@
     "cronDelivery": {
       "type": "object",
       "properties": {
-        "mode": {"type": "string", "enum": ["none", "announce"]},
+        "mode": {"type": "string", "enum": ["none", "announce", "webhook"]},
         "channel": {"type": "string"},
         "to": {"type": "string"},
         "bestEffort": {"type": "boolean"}
