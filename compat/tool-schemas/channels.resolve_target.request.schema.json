@@ -4,7 +4,8 @@
   "properties": {
     "channel": {"type": "string"},
     "to": {"type": "string"},
-    "accountId": {"type": "string"}
+    "accountId": {"type": "string"},
+    "sessionKey": {"type": "string"}
   },
   "additionalProperties": false
 }

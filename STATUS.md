@@ -53,7 +53,8 @@ Upstream Sync (Submodules):
   - [x] Backport OpenClaw gateway WS payload policy bump for image uploads (`maxPayload` 8 MiB, `maxBufferedBytes` 16 MiB) with regression coverage.
   - [x] Backport OpenClaw heartbeat scheduler hardening: daemon heartbeat tick errors are logged and rescheduled instead of terminating `clawdexd`.
   - [x] Backport OpenClaw auth hardening: use constant-time secret comparison for configured gateway token/password checks.
-  - [ ] Parity sweep for OpenClaw `1567d6cbb..19f8b6bf4`: scan `src/agents/tools` + `src/gateway/protocol/schema`, port applicable behavior into `clawdex`, and add/update compat tests + schemas.
+  - [x] Parity sweep for OpenClaw `1567d6cbb..19f8b6bf4`: scan `src/agents/tools` + `src/gateway/protocol/schema`, port applicable behavior into `clawdex`, and add/update compat tests + schemas.
+  - [x] Port OpenClaw cron session-namespace parity: support `cron.sessionKey` (normalize/patch/migration), prefer session-key route resolution for announce delivery, and expose `sessionKey` in cron + `channels.resolve_target` schemas with regression tests.
 
 - [x] Add artifact service tools (xlsx/pptx/docx/pdf) with schema validation + hashing
 - [x] Record artifact events and list outputs at end of task runs

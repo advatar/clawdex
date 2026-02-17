@@ -800,6 +800,7 @@ fn sanitize_cron_job_map(map: &Map<String, Value>) -> Map<String, Value> {
     let mut out = Map::new();
     insert_field(&mut out, map, "id");
     insert_non_null_field(&mut out, map, "agentId");
+    insert_non_null_field(&mut out, map, "sessionKey");
     insert_field(&mut out, map, "name");
     insert_field(&mut out, map, "description");
     insert_field(&mut out, map, "enabled");
@@ -1133,7 +1134,10 @@ fn normalize_args_for_validation(name: &str, arguments: &Value) -> Value {
             );
         }
         "channels.resolve_target" => {
-            normalize_aliases(map, &[("account_id", "accountId")]);
+            normalize_aliases(
+                map,
+                &[("account_id", "accountId"), ("session_key", "sessionKey")],
+            );
         }
         "artifact.create_xlsx"
         | "artifact.create_pptx"
@@ -1175,6 +1179,7 @@ fn normalize_aliases(map: &mut Map<String, Value>, pairs: &[(&str, &str)]) {
 }
 
 fn normalize_cron_job_for_validation(map: &mut Map<String, Value>, apply_defaults: bool) {
+    normalize_aliases(map, &[("session_key", "sessionKey")]);
     if let Some(Value::Object(schedule)) = map.get_mut("schedule") {
         normalize_cron_schedule_for_validation(schedule);
     }
@@ -1206,6 +1211,7 @@ fn normalize_cron_job_for_validation(map: &mut Map<String, Value>, apply_default
     }
 
     if let Some(Value::Object(patch)) = map.get_mut("patch") {
+        normalize_aliases(patch, &[("session_key", "sessionKey")]);
         if let Some(Value::Object(schedule)) = patch.get_mut("schedule") {
             normalize_cron_schedule_for_validation(schedule);
         }

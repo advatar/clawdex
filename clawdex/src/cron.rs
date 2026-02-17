@@ -20,6 +20,8 @@ const PENDING_FILE: &str = "pending.json";
 pub struct CronJob {
     pub id: String,
     pub name: Option<String>,
+    #[serde(default)]
+    pub session_key: Option<String>,
     pub session_target: String,
     pub wake_mode: String,
     pub payload: Value,
@@ -323,7 +325,10 @@ fn normalize_delivery(mut delivery: Map<String, Value>) -> Map<String, Value> {
     delivery
 }
 
-fn has_legacy_delivery_hints(payload: &Map<String, Value>, job: Option<&Map<String, Value>>) -> bool {
+fn has_legacy_delivery_hints(
+    payload: &Map<String, Value>,
+    job: Option<&Map<String, Value>>,
+) -> bool {
     if payload.get("deliver").and_then(|v| v.as_bool()).is_some() {
         return true;
     }
@@ -378,7 +383,11 @@ fn build_delivery_from_legacy(
         .get("deliver")
         .and_then(|v| v.as_bool())
         .or_else(|| job.and_then(|j| j.get("deliver").and_then(|v| v.as_bool())));
-    let mode = if deliver == Some(false) { "none" } else { "announce" };
+    let mode = if deliver == Some(false) {
+        "none"
+    } else {
+        "announce"
+    };
 
     let channel = payload
         .get("channel")
@@ -539,6 +548,32 @@ fn normalize_job_input(raw: &Value, apply_defaults: bool) -> Result<Map<String, 
         }
     }
 
+    if !map.contains_key("sessionKey") {
+        if let Some(session_key) = map.remove("session_key") {
+            map.insert("sessionKey".to_string(), session_key);
+        }
+    }
+    if let Some(session_key) = map.get("sessionKey").cloned() {
+        match session_key {
+            Value::Null => {
+                if apply_defaults {
+                    map.remove("sessionKey");
+                }
+            }
+            Value::String(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    map.remove("sessionKey");
+                } else if trimmed != value {
+                    map.insert("sessionKey".to_string(), Value::String(trimmed.to_string()));
+                }
+            }
+            _ => {
+                map.remove("sessionKey");
+            }
+        }
+    }
+
     if let Some(enabled) = map.get("enabled") {
         if let Value::String(s) = enabled {
             let trimmed = s.trim().to_lowercase();
@@ -551,11 +586,17 @@ fn normalize_job_input(raw: &Value, apply_defaults: bool) -> Result<Map<String, 
     }
 
     if let Some(Value::Object(schedule)) = map.get("schedule").cloned() {
-        map.insert("schedule".to_string(), Value::Object(normalize_schedule(schedule)));
+        map.insert(
+            "schedule".to_string(),
+            Value::Object(normalize_schedule(schedule)),
+        );
     }
 
     if let Some(Value::Object(payload)) = map.get("payload").cloned() {
-        map.insert("payload".to_string(), Value::Object(normalize_payload(payload)));
+        map.insert(
+            "payload".to_string(),
+            Value::Object(normalize_payload(payload)),
+        );
     }
 
     if let Some(Value::Object(delivery)) = map.get("delivery").cloned() {
@@ -582,7 +623,10 @@ fn normalize_job_input(raw: &Value, apply_defaults: bool) -> Result<Map<String, 
                     _ => "",
                 };
                 if !target.is_empty() {
-                    map.insert("sessionTarget".to_string(), Value::String(target.to_string()));
+                    map.insert(
+                        "sessionTarget".to_string(),
+                        Value::String(target.to_string()),
+                    );
                 }
             }
         }
@@ -608,23 +652,26 @@ fn normalize_job_input(raw: &Value, apply_defaults: bool) -> Result<Map<String, 
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let is_isolated_agent_turn =
-            session_target == "isolated" || (session_target.is_empty() && payload_kind == "agentTurn");
+        let is_isolated_agent_turn = session_target == "isolated"
+            || (session_target.is_empty() && payload_kind == "agentTurn");
         let has_delivery = map.get("delivery").is_some();
         if is_isolated_agent_turn && payload_kind == "agentTurn" && !has_delivery {
-            let legacy_delivery = map
-                .get("payload")
-                .and_then(|v| v.as_object())
-                .and_then(|payload| {
-                    if has_legacy_delivery_hints(payload, Some(&map)) {
-                        build_delivery_from_legacy(payload, Some(&map))
-                    } else {
-                        None
-                    }
-                });
+            let legacy_delivery =
+                map.get("payload")
+                    .and_then(|v| v.as_object())
+                    .and_then(|payload| {
+                        if has_legacy_delivery_hints(payload, Some(&map)) {
+                            build_delivery_from_legacy(payload, Some(&map))
+                        } else {
+                            None
+                        }
+                    });
 
             if let Some(delivery) = legacy_delivery {
-                map.insert("delivery".to_string(), Value::Object(normalize_delivery(delivery)));
+                map.insert(
+                    "delivery".to_string(),
+                    Value::Object(normalize_delivery(delivery)),
+                );
                 if let Some(Value::Object(payload_mut)) = map.get_mut("payload") {
                     strip_legacy_delivery_fields(payload_mut);
                 }
@@ -645,7 +692,8 @@ fn normalize_job_input(raw: &Value, apply_defaults: bool) -> Result<Map<String, 
 }
 
 fn merge_payload(existing: &Value, patch: &Value) -> Value {
-    let Some(Value::Object(existing_map)) = existing.as_object().map(|m| Value::Object(m.clone())) else {
+    let Some(Value::Object(existing_map)) = existing.as_object().map(|m| Value::Object(m.clone()))
+    else {
         return patch.clone();
     };
     if let Value::Object(patch_map) = patch {
@@ -695,10 +743,14 @@ fn validate_job_spec(map: &Map<String, Value>) -> Result<()> {
                 .and_then(|value| value.as_str())
                 .and_then(normalize_http_webhook_url);
             if webhook_target.is_none() {
-                anyhow::bail!("cron webhook delivery requires delivery.to to be a valid http(s) URL");
+                anyhow::bail!(
+                    "cron webhook delivery requires delivery.to to be a valid http(s) URL"
+                );
             }
         } else if session_target != "isolated" {
-            anyhow::bail!("cron channel delivery config is only supported for sessionTarget=\"isolated\"");
+            anyhow::bail!(
+                "cron channel delivery config is only supported for sessionTarget=\"isolated\""
+            );
         }
     }
     Ok(())
@@ -709,7 +761,10 @@ fn jobs_path(paths: &ClawdPaths) -> PathBuf {
 }
 
 fn runs_path(paths: &ClawdPaths, job_id: &str) -> PathBuf {
-    paths.cron_dir.join(RUNS_DIR).join(format!("{job_id}.jsonl"))
+    paths
+        .cron_dir
+        .join(RUNS_DIR)
+        .join(format!("{job_id}.jsonl"))
 }
 
 fn pending_path(paths: &ClawdPaths) -> PathBuf {
@@ -732,7 +787,34 @@ fn load_jobs(paths: &ClawdPaths) -> Result<Vec<Value>> {
 
     let mut mutated = false;
     for job in &mut jobs {
-        let Some(map) = job.as_object_mut() else { continue };
+        let Some(map) = job.as_object_mut() else {
+            continue;
+        };
+
+        if !map.contains_key("sessionKey") {
+            if let Some(session_key) = map.remove("session_key") {
+                map.insert("sessionKey".to_string(), session_key);
+                mutated = true;
+            }
+        }
+        if let Some(session_key) = map.get("sessionKey").cloned() {
+            match session_key {
+                Value::String(value) => {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        map.remove("sessionKey");
+                        mutated = true;
+                    } else if trimmed != value {
+                        map.insert("sessionKey".to_string(), Value::String(trimmed.to_string()));
+                        mutated = true;
+                    }
+                }
+                _ => {
+                    map.remove("sessionKey");
+                    mutated = true;
+                }
+            }
+        }
 
         if let Some(Value::Object(payload)) = map.get_mut("payload") {
             let normalized = normalize_payload(payload.clone());
@@ -773,7 +855,10 @@ fn load_jobs(paths: &ClawdPaths) -> Result<Vec<Value>> {
             let has_delivery = map.get("delivery").is_some();
             if !has_delivery {
                 if let Some(delivery) = legacy_patch {
-                    map.insert("delivery".to_string(), Value::Object(normalize_delivery(delivery)));
+                    map.insert(
+                        "delivery".to_string(),
+                        Value::Object(normalize_delivery(delivery)),
+                    );
                     if let Some(Value::Object(payload_mut)) = map.get_mut("payload") {
                         strip_legacy_delivery_fields(payload_mut);
                     }
@@ -984,7 +1069,16 @@ pub(crate) fn build_cron_job(job: &Value) -> Option<CronJob> {
         .or_else(|| job.get("jobId"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())?;
-    let name = job.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let name = job
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let session_key = job
+        .get("sessionKey")
+        .or_else(|| job.get("session_key"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let session_target = job
         .get("sessionTarget")
         .and_then(|v| v.as_str())
@@ -1056,6 +1150,7 @@ pub(crate) fn build_cron_job(job: &Value) -> Option<CronJob> {
     Some(CronJob {
         id,
         name,
+        session_key,
         session_target,
         wake_mode,
         payload,
@@ -1093,6 +1188,14 @@ pub fn job_prompt(job: &CronJob, now: i64) -> Option<String> {
 }
 
 pub fn job_session_key(job: &CronJob) -> String {
+    if let Some(session_key) = job
+        .session_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return session_key.to_string();
+    }
     match job.session_target.as_str() {
         "isolated" => format!("cron:{}", job.id),
         _ => "agent:main:main".to_string(),
@@ -1182,7 +1285,9 @@ pub fn status(paths: &ClawdPaths, enabled: bool) -> Result<Value> {
                 .get("state")
                 .and_then(|v| v.get("nextRunAtMs"))
                 .and_then(|v| v.as_i64())
-                .or_else(|| schedule.next_run_after(job_last_run_at(job), job_created_at(job), now));
+                .or_else(|| {
+                    schedule.next_run_after(job_last_run_at(job), job_created_at(job), now)
+                });
             if let Some(next) = next {
                 next_wake = Some(next_wake.map_or(next, |current| current.min(next)));
             }
@@ -1256,6 +1361,21 @@ pub fn update_job(paths: &ClawdPaths, args: &Value) -> Result<Value> {
                 _ => {
                     job.insert("delivery".to_string(), value);
                 }
+            }
+        } else if key == "sessionKey" {
+            match value {
+                Value::Null => {
+                    job.remove("sessionKey");
+                }
+                Value::String(raw) => {
+                    let trimmed = raw.trim();
+                    if trimmed.is_empty() {
+                        job.remove("sessionKey");
+                    } else {
+                        job.insert("sessionKey".to_string(), Value::String(trimmed.to_string()));
+                    }
+                }
+                _ => {}
             }
         } else if key == "state" {
             if let Value::Object(state_patch) = value {
@@ -1340,7 +1460,10 @@ pub fn remove_job(paths: &ClawdPaths, args: &Value) -> Result<Value> {
 
 pub fn runs(paths: &ClawdPaths, args: &Value) -> Result<Value> {
     let job_id = job_id_from_args(args).context("cron.runs requires jobId or id")?;
-    let limit = args.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
     let entries = read_json_lines(&runs_path(paths, &job_id), None)?;
     let mut finished = Vec::new();
     for entry in entries {
@@ -1590,10 +1713,7 @@ pub fn record_run(
 }
 
 pub fn run_jobs(paths: &ClawdPaths, args: &Value) -> Result<Value> {
-    let mode = args
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("due");
+    let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("due");
     let job_id = job_id_from_args(args).context("cron.run requires jobId or id")?;
     let now = now_ms();
     let forced = mode.eq_ignore_ascii_case("force");
@@ -1630,10 +1750,10 @@ pub fn collect_due_jobs(
         if job_running(job) {
             continue;
         }
-        let Some(map) = job.as_object_mut() else { continue };
-        let schedule = map
-            .get("schedule")
-            .and_then(ScheduleSpec::from_value);
+        let Some(map) = job.as_object_mut() else {
+            continue;
+        };
+        let schedule = map.get("schedule").and_then(ScheduleSpec::from_value);
         let last_run = map.get("lastRunAtMs").and_then(|v| v.as_i64());
         let created_at = map.get("createdAtMs").and_then(|v| v.as_i64());
         let mut state_next = map
@@ -1711,10 +1831,10 @@ pub fn collect_due_jobs(
 mod tests {
     use std::fs;
 
-    use crate::config::load_config;
     use super::ScheduleSpec;
+    use crate::config::load_config;
     use chrono::{TimeZone, Utc};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use uuid::Uuid;
 
     fn temp_paths() -> crate::config::ClawdPaths {
@@ -1763,10 +1883,7 @@ mod tests {
 
         assert!(!spec.is_due(None, None, now));
         assert!(spec.is_due(None, None, anchor + 60_000));
-        assert_eq!(
-            spec.next_run_after(None, None, now),
-            Some(anchor + 60_000)
-        );
+        assert_eq!(spec.next_run_after(None, None, now), Some(anchor + 60_000));
 
         let now = ms(2026, 2, 4, 12, 10, 0);
         let spec_no_anchor = ScheduleSpec::from_value(&json!({
@@ -1807,13 +1924,22 @@ mod tests {
             "payload": { "kind": "agentTurn", "message": "hi" }
         });
         let normalized = super::normalize_job_input(&input, true).expect("normalize");
-        assert_eq!(normalized.get("wakeMode").and_then(|v| v.as_str()), Some("next-heartbeat"));
-        assert_eq!(normalized.get("enabled").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            normalized.get("wakeMode").and_then(|v| v.as_str()),
+            Some("next-heartbeat")
+        );
+        assert_eq!(
+            normalized.get("enabled").and_then(|v| v.as_bool()),
+            Some(true)
+        );
         assert_eq!(
             normalized.get("sessionTarget").and_then(|v| v.as_str()),
             Some("isolated")
         );
-        let schedule = normalized.get("schedule").and_then(|v| v.as_object()).unwrap();
+        let schedule = normalized
+            .get("schedule")
+            .and_then(|v| v.as_object())
+            .unwrap();
         assert_eq!(schedule.get("kind").and_then(|v| v.as_str()), Some("at"));
         assert!(schedule.get("atMs").is_some());
     }
@@ -1831,8 +1957,14 @@ mod tests {
             }
         });
         let normalized = super::normalize_job_input(&input, true).expect("normalize");
-        assert_eq!(normalized.get("enabled").and_then(|v| v.as_bool()), Some(false));
-        let schedule = normalized.get("schedule").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(
+            normalized.get("enabled").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        let schedule = normalized
+            .get("schedule")
+            .and_then(|v| v.as_object())
+            .unwrap();
         assert_eq!(schedule.get("kind").and_then(|v| v.as_str()), Some("every"));
     }
 
@@ -1844,7 +1976,10 @@ mod tests {
             "payload": { "kind": "agentTurn", "message": "hi" }
         });
         let normalized = super::normalize_job_input(&input, true).expect("normalize");
-        let schedule = normalized.get("schedule").and_then(|v| v.as_object()).unwrap();
+        let schedule = normalized
+            .get("schedule")
+            .and_then(|v| v.as_object())
+            .unwrap();
         assert_eq!(schedule.get("kind").and_then(|v| v.as_str()), Some("at"));
         assert!(schedule.get("atMs").is_some());
         assert!(schedule.get("at").is_none());
@@ -1858,13 +1993,52 @@ mod tests {
             "payload": { "kind": "systemEvent", "text": "ping" }
         });
         let normalized = super::normalize_job_input(&input, true).expect("normalize");
-        let schedule = normalized.get("schedule").and_then(|v| v.as_object()).unwrap();
+        let schedule = normalized
+            .get("schedule")
+            .and_then(|v| v.as_object())
+            .unwrap();
         assert_eq!(schedule.get("kind").and_then(|v| v.as_str()), Some("cron"));
-        assert_eq!(schedule.get("cron").and_then(|v| v.as_str()), Some("0 * * * * * *"));
+        assert_eq!(
+            schedule.get("cron").and_then(|v| v.as_str()),
+            Some("0 * * * * * *")
+        );
         assert_eq!(
             schedule.get("timezone").and_then(|v| v.as_str()),
             Some("America/Los_Angeles")
         );
+    }
+
+    #[test]
+    fn normalize_session_key_trims_and_drops_blank() {
+        let with_key = json!({
+            "name": "job",
+            "schedule": { "kind": "at", "at": "2026-02-04T12:00:00Z" },
+            "payload": { "kind": "systemEvent", "text": "ping" },
+            "sessionKey": "  agent:main:telegram:group:-100123  "
+        });
+        let normalized = super::normalize_job_input(&with_key, true).expect("normalize");
+        assert_eq!(
+            normalized.get("sessionKey").and_then(|v| v.as_str()),
+            Some("agent:main:telegram:group:-100123")
+        );
+
+        let cleared = json!({
+            "name": "job",
+            "schedule": { "kind": "at", "at": "2026-02-04T12:00:00Z" },
+            "payload": { "kind": "systemEvent", "text": "ping" },
+            "sessionKey": "   "
+        });
+        let normalized = super::normalize_job_input(&cleared, true).expect("normalize");
+        assert!(!normalized.contains_key("sessionKey"));
+    }
+
+    #[test]
+    fn normalize_session_key_patch_preserves_null() {
+        let patch = json!({
+            "sessionKey": null
+        });
+        let normalized = super::normalize_job_input(&patch, false).expect("normalize");
+        assert!(normalized.get("sessionKey").is_some_and(Value::is_null));
     }
 
     #[test]
@@ -1882,13 +2056,28 @@ mod tests {
             }
         });
         let normalized = super::normalize_job_input(&input, true).expect("normalize");
-        let delivery = normalized.get("delivery").and_then(|v| v.as_object()).unwrap();
-        assert_eq!(delivery.get("mode").and_then(|v| v.as_str()), Some("announce"));
-        assert_eq!(delivery.get("channel").and_then(|v| v.as_str()), Some("slack"));
+        let delivery = normalized
+            .get("delivery")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert_eq!(
+            delivery.get("mode").and_then(|v| v.as_str()),
+            Some("announce")
+        );
+        assert_eq!(
+            delivery.get("channel").and_then(|v| v.as_str()),
+            Some("slack")
+        );
         assert_eq!(delivery.get("to").and_then(|v| v.as_str()), Some("U123"));
-        assert_eq!(delivery.get("bestEffort").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            delivery.get("bestEffort").and_then(|v| v.as_bool()),
+            Some(true)
+        );
 
-        let payload = normalized.get("payload").and_then(|v| v.as_object()).unwrap();
+        let payload = normalized
+            .get("payload")
+            .and_then(|v| v.as_object())
+            .unwrap();
         assert!(payload.get("deliver").is_none());
         assert!(payload.get("channel").is_none());
         assert!(payload.get("to").is_none());
@@ -1904,9 +2093,18 @@ mod tests {
             "payload": { "kind": "agentTurn", "message": "hi" }
         });
         let normalized = super::normalize_job_input(&input, true).expect("normalize");
-        let delivery = normalized.get("delivery").and_then(|v| v.as_object()).unwrap();
-        assert_eq!(delivery.get("mode").and_then(|v| v.as_str()), Some("announce"));
-        assert_eq!(delivery.get("channel").and_then(|v| v.as_str()), Some("slack"));
+        let delivery = normalized
+            .get("delivery")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert_eq!(
+            delivery.get("mode").and_then(|v| v.as_str()),
+            Some("announce")
+        );
+        assert_eq!(
+            delivery.get("channel").and_then(|v| v.as_str()),
+            Some("slack")
+        );
         assert_eq!(delivery.get("to").and_then(|v| v.as_str()), Some("U123"));
     }
 
@@ -1921,8 +2119,14 @@ mod tests {
             "payload": { "kind": "systemEvent", "text": "ping" }
         });
         let normalized = super::normalize_job_input(&input, true).expect("normalize");
-        let delivery = normalized.get("delivery").and_then(|v| v.as_object()).unwrap();
-        assert_eq!(delivery.get("mode").and_then(|v| v.as_str()), Some("webhook"));
+        let delivery = normalized
+            .get("delivery")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert_eq!(
+            delivery.get("mode").and_then(|v| v.as_str()),
+            Some("webhook")
+        );
         assert_eq!(
             delivery.get("to").and_then(|v| v.as_str()),
             Some("https://example.invalid/cron-finished")
@@ -1955,10 +2159,9 @@ mod tests {
         });
         let normalized = super::normalize_job_input(&input, true).expect("normalize");
         let err = super::validate_job_spec(&normalized).expect_err("invalid webhook should fail");
-        assert!(
-            err.to_string()
-                .contains("cron webhook delivery requires delivery.to to be a valid http(s) URL")
-        );
+        assert!(err
+            .to_string()
+            .contains("cron webhook delivery requires delivery.to to be a valid http(s) URL"));
     }
 
     #[test]
@@ -2011,5 +2214,23 @@ mod tests {
             Some("webhook")
         );
         assert!(drop.get("delivery").is_none());
+    }
+
+    #[test]
+    fn job_session_key_prefers_explicit_session_key() {
+        let job = super::build_cron_job(&json!({
+            "id": "job-1",
+            "name": "job",
+            "sessionKey": "agent:main:discord:channel:ops",
+            "sessionTarget": "main",
+            "wakeMode": "next-heartbeat",
+            "payload": { "kind": "systemEvent", "text": "ping" }
+        }))
+        .expect("job");
+
+        assert_eq!(
+            super::job_session_key(&job),
+            "agent:main:discord:channel:ops".to_string()
+        );
     }
 }

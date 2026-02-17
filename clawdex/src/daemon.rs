@@ -501,12 +501,21 @@ fn execute_job(
             let mut channel = plan.channel.clone();
             let mut to = plan.to.clone();
             let mut account_id: Option<String> = None;
+            let mut session_key = job.session_key.clone();
 
             if channel.as_deref() == Some("last") || to.is_none() {
-                if let Some(resolved) = resolve_delivery_target(paths, channel.clone(), to.clone()) {
+                if let Some(resolved) = resolve_delivery_target(
+                    paths,
+                    channel.clone(),
+                    to.clone(),
+                    job.session_key.clone(),
+                ) {
                     channel = Some(resolved.channel);
                     to = Some(resolved.to);
                     account_id = resolved.account_id;
+                    if session_key.is_none() {
+                        session_key = resolved.session_key;
+                    }
                 }
             }
 
@@ -521,6 +530,7 @@ fn execute_job(
                 }
             } else {
                 let args = json!({
+                    "sessionKey": session_key,
                     "channel": channel,
                     "to": to,
                     "accountId": account_id,
@@ -812,11 +822,7 @@ fn resolve_delivery_plan(job: &CronJob) -> DeliveryPlan {
                 .to
                 .as_deref()
                 .and_then(normalize_http_webhook_url)
-                .or_else(|| {
-                    payload_to
-                        .as_deref()
-                        .and_then(normalize_http_webhook_url)
-                })
+                .or_else(|| payload_to.as_deref().and_then(normalize_http_webhook_url))
         } else {
             delivery.to.clone().or(payload_to)
         };
@@ -887,12 +893,14 @@ struct ResolvedTarget {
     channel: String,
     to: String,
     account_id: Option<String>,
+    session_key: Option<String>,
 }
 
 fn resolve_delivery_target(
     paths: &ClawdPaths,
     channel: Option<String>,
     to: Option<String>,
+    session_key: Option<String>,
 ) -> Option<ResolvedTarget> {
     let channel_arg = match channel.as_deref() {
         Some("last") => None,
@@ -900,7 +908,8 @@ fn resolve_delivery_target(
     };
     let args = json!({
         "channel": channel_arg,
-        "to": to
+        "to": to,
+        "sessionKey": session_key,
     });
     let resolved = gateway::resolve_target(paths, &args).ok()?;
     if resolved.get("ok").and_then(|v| v.as_bool()) != Some(true) {
@@ -911,6 +920,10 @@ fn resolve_delivery_target(
         to: resolved.get("to")?.as_str()?.to_string(),
         account_id: resolved
             .get("accountId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        session_key: resolved
+            .get("sessionKey")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
     })
@@ -953,7 +966,7 @@ fn deliver_heartbeat_response(
         .and_then(|d| d.account_id.clone());
 
     if channel.is_none() || to.is_none() {
-        if let Some(last) = resolve_delivery_target(paths, None, None) {
+        if let Some(last) = resolve_delivery_target(paths, None, None, None) {
             channel = channel.or(Some(last.channel));
             to = to.or(Some(last.to));
             account_id = account_id.or(last.account_id);

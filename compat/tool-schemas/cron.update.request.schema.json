@@ -40,6 +40,7 @@
       "type": "object",
       "properties": {
         "agentId": {"type": ["string", "null"]},
+        "sessionKey": {"type": ["string", "null"]},
         "name": {"type": "string"},
         "description": {"type": "string"},
         "enabled": {"type": "boolean"},
