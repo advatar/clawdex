@@ -30,6 +30,7 @@ const CLAWDEX_PLUGIN_ID_FRONTMATTER_KEY: &str = "clawdex-plugin-id";
 const CLAWDEX_PLUGIN_NAME_FRONTMATTER_KEY: &str = "clawdex-plugin-name";
 const CLAWDEX_PLUGIN_SOURCE_FRONTMATTER_KEY: &str = "clawdex-plugin-source";
 const ALLOW_VULNERABLE_PLUGINS_ENV: &str = "CLAWDEX_ALLOW_VULNERABLE_PLUGINS";
+const BLOCK_VULNERABLE_PLUGINS_ENV: &str = "CLAWDEX_BLOCK_VULNERABLE_PLUGINS";
 const VULNERABLE_PLUGIN_BLOCKLIST: &[(&str, &str)] = &[
     (
         "matrix",
@@ -44,15 +45,32 @@ fn blocked_plugin_reason(plugin_id: &str) -> Option<&'static str> {
         .map(|(_, reason)| *reason)
 }
 
-fn enforce_plugin_security_policy(plugin_id: &str) -> Result<()> {
-    if std::env::var(ALLOW_VULNERABLE_PLUGINS_ENV)
-        .ok()
-        .is_some_and(|value| value.trim() == "1")
-    {
-        return Ok(());
+fn strict_vulnerable_plugin_blocking_enabled() -> bool {
+    if let Ok(value) = std::env::var(ALLOW_VULNERABLE_PLUGINS_ENV) {
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized == "1" || normalized == "true" || normalized == "yes" {
+            return false;
+        }
+        if normalized == "0" || normalized == "false" || normalized == "no" {
+            return true;
+        }
     }
+    std::env::var(BLOCK_VULNERABLE_PLUGINS_ENV)
+        .ok()
+        .is_some_and(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            normalized == "1" || normalized == "true" || normalized == "yes"
+        })
+}
+
+fn enforce_plugin_security_policy(plugin_id: &str) -> Result<()> {
     if let Some(reason) = blocked_plugin_reason(plugin_id) {
-        anyhow::bail!("plugin \"{plugin_id}\" blocked by security policy: {reason}");
+        if strict_vulnerable_plugin_blocking_enabled() {
+            anyhow::bail!("plugin \"{plugin_id}\" blocked by security policy: {reason}");
+        }
+        eprintln!(
+            "[clawdex][plugins] warning: plugin \"{plugin_id}\" has known vulnerability notice: {reason}"
+        );
     }
     Ok(())
 }
@@ -240,6 +258,8 @@ struct OpenClawManifest {
     description: Option<String>,
     version: Option<String>,
     permissions: Option<PluginPermissions>,
+    skills: Option<ComponentPathSpec>,
+    commands: Option<ComponentPathSpec>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -601,6 +621,17 @@ fn load_claude_manifest(root: &Path) -> Result<Option<ClaudePluginManifest>> {
     Ok(Some(manifest))
 }
 
+fn load_openclaw_manifest(root: &Path) -> Result<Option<OpenClawManifest>> {
+    let path = root.join(OPENCLAW_MANIFEST_FILENAME);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = read_to_string(&path)?;
+    let manifest: OpenClawManifest =
+        serde_json::from_str(&raw).context("parse openclaw.plugin.json")?;
+    Ok(Some(manifest))
+}
+
 fn component_paths_from_spec(spec: &ComponentPathSpec) -> Vec<String> {
     match spec {
         ComponentPathSpec::Single(value) => vec![value.clone()],
@@ -648,27 +679,32 @@ fn resolve_plugin_component_paths(root: &Path) -> Result<PluginComponentPaths> {
     paths.commands.push(root.join("commands"));
 
     if let Some(manifest) = load_claude_manifest(root)? {
-        if let Some(spec) = manifest.skills.as_ref() {
-            for raw in component_paths_from_spec(spec) {
-                let resolved = resolve_manifest_path(root, &raw)?;
-                if resolved.exists() {
-                    paths.skills.push(resolved);
-                }
-            }
-        }
-        if let Some(spec) = manifest.commands.as_ref() {
-            for raw in component_paths_from_spec(spec) {
-                let resolved = resolve_manifest_path(root, &raw)?;
-                if resolved.exists() {
-                    paths.commands.push(resolved);
-                }
-            }
-        }
+        append_component_paths(root, &mut paths.skills, manifest.skills.as_ref())?;
+        append_component_paths(root, &mut paths.commands, manifest.commands.as_ref())?;
+    }
+    if let Some(manifest) = load_openclaw_manifest(root)? {
+        append_component_paths(root, &mut paths.skills, manifest.skills.as_ref())?;
+        append_component_paths(root, &mut paths.commands, manifest.commands.as_ref())?;
     }
 
     paths.skills = dedupe_paths(paths.skills);
     paths.commands = dedupe_paths(paths.commands);
     Ok(paths)
+}
+
+fn append_component_paths(
+    root: &Path,
+    out: &mut Vec<PathBuf>,
+    spec: Option<&ComponentPathSpec>,
+) -> Result<()> {
+    let Some(spec) = spec else { return Ok(()) };
+    for raw in component_paths_from_spec(spec) {
+        let resolved = resolve_manifest_path(root, &raw)?;
+        if resolved.exists() {
+            out.push(resolved);
+        }
+    }
+    Ok(())
 }
 
 fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -3018,6 +3054,11 @@ Do the thing.
     }
 
     #[test]
+    fn enforce_plugin_security_policy_allows_vulnerable_plugin_by_default() {
+        assert!(enforce_plugin_security_policy("matrix").is_ok());
+    }
+
+    #[test]
     fn list_bundled_claude_plugins_includes_command_only_bundle() {
         let tmp = TempDir::new("clawdex-test-");
         let root = tmp.path.join("root");
@@ -3029,6 +3070,44 @@ Do the thing.
 
         let plugins = list_bundled_claude_plugins(&root).expect("list plugins");
         assert_eq!(plugins, vec![plugin_dir]);
+    }
+
+    #[test]
+    fn resolve_plugin_component_paths_reads_openclaw_manifest_paths() {
+        let tmp = TempDir::new("clawdex-test-");
+        let plugin_dir = tmp.path.join("openclaw-plugin");
+        ensure_dir(&plugin_dir).expect("mkdir plugin");
+        ensure_dir(&plugin_dir.join("skills-default")).expect("mkdir skills default");
+        ensure_dir(&plugin_dir.join("commands-default")).expect("mkdir commands default");
+
+        fs::write(
+            plugin_dir.join(OPENCLAW_MANIFEST_FILENAME),
+            r#"{
+  "id": "openclaw-test",
+  "name": "OpenClaw Test",
+  "skills": ["./skills-default"],
+  "commands": { "paths": ["./commands-default"] },
+  "configSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+}"#,
+        )
+        .expect("write manifest");
+
+        let resolved =
+            resolve_plugin_component_paths(&plugin_dir).expect("resolve component paths");
+        assert!(
+            resolved
+                .skills
+                .iter()
+                .any(|path| path.ends_with("skills-default")),
+            "expected openclaw manifest skills path to be included"
+        );
+        assert!(
+            resolved
+                .commands
+                .iter()
+                .any(|path| path.ends_with("commands-default")),
+            "expected openclaw manifest commands path to be included"
+        );
     }
 
     #[test]

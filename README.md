@@ -194,6 +194,7 @@ Override paths via env:
 - `CLAWDEX_CONFIG_PATH` (or `CODEX_CLAWD_CONFIG_PATH`)
 - `CLAWDEX_WORKSPACE` (or `CODEX_CLAWD_WORKSPACE_DIR` / `CODEX_WORKSPACE_DIR`)
 - `CLAWDEX_CODEX_PATH` (daemon only; overrides `codex.path`)
+- `CLAWDEX_BLOCK_VULNERABLE_PLUGINS=1` (optional strict mode: block known vulnerable plugins during install; default is warning-only for compatibility)
 
 Default state layout:
 1. `~/.codex/clawdex/config.json` (optional)

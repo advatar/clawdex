@@ -46,7 +46,7 @@ Upstream Sync (Submodules):
   - [x] Security sweep on each openclaw bump: review published GH advisories + merged security PRs, run dependency audit, and patch/backport applicable fixes.
   - [x] Add `plugins/get-shit-done/` submodule support to the bundled-plugin flow (auto-install + Codex skills sync), including parsing Claude Code-style command frontmatter and rewriting `~/.claude/...` paths to `${CLAUDE_PLUGIN_ROOT}/...` for portability.
   - [x] Fix plugin disable/remove cleanup for command-derived skills that are not namespaced with the plugin id (e.g. `gsd:*` from `get-shit-done`).
-  - [x] Mitigate bundled OpenClaw extension supply risk: block `matrix` plugin installs and skip/auto-remove preinstalled `matrix` while upstream still carries `request` GHSA-p8p7-x288-28g6 (moderate SSRF) transitively.
+  - [x] Mitigate bundled OpenClaw extension supply risk: retain `matrix` vulnerability notice (GHSA-p8p7-x288-28g6 in transitive `request`) with optional strict blocking via `CLAWDEX_BLOCK_VULNERABLE_PLUGINS=1` (default warning-only for upstream compatibility).
   - [x] Harden gateway attachment data reads to resolve by attachment id only (ignore index `path` field) and reject traversal-style ids with regression tests.
   - [x] Add daemon admin parity surface: `/admin` dashboard + `/v1/admin/*` APIs for overview, plugins, gateway channels, permissions, and config patching.
   - [x] Backport OpenClaw install-script hardening: add `--ignore-scripts` to npm dependency installs during plugin setup.
@@ -55,7 +55,7 @@ Upstream Sync (Submodules):
   - [x] Backport OpenClaw auth hardening: use constant-time secret comparison for configured gateway token/password checks.
   - [x] Parity sweep for OpenClaw `1567d6cbb..19f8b6bf4`: scan `src/agents/tools` + `src/gateway/protocol/schema`, port applicable behavior into `clawdex`, and add/update compat tests + schemas.
   - [x] Port OpenClaw cron session-namespace parity: support `cron.sessionKey` (normalize/patch/migration), prefer session-key route resolution for announce delivery, and expose `sessionKey` in cron + `channels.resolve_target` schemas with regression tests.
-  - [ ] Plugin/skills parity sweep: accept OpenClaw manifest-defined `skills`/`commands` component paths and remove hard plugin blocklists so all upstream OpenClaw plugins remain installable (with warning-only vulnerable dependency notice).
+  - [x] Plugin/skills parity sweep: accept OpenClaw manifest-defined `skills`/`commands` component paths and remove hard plugin blocklists so all upstream OpenClaw plugins remain installable (with warning-only vulnerable dependency notice).
 
 - [x] Add artifact service tools (xlsx/pptx/docx/pdf) with schema validation + hashing
 - [x] Record artifact events and list outputs at end of task runs
