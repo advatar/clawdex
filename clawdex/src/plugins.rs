@@ -323,6 +323,8 @@ struct PluginAssets {
     has_mcp: bool,
 }
 
+pub type InstalledPlugin = PluginRecord;
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ValidationReport {
     pub errors: Vec<String>,
@@ -1421,6 +1423,11 @@ pub fn sync_plugins_command(
     let store = TaskStore::open(&paths)?;
     let plugins = store.list_plugins(true)?;
     let policy = resolve_mcp_policy(&cfg);
+    let enabled_plugins = plugins
+        .iter()
+        .filter(|plugin| plugin.enabled)
+        .cloned()
+        .collect::<Vec<InstalledPlugin>>();
     let mut synced = Vec::new();
     for plugin in plugins {
         if plugin.enabled {
@@ -1430,6 +1437,7 @@ pub fn sync_plugins_command(
             remove_plugin_skills(&paths, &plugin.id)?;
         }
     }
+    sync_enabled_plugins_overlay(&paths.state_dir, &enabled_plugins)?;
     Ok(json!({ "synced": synced }))
 }
 
@@ -2136,6 +2144,104 @@ fn codex_home_dir(paths: &ClawdPaths) -> PathBuf {
 
 fn plugin_overlay_root(paths: &ClawdPaths) -> PathBuf {
     codex_home_dir(paths).join("skills").join("_clawdex_plugins")
+}
+
+fn canonical_overlay_root(state_dir: &Path) -> PathBuf {
+    state_dir.join("plugin_overlay")
+}
+
+fn canonical_overlay_skills_root(state_dir: &Path) -> PathBuf {
+    canonical_overlay_root(state_dir).join("skills")
+}
+
+pub fn sync_enabled_plugins_overlay(
+    state_dir: &Path,
+    enabled_plugins: &[InstalledPlugin],
+) -> Result<()> {
+    let overlay_root = canonical_overlay_root(state_dir);
+    let overlay_skills_root = canonical_overlay_skills_root(state_dir);
+    if overlay_root.exists() {
+        fs::remove_dir_all(&overlay_root)
+            .with_context(|| format!("remove {}", overlay_root.display()))?;
+    }
+    ensure_dir(&overlay_skills_root)?;
+
+    for plugin in enabled_plugins {
+        let plugin_root = Path::new(&plugin.path);
+        build_plugin_skills_overlay(plugin_root, &overlay_skills_root)?;
+    }
+
+    ensure_overlay_link(state_dir)?;
+    generate_merged_mcp_config(state_dir, enabled_plugins)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_overlay_link(state_dir: &Path) -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let codex_skills_dir = state_dir.join("codex").join("skills");
+    let overlay_skills_dir = canonical_overlay_skills_root(state_dir);
+    ensure_dir(&codex_skills_dir)?;
+
+    let link_path = codex_skills_dir.join("_clawdex_plugins");
+    if let Ok(meta) = fs::symlink_metadata(&link_path) {
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            fs::remove_dir_all(&link_path)
+                .with_context(|| format!("remove {}", link_path.display()))?;
+        } else {
+            fs::remove_file(&link_path)
+                .with_context(|| format!("remove {}", link_path.display()))?;
+        }
+    }
+
+    symlink(&overlay_skills_dir, &link_path)
+        .with_context(|| format!("symlink {} -> {}", link_path.display(), overlay_skills_dir.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_overlay_link(_state_dir: &Path) -> Result<()> {
+    Ok(())
+}
+
+pub fn generate_merged_mcp_config(
+    state_dir: &Path,
+    enabled_plugins: &[InstalledPlugin],
+) -> Result<()> {
+    let mut mcp_servers = Map::new();
+    for plugin in enabled_plugins {
+        let plugin_root = Path::new(&plugin.path);
+        let value = match read_plugin_mcp(plugin_root) {
+            Ok(Some(value)) => value,
+            Ok(None) => continue,
+            Err(err) => {
+                eprintln!(
+                    "[clawdex][plugins] warning: failed to read plugin MCP config for {}: {err}",
+                    plugin.id
+                );
+                continue;
+            }
+        };
+        let candidate = value
+            .get("mcpServers")
+            .and_then(|v| v.as_object())
+            .or_else(|| value.as_object());
+        let Some(servers) = candidate else { continue };
+        for (name, server) in servers {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            mcp_servers.insert(format!("{}:{}", plugin.id, trimmed), server.clone());
+        }
+    }
+
+    let out_dir = canonical_overlay_root(state_dir).join("mcp");
+    ensure_dir(&out_dir)?;
+    let out = out_dir.join("merged_plugins.json");
+    write_json_value(&out, &json!({ "mcpServers": mcp_servers }))?;
+    Ok(())
 }
 
 pub fn build_plugin_skills_overlay(plugin_root: &Path, overlay_root: &Path) -> Result<PathBuf> {
@@ -3523,6 +3629,82 @@ Do the thing.
             contents.contains("# Plan Week"),
             "expected original command markdown body"
         );
+    }
+
+    #[test]
+    fn sync_enabled_plugins_overlay_writes_canonical_overlay_and_merged_mcp() {
+        let tmp = TempDir::new("clawdex-test-");
+        let state_dir = tmp.path.as_path();
+        let plugin_dir = state_dir.join("plugins").join("phase2-plugin");
+        ensure_dir(&plugin_dir).expect("mkdir plugin");
+        ensure_dir(&plugin_dir.join(".claude-plugin")).expect("mkdir manifest");
+        ensure_dir(&plugin_dir.join("skills").join("planner")).expect("mkdir skills");
+        fs::write(
+            plugin_dir.join(".claude-plugin").join("plugin.json"),
+            r#"{
+  "id": "phase2-plugin",
+  "name": "Phase2 Plugin",
+  "skills": ["./skills"]
+}"#,
+        )
+        .expect("write manifest");
+        fs::write(
+            plugin_dir.join("skills").join("planner").join("SKILL.md"),
+            "---\nname: planner\n---\nPlan.\n",
+        )
+        .expect("write skill");
+        fs::write(
+            plugin_dir.join(".mcp.json"),
+            r#"{
+  "mcpServers": {
+    "local": {
+      "command": "echo",
+      "args": ["hello"]
+    }
+  }
+}"#,
+        )
+        .expect("write mcp");
+
+        let plugin = PluginRecord {
+            id: "phase2-plugin".to_string(),
+            name: "Phase2 Plugin".to_string(),
+            version: None,
+            description: None,
+            source: None,
+            path: plugin_dir.to_string_lossy().to_string(),
+            enabled: true,
+            installed_at_ms: 0,
+            updated_at_ms: 0,
+        };
+        sync_enabled_plugins_overlay(state_dir, &[plugin]).expect("sync overlay");
+
+        let skill_md = state_dir
+            .join("plugin_overlay")
+            .join("skills")
+            .join("phase2-plugin")
+            .join("phase2-plugin:planner")
+            .join("SKILL.md");
+        assert!(skill_md.exists(), "expected canonical overlay skill");
+
+        let merged_mcp = state_dir
+            .join("plugin_overlay")
+            .join("mcp")
+            .join("merged_plugins.json");
+        let merged = read_to_string(&merged_mcp).expect("read merged mcp");
+        assert!(
+            merged.contains("\"phase2-plugin:local\""),
+            "expected namespaced merged mcp server, got {merged}"
+        );
+
+        #[cfg(unix)]
+        {
+            let link_path = state_dir.join("codex").join("skills").join("_clawdex_plugins");
+            let meta = fs::symlink_metadata(&link_path).expect("lstat link");
+            assert!(meta.file_type().is_symlink(), "expected symlink at codex skills");
+            let target = fs::read_link(&link_path).expect("read link");
+            assert_eq!(target, state_dir.join("plugin_overlay").join("skills"));
+        }
     }
 
     #[test]

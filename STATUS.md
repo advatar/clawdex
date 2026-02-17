@@ -1,6 +1,9 @@
 # Status
 
 Active:
+- [x] Integrate `clawdex_phase2_5_overlay.patch` by adding canonical plugin-overlay sync helpers (overlay rebuild + Codex link + merged MCP output).
+- [x] Integrate `clawdex_phase2_5_compliance.patch` by adding a lightweight `policies` module (`RiskLevel`, `ActionIntent`, checkpoint helpers).
+- [x] Integrate `clawdex_phase3_arguments_preprocess.patch` by adding a standalone `skill_renderer::render_skill` helper with argument substitution + optional shell preprocess lines.
 - [x] Integrate `clawdex_phase2_claude_plugins.patch` deltas by adding a standalone `build_plugin_skills_overlay(plugin_root, overlay_root)` entrypoint in `clawdex/src/plugins.rs`.
 - [x] Integrate `clawdex_phase0_phase1_claude_plugins.patch` deltas into current Rust layout (`plugin_validate` bridge + plugin directory validator).
 - [x] Reset `openclaw` submodule to repo-pinned SHA, sync to latest `openclaw/main`, and port newly applicable upstream parity changes into `clawdex`.
