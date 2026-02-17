@@ -11,6 +11,8 @@
 //! - We keep `raw` JSON for unknown future fields (serde(flatten)).
 //! - We preserve “inline vs file” variants (hooks/mcp/lsp).
 
+#![allow(non_snake_case)]
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -299,8 +301,8 @@ pub struct PluginSourceObject {
     pub repo: Option<String>, // github
     #[serde(default)]
     pub url: Option<String>, // git url ending .git
-    #[serde(default)]
-    pub ref: Option<String>, // branch/tag
+    #[serde(default, rename = "ref")]
+    pub git_ref: Option<String>, // branch/tag
     #[serde(default)]
     pub sha: Option<String>, // full 40-char commit
     #[serde(default)]
@@ -308,4 +310,3 @@ pub struct PluginSourceObject {
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
-

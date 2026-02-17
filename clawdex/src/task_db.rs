@@ -194,6 +194,46 @@ impl TaskStore {
                 updated_at_ms INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS plugin_marketplaces (
+                name TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                pinned_ref TEXT,
+                added_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                last_sync_at_ms INTEGER,
+                etag TEXT,
+                raw_json TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS marketplace_plugins (
+                marketplace_name TEXT NOT NULL,
+                plugin_name TEXT NOT NULL,
+                description TEXT,
+                version TEXT,
+                author_json TEXT,
+                category TEXT,
+                tags_json TEXT,
+                strict INTEGER NOT NULL DEFAULT 1,
+                source_json TEXT NOT NULL,
+                entry_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (marketplace_name, plugin_name),
+                FOREIGN KEY (marketplace_name) REFERENCES plugin_marketplaces(name) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS plugin_errors (
+                id TEXT PRIMARY KEY,
+                plugin_id TEXT,
+                marketplace TEXT,
+                scope TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                message TEXT NOT NULL,
+                details_json TEXT,
+                created_at_ms INTEGER NOT NULL,
+                resolved_at_ms INTEGER
+            );
+
             CREATE INDEX IF NOT EXISTS idx_task_runs_task_id ON task_runs(task_id);
             CREATE INDEX IF NOT EXISTS idx_task_policies_updated ON task_policies(updated_at_ms);
             CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(task_run_id, ts_ms);
@@ -201,6 +241,8 @@ impl TaskStore {
             CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(task_run_id, created_at_ms);
             CREATE INDEX IF NOT EXISTS idx_plugins_enabled ON plugins(enabled, updated_at_ms);
             CREATE INDEX IF NOT EXISTS idx_run_controls_cancel ON run_controls(cancel_requested, cancel_requested_at_ms);
+            CREATE INDEX IF NOT EXISTS idx_marketplace_plugins_marketplace ON marketplace_plugins(marketplace_name, plugin_name);
+            CREATE INDEX IF NOT EXISTS idx_plugin_errors_unresolved ON plugin_errors(resolved_at_ms);
             "#,
         )?;
         self.ensure_approval_evidence_column()?;

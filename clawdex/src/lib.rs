@@ -2,6 +2,7 @@ pub mod app_server;
 pub mod artifacts;
 pub mod audit;
 pub mod approvals;
+pub mod claude_plugins;
 pub mod config;
 pub mod cron;
 pub mod daemon;

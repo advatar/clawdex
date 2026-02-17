@@ -2,6 +2,7 @@
 
 Active:
 - [x] Reset `openclaw` submodule to repo-pinned SHA, sync to latest `openclaw/main`, and port newly applicable upstream parity changes into `clawdex`.
+- [x] Integrate `clawdex_claude_plugins_artifacts` into runtime wiring (compile schema module + DB marketplace/error migrations).
 - [x] Close LLM-OS alignment gaps (policy enforcement, explicit controller states, context budgeting).
   - [x] Enforce `permissions.mcp` allow/deny + per-server policy at built-in MCP tool dispatch.
   - [x] Add explicit `plan -> act -> verify` controller-state events for task/cron runs.
