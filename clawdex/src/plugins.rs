@@ -2138,6 +2138,100 @@ fn plugin_overlay_root(paths: &ClawdPaths) -> PathBuf {
     codex_home_dir(paths).join("skills").join("_clawdex_plugins")
 }
 
+pub fn build_plugin_skills_overlay(plugin_root: &Path, overlay_root: &Path) -> Result<PathBuf> {
+    let manifest = load_plugin_manifest(plugin_root)?;
+    let plugin_namespace = sanitize_overlay_component(&manifest.id);
+    let plugin_overlay_root = overlay_root.join(&plugin_namespace);
+    if plugin_overlay_root.exists() {
+        fs::remove_dir_all(&plugin_overlay_root)
+            .with_context(|| format!("remove {}", plugin_overlay_root.display()))?;
+    }
+    ensure_dir(&plugin_overlay_root)?;
+
+    let component_paths = resolve_plugin_component_paths(plugin_root)?;
+    let skill_dirs = collect_skill_dirs_from_paths(&component_paths.skills)?;
+    let command_paths = collect_command_sources(&component_paths.commands)?;
+    let plugin_source = plugin_root.to_string_lossy().to_string();
+
+    let mut skill_names = HashSet::new();
+    for skill_dir in skill_dirs {
+        let raw_skill_name = skill_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("skill");
+        let namespaced = format!(
+            "{}:{}",
+            plugin_namespace,
+            sanitize_overlay_component(raw_skill_name)
+        );
+        if !skill_names.insert(namespaced.clone()) {
+            continue;
+        }
+        let dest = plugin_overlay_root.join(&namespaced);
+        if dest.exists() {
+            fs::remove_dir_all(&dest).with_context(|| format!("remove {}", dest.display()))?;
+        }
+        copy_dir(&skill_dir, &dest)?;
+        ensure_namespaced_frontmatter(
+            &dest.join("SKILL.md"),
+            &namespaced,
+            &manifest.id,
+            &manifest.name,
+            &plugin_source,
+        )?;
+    }
+
+    let mut command_names = HashSet::new();
+    for path in command_paths {
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        if path.file_name().and_then(|s| s.to_str()) == Some("SKILL.md") {
+            continue;
+        }
+
+        let raw_command_name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("command");
+        let namespaced = format!(
+            "{}:{}",
+            plugin_namespace,
+            sanitize_overlay_component(raw_command_name)
+        );
+        if skill_names.contains(&namespaced) {
+            continue;
+        }
+        if !command_names.insert(namespaced.clone()) {
+            continue;
+        }
+
+        let source = read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let description = derive_markdown_command_description(&source)
+            .unwrap_or_else(|| format!("Command from plugin {}", manifest.name));
+        let yaml = render_command_frontmatter(
+            &manifest.id,
+            &manifest.name,
+            &plugin_source,
+            &namespaced,
+            Some(&description),
+        )?;
+        let dest = plugin_overlay_root.join(&namespaced);
+        if dest.exists() {
+            fs::remove_dir_all(&dest).with_context(|| format!("remove {}", dest.display()))?;
+        }
+        ensure_dir(&dest)?;
+        let mut generated = format!("---\n{}---\n\n{}", yaml, source);
+        if !generated.ends_with('\n') {
+            generated.push('\n');
+        }
+        fs::write(dest.join("SKILL.md"), generated)
+            .with_context(|| format!("write {}", dest.display()))?;
+    }
+
+    Ok(plugin_overlay_root)
+}
+
 fn legacy_plugin_skill_root(paths: &ClawdPaths, plugin_id: &str) -> PathBuf {
     codex_home_dir(paths)
         .join("skills")
@@ -2269,6 +2363,66 @@ fn collect_plugin_overlay_skill_names(plugin_root: &Path, plugin_id: &str) -> Re
     }
 
     Ok(names)
+}
+
+fn sanitize_overlay_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == ':' {
+            out.push(ch.to_ascii_lowercase());
+        } else if ch.is_whitespace() {
+            out.push('-');
+        }
+    }
+    if out.is_empty() {
+        "x".to_string()
+    } else {
+        out
+    }
+}
+
+fn collect_skill_dirs_from_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for root in paths {
+        if !root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.file_name().and_then(|s| s.to_str()) != Some("SKILL.md") {
+                continue;
+            }
+            let Some(skill_dir) = path.parent() else {
+                continue;
+            };
+            let key = skill_dir.to_string_lossy().to_string();
+            if seen.insert(key) {
+                out.push(skill_dir.to_path_buf());
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn derive_markdown_command_description(md: &str) -> Option<String> {
+    for line in md.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("# ") {
+            return Some(trimmed.trim_start_matches("# ").trim().to_string());
+        }
+    }
+    for line in md.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("```") {
+            continue;
+        }
+        return Some(trimmed.to_string());
+    }
+    None
 }
 
 fn skill_dir_owned_by_plugin(skill_dir: &Path, plugin_id: &str, plugin_root_str: &str) -> bool {
@@ -3277,6 +3431,97 @@ Do the thing.
                 .iter()
                 .any(|path| path.ends_with("commands-default")),
             "expected openclaw manifest commands path to be included"
+        );
+    }
+
+    #[test]
+    fn build_plugin_skills_overlay_imports_skill_dir_and_assets() {
+        let tmp = TempDir::new("clawdex-test-");
+        let plugin_dir = tmp.path.join("phase2-plugin");
+        let overlay_root = tmp.path.join("overlay");
+        ensure_dir(&plugin_dir).expect("mkdir plugin");
+        ensure_dir(&overlay_root).expect("mkdir overlay");
+        ensure_dir(&plugin_dir.join(".claude-plugin")).expect("mkdir manifest");
+        ensure_dir(&plugin_dir.join("skills").join("planner")).expect("mkdir skill dir");
+
+        fs::write(
+            plugin_dir.join(".claude-plugin").join("plugin.json"),
+            r#"{
+  "id": "phase2-plugin",
+  "name": "Phase2 Plugin",
+  "skills": ["./skills"]
+}"#,
+        )
+        .expect("write manifest");
+        fs::write(
+            plugin_dir.join("skills").join("planner").join("SKILL.md"),
+            "---\nname: planner\n---\nUse planner\n",
+        )
+        .expect("write skill");
+        fs::write(
+            plugin_dir.join("skills").join("planner").join("notes.txt"),
+            "support file",
+        )
+        .expect("write asset");
+
+        let built = build_plugin_skills_overlay(&plugin_dir, &overlay_root).expect("build overlay");
+        let skill_dir = built.join("phase2-plugin:planner");
+        assert!(skill_dir.exists(), "expected namespaced skill dir");
+        assert!(
+            skill_dir.join("notes.txt").exists(),
+            "expected full skill directory copy"
+        );
+        let skill_md = read_to_string(&skill_dir.join("SKILL.md")).expect("read namespaced skill");
+        assert!(
+            skill_md.contains("name: phase2-plugin:planner"),
+            "expected namespaced skill name in frontmatter: {skill_md}"
+        );
+    }
+
+    #[test]
+    fn build_plugin_skills_overlay_converts_command_markdown_to_skill_wrapper() {
+        let tmp = TempDir::new("clawdex-test-");
+        let plugin_dir = tmp.path.join("phase2-plugin");
+        let overlay_root = tmp.path.join("overlay");
+        ensure_dir(&plugin_dir).expect("mkdir plugin");
+        ensure_dir(&overlay_root).expect("mkdir overlay");
+        ensure_dir(&plugin_dir.join(".claude-plugin")).expect("mkdir manifest");
+        ensure_dir(&plugin_dir.join("commands")).expect("mkdir commands");
+
+        fs::write(
+            plugin_dir.join(".claude-plugin").join("plugin.json"),
+            r#"{
+  "id": "phase2-plugin",
+  "name": "Phase2 Plugin",
+  "commands": ["./commands"]
+}"#,
+        )
+        .expect("write manifest");
+        fs::write(
+            plugin_dir.join("commands").join("plan-week.md"),
+            "# Plan Week\n\nDraft weekly priorities.\n",
+        )
+        .expect("write command");
+
+        let built = build_plugin_skills_overlay(&plugin_dir, &overlay_root).expect("build overlay");
+        let command_skill_md = built.join("phase2-plugin:plan-week").join("SKILL.md");
+        assert!(command_skill_md.exists(), "expected command skill wrapper");
+        let contents = read_to_string(&command_skill_md).expect("read command skill");
+        assert!(
+            contents.contains("name: phase2-plugin:plan-week"),
+            "expected namespaced command skill name"
+        );
+        assert!(
+            contents.contains("user-invocable: true"),
+            "expected user-invocable flag"
+        );
+        assert!(
+            contents.contains("disable-model-invocation: true"),
+            "expected disable-model-invocation flag"
+        );
+        assert!(
+            contents.contains("# Plan Week"),
+            "expected original command markdown body"
         );
     }
 
