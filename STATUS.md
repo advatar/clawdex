@@ -1,6 +1,7 @@
 # Status
 
 Active:
+- [x] Integrate `clawdex_phase0_phase1_claude_plugins.patch` deltas into current Rust layout (`plugin_validate` bridge + plugin directory validator).
 - [x] Reset `openclaw` submodule to repo-pinned SHA, sync to latest `openclaw/main`, and port newly applicable upstream parity changes into `clawdex`.
 - [x] Integrate `clawdex_claude_plugins_artifacts` into runtime wiring (compile schema module + DB marketplace/error migrations).
 - [x] macOS Plugin Manager UX pass: add OpenClawHub plugin/skill discovery search and guarantee bundled Claude plugins are preinstalled/usable on first run.

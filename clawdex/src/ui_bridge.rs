@@ -323,6 +323,38 @@ pub fn run_ui_bridge(
                     json!({ "type": "plugins_list", "plugins": result.get("plugins") }),
                 )?;
             }
+            Some("plugin_validate") => {
+                let path = payload
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .unwrap_or("");
+                if path.is_empty() {
+                    emit_error(&mut *stdout.borrow_mut(), "plugin_validate missing path")?;
+                    continue;
+                }
+                let plugin_root = PathBuf::from(path);
+                match plugins::validate_plugin_dir(&plugin_root) {
+                    Ok(report) => {
+                        emit_json(
+                            &mut *stdout.borrow_mut(),
+                            json!({
+                                "type": "plugin_validate_result",
+                                "path": path,
+                                "ok": report.errors.is_empty(),
+                                "errors": report.errors,
+                                "warnings": report.warnings,
+                            }),
+                        )?;
+                    }
+                    Err(err) => {
+                        emit_error(
+                            &mut *stdout.borrow_mut(),
+                            &format!("plugin_validate failed: {err}"),
+                        )?;
+                    }
+                }
+            }
             Some("get_config") => {
                 let value = read_config_value(&paths.state_dir)?;
                 emit_json(

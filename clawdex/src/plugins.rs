@@ -232,6 +232,11 @@ struct ClaudePluginManifest {
     permissions: Option<PluginPermissions>,
     skills: Option<ComponentPathSpec>,
     commands: Option<ComponentPathSpec>,
+    agents: Option<ComponentPathSpec>,
+    hooks: Option<ComponentPathSpec>,
+    mcp_servers: Option<ComponentPathSpec>,
+    lsp_servers: Option<ComponentPathSpec>,
+    output_styles: Option<ComponentPathSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -316,6 +321,12 @@ struct PluginAssets {
     skills: usize,
     commands: usize,
     has_mcp: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ValidationReport {
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -544,6 +555,165 @@ fn load_plugin_manifest(root: &Path) -> Result<PluginManifestInfo> {
 
 fn plugin_permissions_for_root(root: &Path) -> Option<PluginPermissions> {
     load_plugin_manifest(root).ok().map(|manifest| manifest.permissions)
+}
+
+pub fn plugin_manifest_path(plugin_root: &Path) -> PathBuf {
+    plugin_root.join(COWORK_MANIFEST_PATH)
+}
+
+pub fn validate_plugin_dir(plugin_root: &Path) -> Result<ValidationReport> {
+    let mut report = ValidationReport::default();
+    if !plugin_root.exists() {
+        report
+            .errors
+            .push(format!("plugin dir does not exist: {}", plugin_root.display()));
+        return Ok(report);
+    }
+    if !plugin_root.is_dir() {
+        report
+            .errors
+            .push(format!("plugin path is not a directory: {}", plugin_root.display()));
+        return Ok(report);
+    }
+
+    let manifest_path = plugin_manifest_path(plugin_root);
+    if manifest_path.exists() {
+        let raw = read_to_string(&manifest_path)
+            .with_context(|| format!("read {}", manifest_path.display()))?;
+        let manifest: ClaudePluginManifest = serde_json::from_str(&raw)
+            .with_context(|| format!("parse {}", manifest_path.display()))?;
+        if manifest
+            .name
+            .as_deref()
+            .map(str::trim)
+            .map_or(true, str::is_empty)
+        {
+            report
+                .errors
+                .push("plugin.json present but missing required field: name".to_string());
+        }
+        validate_manifest_component_paths("commands", manifest.commands.as_ref(), &mut report);
+        validate_manifest_component_paths("agents", manifest.agents.as_ref(), &mut report);
+        validate_manifest_component_paths("skills", manifest.skills.as_ref(), &mut report);
+        validate_manifest_component_paths("hooks", manifest.hooks.as_ref(), &mut report);
+        validate_manifest_component_paths("mcpServers", manifest.mcp_servers.as_ref(), &mut report);
+        validate_manifest_component_paths("lspServers", manifest.lsp_servers.as_ref(), &mut report);
+        validate_manifest_component_paths(
+            "outputStyles",
+            manifest.output_styles.as_ref(),
+            &mut report,
+        );
+    }
+
+    let misplaced_skills_dir = plugin_root.join(".claude-plugin").join("skills");
+    if misplaced_skills_dir.exists() {
+        report.warnings.push(format!(
+            "skills directory found inside .claude-plugin (expected at plugin root: skills/<skill>/SKILL.md): {}",
+            misplaced_skills_dir.display()
+        ));
+    }
+
+    let skills_dir = plugin_root.join("skills");
+    if skills_dir.exists() {
+        if !skills_dir.is_dir() {
+            report
+                .errors
+                .push(format!("skills path is not a directory: {}", skills_dir.display()));
+        } else {
+            let mut skill_md_count = 0usize;
+            for entry in WalkDir::new(&skills_dir).into_iter().filter_map(Result::ok) {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                if path.file_name().and_then(|s| s.to_str()) != Some("SKILL.md") {
+                    continue;
+                }
+                skill_md_count += 1;
+                let rel = path.strip_prefix(&skills_dir).unwrap_or(path);
+                let mut components = rel.components();
+                let first = components.next();
+                let second = components.next();
+                let third = components.next();
+                let invalid_layout = !matches!(
+                    (first, second, third),
+                    (
+                        Some(Component::Normal(_)),
+                        Some(Component::Normal(file)),
+                        None
+                    ) if file == std::ffi::OsStr::new("SKILL.md")
+                );
+                if invalid_layout {
+                    report.errors.push(format!(
+                        "skill file must use skills/<skill>/SKILL.md layout (found: {})",
+                        path.display()
+                    ));
+                }
+            }
+            if skill_md_count == 0 {
+                report.warnings.push(format!(
+                    "skills directory exists but no skills found at skills/<skill>/SKILL.md: {}",
+                    skills_dir.display()
+                ));
+            }
+        }
+    }
+
+    let commands_dir = plugin_root.join("commands");
+    if commands_dir.exists() && !commands_dir.is_dir() {
+        report
+            .errors
+            .push(format!("commands path is not a directory: {}", commands_dir.display()));
+    }
+
+    let mcp_path = plugin_root.join(".mcp.json");
+    if mcp_path.exists() && !mcp_path.is_file() {
+        report
+            .errors
+            .push(format!(".mcp.json exists but is not a file: {}", mcp_path.display()));
+    }
+
+    Ok(report)
+}
+
+fn validate_manifest_component_paths(
+    label: &str,
+    spec: Option<&ComponentPathSpec>,
+    report: &mut ValidationReport,
+) {
+    let Some(spec) = spec else { return };
+    for raw in component_paths_from_spec(spec) {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            report.errors.push(format!("{label} contains empty path"));
+            continue;
+        }
+        if Path::new(trimmed).is_absolute() {
+            report
+                .errors
+                .push(format!("{label} path must be relative (got absolute: {trimmed})"));
+        }
+        if !trimmed.starts_with("./") {
+            report
+                .errors
+                .push(format!("{label} path must start with ./ ({trimmed})"));
+        }
+        let rel = trimmed.trim_start_matches("./");
+        if rel.is_empty() {
+            report
+                .errors
+                .push(format!("{label} path must not be empty ({trimmed})"));
+            continue;
+        }
+        if Path::new(rel)
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            report.errors.push(format!(
+                "{label} path cannot traverse outside plugin root ({trimmed})"
+            ));
+        }
+    }
 }
 
 fn resolve_permission_root(raw: &str, workspace_dir: &Path) -> Option<PathBuf> {
@@ -3107,6 +3277,111 @@ Do the thing.
                 .iter()
                 .any(|path| path.ends_with("commands-default")),
             "expected openclaw manifest commands path to be included"
+        );
+    }
+
+    #[test]
+    fn validate_plugin_dir_reports_manifest_component_path_errors() {
+        let tmp = TempDir::new("clawdex-test-");
+        let plugin_dir = tmp.path.join("bad-plugin");
+        ensure_dir(&plugin_dir).expect("mkdir plugin");
+        ensure_dir(&plugin_dir.join(".claude-plugin")).expect("mkdir manifest dir");
+
+        fs::write(
+            plugin_dir.join(".claude-plugin").join("plugin.json"),
+            r#"{
+  "name": "Bad Plugin",
+  "commands": "commands",
+  "skills": "./../skills",
+  "agents": "/tmp/agents"
+}"#,
+        )
+        .expect("write manifest");
+
+        let report = validate_plugin_dir(&plugin_dir).expect("validate");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("commands path must start with ./")),
+            "expected manifest ./ rule error, got {:?}",
+            report.errors
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("skills path cannot traverse outside plugin root")),
+            "expected traversal error, got {:?}",
+            report.errors
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("agents path must be relative")),
+            "expected absolute path error, got {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn validate_plugin_dir_reports_bad_skills_layout() {
+        let tmp = TempDir::new("clawdex-test-");
+        let plugin_dir = tmp.path.join("bad-skills");
+        ensure_dir(&plugin_dir).expect("mkdir plugin");
+        ensure_dir(&plugin_dir.join("skills")).expect("mkdir skills");
+        fs::write(plugin_dir.join("skills").join("SKILL.md"), "name: bad").expect("write skill");
+        ensure_dir(&plugin_dir.join(".claude-plugin").join("skills"))
+            .expect("mkdir misplaced skills");
+
+        let report = validate_plugin_dir(&plugin_dir).expect("validate");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("skills/<skill>/SKILL.md")),
+            "expected invalid layout error, got {:?}",
+            report.errors
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("inside .claude-plugin")),
+            "expected misplaced skills warning, got {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn validate_plugin_dir_accepts_valid_layout() {
+        let tmp = TempDir::new("clawdex-test-");
+        let plugin_dir = tmp.path.join("good-plugin");
+        ensure_dir(&plugin_dir).expect("mkdir plugin");
+        ensure_dir(&plugin_dir.join(".claude-plugin")).expect("mkdir manifest dir");
+        ensure_dir(&plugin_dir.join("skills").join("planner")).expect("mkdir skill");
+        ensure_dir(&plugin_dir.join("commands")).expect("mkdir commands");
+        fs::write(
+            plugin_dir.join(".claude-plugin").join("plugin.json"),
+            r#"{
+  "name": "Good Plugin",
+  "skills": "./skills",
+  "commands": ["./commands"]
+}"#,
+        )
+        .expect("write manifest");
+        fs::write(
+            plugin_dir.join("skills").join("planner").join("SKILL.md"),
+            "description: valid\n",
+        )
+        .expect("write skill");
+
+        let report = validate_plugin_dir(&plugin_dir).expect("validate");
+        assert!(
+            report.errors.is_empty(),
+            "expected no validation errors, got {:?}",
+            report.errors
         );
     }
 
