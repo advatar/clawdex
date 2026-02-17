@@ -55,6 +55,7 @@ Upstream Sync (Submodules):
   - [x] Backport OpenClaw auth hardening: use constant-time secret comparison for configured gateway token/password checks.
   - [x] Parity sweep for OpenClaw `1567d6cbb..19f8b6bf4`: scan `src/agents/tools` + `src/gateway/protocol/schema`, port applicable behavior into `clawdex`, and add/update compat tests + schemas.
   - [x] Port OpenClaw cron session-namespace parity: support `cron.sessionKey` (normalize/patch/migration), prefer session-key route resolution for announce delivery, and expose `sessionKey` in cron + `channels.resolve_target` schemas with regression tests.
+  - [ ] Plugin/skills parity sweep: accept OpenClaw manifest-defined `skills`/`commands` component paths and remove hard plugin blocklists so all upstream OpenClaw plugins remain installable (with warning-only vulnerable dependency notice).
 
 - [x] Add artifact service tools (xlsx/pptx/docx/pdf) with schema validation + hashing
 - [x] Record artifact events and list outputs at end of task runs
