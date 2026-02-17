@@ -5,6 +5,8 @@ struct PluginsView: View {
     @EnvironmentObject var runtime: RuntimeManager
 
     @State private var selectedPluginId: String?
+    @State private var pluginSearchQuery: String = ""
+    @State private var openClawHubQuery: String = ""
     @State private var npmSpec: String = ""
     @State private var linkInstall: Bool = false
     @State private var removePluginId: String?
@@ -18,6 +20,7 @@ struct PluginsView: View {
         }
         .onAppear {
             runtime.refreshPluginsSnapshot()
+            runtime.searchOpenClawHubSkills(query: openClawHubQuery)
         }
         .alert("Remove plugin?", isPresented: $showRemoveConfirm) {
             Button("Remove", role: .destructive) {
@@ -49,25 +52,34 @@ struct PluginsView: View {
                 }
             }
 
+            TextField("Search installed plugins/skills", text: $pluginSearchQuery)
+                .textFieldStyle(.roundedBorder)
+
             List(selection: $selectedPluginId) {
-                ForEach(runtime.plugins) { plugin in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(plugin.name)
-                            .font(.body)
-                        HStack(spacing: 6) {
-                            if let version = plugin.version, !version.isEmpty {
-                                Text(version)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            if !plugin.enabled {
-                                Text("Disabled")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                if filteredPlugins.isEmpty {
+                    Text("No matching plugins.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(filteredPlugins) { plugin in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(plugin.name)
+                                .font(.body)
+                            HStack(spacing: 6) {
+                                if let version = plugin.version, !version.isEmpty {
+                                    Text(version)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                if !plugin.enabled {
+                                    Text("Disabled")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
+                        .tag(plugin.id)
                     }
-                    .tag(plugin.id)
                 }
             }
 
@@ -78,14 +90,18 @@ struct PluginsView: View {
     }
 
     private var detail: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            header
-            installControls
-            Divider()
-            pluginDetails
-            Spacer()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                header
+                installControls
+                discoveryControls
+                localSkillMatches
+                Divider()
+                pluginDetails
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
         }
-        .padding()
         .frame(minWidth: 520)
     }
 
@@ -143,6 +159,115 @@ struct PluginsView: View {
                     .help("Link keeps the plugin directory in place instead of copying it.")
 
                 Spacer()
+            }
+        }
+    }
+
+    private var discoveryControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Discover (OpenClawHub)")
+                .font(.headline)
+
+            HStack(spacing: 8) {
+                TextField("Search OpenClawHub skills/plugins", text: $openClawHubQuery)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        runtime.searchOpenClawHubSkills(query: openClawHubQuery)
+                    }
+                Button("Search") {
+                    runtime.searchOpenClawHubSkills(query: openClawHubQuery)
+                }
+                .disabled(runtime.openClawHubSearchInFlight)
+                Button("Popular") {
+                    openClawHubQuery = ""
+                    runtime.searchOpenClawHubSkills(query: "")
+                }
+                .disabled(runtime.openClawHubSearchInFlight)
+            }
+
+            if runtime.openClawHubSearchInFlight {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading OpenClawHub results…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else if !runtime.openClawHubSearchStatus.isEmpty {
+                Text(runtime.openClawHubSearchStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if runtime.openClawHubSkills.isEmpty {
+                Text("Search to discover community skills and plugin bundles.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(runtime.openClawHubSkills.prefix(8))) { skill in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(skill.displayName)
+                                    .font(.subheadline)
+                                Spacer()
+                                Text("↓\(skill.downloads) ★\(skill.stars)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text("/\(skill.slug)\(skill.latestVersion.map { " • \($0)" } ?? "")")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if !skill.summary.isEmpty {
+                                Text(skill.summary)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            HStack(spacing: 8) {
+                                Button("Copy Install Cmd") {
+                                    runtime.copyOpenClawHubInstallCommand(slug: skill.slug)
+                                }
+                                .buttonStyle(.bordered)
+                                Button("Open") {
+                                    runtime.openOpenClawHubSkillPage(slug: skill.slug)
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+        }
+    }
+
+    private var localSkillMatches: some View {
+        Group {
+            let matches = filteredPluginCommands
+            if !pluginSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Local Skills / Commands")
+                        .font(.headline)
+                    if matches.isEmpty {
+                        Text("No local skills/commands match \"\(pluginSearchQuery)\".")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(matches.prefix(12))) { command in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(command.pluginId):\(command.command)")
+                                    .font(.caption)
+                                if let description = command.description, !description.isEmpty {
+                                    Text(description)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -218,6 +343,54 @@ struct PluginsView: View {
     private var selectedPlugin: PluginInfo? {
         guard let selectedPluginId else { return nil }
         return runtime.plugins.first { $0.id == selectedPluginId }
+    }
+
+    private var filteredPlugins: [PluginInfo] {
+        let query = pluginSearchQuery
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !query.isEmpty else {
+            return runtime.plugins
+        }
+        return runtime.plugins.filter { plugin in
+            let fields = [
+                plugin.id,
+                plugin.name,
+                plugin.version ?? "",
+                plugin.description ?? "",
+                plugin.source ?? "",
+                plugin.path ?? "",
+            ].joined(separator: " ").lowercased()
+            if fields.contains(query) {
+                return true
+            }
+            return runtime.pluginCommands.contains { command in
+                guard command.pluginId == plugin.id else { return false }
+                let commandFields = [
+                    command.command,
+                    command.description ?? "",
+                ].joined(separator: " ").lowercased()
+                return commandFields.contains(query)
+            }
+        }
+    }
+
+    private var filteredPluginCommands: [PluginCommand] {
+        let query = pluginSearchQuery
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !query.isEmpty else {
+            return runtime.pluginCommands
+        }
+        return runtime.pluginCommands.filter { command in
+            let fields = [
+                command.pluginId,
+                command.pluginName,
+                command.command,
+                command.description ?? "",
+            ].joined(separator: " ").lowercased()
+            return fields.contains(query)
+        }
     }
 
     private func choosePluginFolder() {

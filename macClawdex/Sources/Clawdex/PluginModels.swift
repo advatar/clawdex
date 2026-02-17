@@ -36,3 +36,16 @@ struct PluginCommand: Identifiable, Hashable {
     let command: String
     let description: String?
 }
+
+struct OpenClawHubSkill: Identifiable, Hashable {
+    let id: String
+    let slug: String
+    let displayName: String
+    let summary: String
+    let latestVersion: String?
+    let downloads: Int
+    let stars: Int
+    let installsAllTime: Int
+    let installsCurrent: Int
+    let versions: Int
+}

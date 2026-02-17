@@ -43,7 +43,7 @@ services:
       - workspace_dir
   - name: macclawdex-app
     owner: macClawdex
-    description: SwiftUI macOS app shell. Publishes MBP2P peer-assist events with multi-relay bootstrap, decentralized discovery, and fallback publish attempts (manual `/peers` plus optional auto triggers for second-opinion/stuck/discussion cadence).
+    description: SwiftUI macOS app shell. Publishes MBP2P peer-assist events with multi-relay bootstrap, decentralized discovery, and fallback publish attempts (manual `/peers` plus optional auto triggers for second-opinion/stuck/discussion cadence). Plugin Manager supports installed plugin/skill search plus OpenClawHub discovery, and passes bundled Claude plugin path to clawdex runtime for first-run auto-install.
     command: Clawdex.app (Xcode scheme: Clawdex)
     ports: []
     health: none

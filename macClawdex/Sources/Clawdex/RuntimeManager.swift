@@ -12,6 +12,9 @@ final class RuntimeManager: ObservableObject {
     @Published private(set) var gatewayRunning: Bool = false
     @Published private(set) var pluginOperationInFlight: Bool = false
     @Published private(set) var pluginOperationStatus: String = ""
+    @Published private(set) var openClawHubSkills: [OpenClawHubSkill] = []
+    @Published private(set) var openClawHubSearchInFlight: Bool = false
+    @Published private(set) var openClawHubSearchStatus: String = ""
 
     private var appState: AppState?
     private var process: Process?
@@ -27,6 +30,9 @@ final class RuntimeManager: ObservableObject {
     private var workspaceURL: URL?
     private var lastAutoPeerHelpAt: Date?
     private var lastAutoPeerDiscussionAt: Date?
+    private var openClawHubSearchWorkItem: DispatchWorkItem?
+    private var openClawHubCachedSkills: [OpenClawHubSkill] = []
+    private var openClawHubCacheTimestamp: Date?
 
     private var cancellables = Set<AnyCancellable>()
     private let toolsInstallLock = NSLock()
@@ -38,6 +44,11 @@ final class RuntimeManager: ObservableObject {
     private let toolsVersion = "0.3.0"
     private let openclawPluginsVersion = "2"
     private let openclawPluginsSourceLabel = "bundled-openclaw"
+    private let bundledClaudePluginsEnv = "CLAWDEX_BUNDLED_CLAUDE_PLUGINS_DIR"
+    private let openClawHubApiBaseEnv = "CLAWDEX_OPENCLAWHUB_API_BASE"
+    private let openClawHubCacheTTLSeconds: TimeInterval = 5 * 60
+    private let openClawHubPageSize = 50
+    private let openClawHubMaxResults = 300
     private let autoPeerHelpCooldownSeconds: TimeInterval = 8 * 60
     private let blockedBundledOpenClawPlugins: [String: String] = [
         "matrix": "Blocked due to GHSA-p8p7-x288-28g6 (`request` SSRF) in transitive dependency chain."
@@ -160,6 +171,7 @@ final class RuntimeManager: ObservableObject {
             var env = ProcessInfo.processInfo.environment
             env["OPENAI_API_KEY"] = openAIKey
             env["CLAWDEX_APP"] = "1"
+            applyClawdexEnvironmentOverrides(&env)
             p.environment = env
 
             // Pipes
@@ -184,6 +196,7 @@ final class RuntimeManager: ObservableObject {
             appendLog("[app] Started clawdex (pid \(p.processIdentifier))")
             requestConfig()
             requestPlugins()
+            requestPluginCommands()
             requestEventSubscription()
 
         } catch {
@@ -564,9 +577,74 @@ final class RuntimeManager: ObservableObject {
     func refreshPluginsSnapshot() {
         if isRunning {
             requestPlugins()
+            requestPluginCommands()
             return
         }
         refreshPluginsViaCli()
+        refreshPluginCommandsViaCli()
+    }
+
+    func searchOpenClawHubSkills(query: String) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        openClawHubSearchWorkItem?.cancel()
+
+        openClawHubSearchInFlight = true
+        openClawHubSearchStatus = "Searching OpenClawHub…"
+
+        let weakSelf = WeakRuntimeManager(self)
+        let work = DispatchWorkItem {
+            guard let self = weakSelf.value else { return }
+            do {
+                let skills = try self.loadOpenClawHubSkillsIndex()
+                if Thread.current.isCancelled {
+                    return
+                }
+                let filtered = self.filterOpenClawHubSkills(skills, query: trimmed)
+                Task { @MainActor in
+                    weakSelf.value?.openClawHubSkills = filtered
+                    weakSelf.value?.openClawHubSearchInFlight = false
+                    if trimmed.isEmpty {
+                        weakSelf.value?.openClawHubSearchStatus = filtered.isEmpty
+                            ? "No skills found."
+                            : "Showing popular skills from OpenClawHub."
+                    } else {
+                        weakSelf.value?.openClawHubSearchStatus = filtered.isEmpty
+                            ? "No OpenClawHub skills matched \"\(trimmed)\"."
+                            : "Found \(filtered.count) matching skills."
+                    }
+                }
+            } catch {
+                Task { @MainActor in
+                    weakSelf.value?.openClawHubSearchInFlight = false
+                    weakSelf.value?.openClawHubSearchStatus = "OpenClawHub search failed: \(error.localizedDescription)"
+                    weakSelf.value?.appendLog("[app] OpenClawHub search failed: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        openClawHubSearchWorkItem = work
+        DispatchQueue.global(qos: .utility).async(execute: work)
+    }
+
+    func openOpenClawHubSkillPage(slug: String) {
+        let trimmed = slug.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        guard var components = URLComponents(string: "https://clawhub.ai/skills") else { return }
+        components.queryItems = [
+            URLQueryItem(name: "q", value: trimmed),
+            URLQueryItem(name: "focus", value: "search"),
+        ]
+        guard let url = components.url else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func copyOpenClawHubInstallCommand(slug: String) {
+        let trimmed = slug.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let command = "npx clawhub@latest install \(trimmed)"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+        pluginOperationStatus = "Copied install command for \(trimmed)."
     }
 
     func ensureGatewayRunning() {
@@ -773,6 +851,41 @@ final class RuntimeManager: ObservableObject {
         }
     }
 
+    private func refreshPluginCommandsViaCli() {
+        let weakSelf = WeakRuntimeManager(self)
+        DispatchQueue.global(qos: .utility).async {
+            guard let self = weakSelf.value else { return }
+            do {
+                try self.installToolsIfNeeded(force: false)
+                let toolPaths = try self.toolInstallPaths()
+                let stateDir = try self.ensureStateDir()
+                var args = [
+                    "plugins",
+                    "commands",
+                    "list",
+                    "--state-dir",
+                    stateDir.path,
+                ]
+                if let workspaceURL = self.workspaceURL {
+                    args += ["--workspace", workspaceURL.path]
+                }
+                let result = try self.runClawdexCommand(clawdexURL: toolPaths.clawdex, args: args)
+                guard let data = result.stdout.data(using: .utf8),
+                      let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let commands = obj["commands"] as? [[String: Any]] else {
+                    return
+                }
+                Task { @MainActor in
+                    weakSelf.value?.applyPluginCommands(commands)
+                }
+            } catch {
+                Task { @MainActor in
+                    weakSelf.value?.appendLog("[app] Plugin command list failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
     private func runPluginManagerCommand(args: [String], label: String) {
         guard !pluginOperationInFlight else { return }
         pluginOperationInFlight = true
@@ -812,6 +925,261 @@ final class RuntimeManager: ObservableObject {
                 }
             }
         }
+    }
+
+    private func loadOpenClawHubSkillsIndex() throws -> [OpenClawHubSkill] {
+        let now = Date()
+        if !openClawHubCachedSkills.isEmpty,
+           let fetchedAt = openClawHubCacheTimestamp,
+           now.timeIntervalSince(fetchedAt) < openClawHubCacheTTLSeconds {
+            return openClawHubCachedSkills
+        }
+
+        var lastError: Error?
+        for baseURL in openClawHubApiBaseCandidates() {
+            do {
+                var merged: [String: OpenClawHubSkill] = [:]
+                try fetchOpenClawHubSkillPages(
+                    baseURL: baseURL,
+                    limit: openClawHubPageSize,
+                    maxPages: 4,
+                    sort: "downloads",
+                    dir: "desc",
+                    into: &merged
+                )
+                try fetchOpenClawHubSkillPages(
+                    baseURL: baseURL,
+                    limit: openClawHubPageSize,
+                    maxPages: 2,
+                    sort: nil,
+                    dir: nil,
+                    into: &merged
+                )
+
+                if merged.isEmpty {
+                    continue
+                }
+
+                let sorted = merged.values.sorted { lhs, rhs in
+                    if lhs.downloads == rhs.downloads {
+                        return lhs.stars > rhs.stars
+                    }
+                    return lhs.downloads > rhs.downloads
+                }
+                let capped = Array(sorted.prefix(openClawHubMaxResults))
+                openClawHubCachedSkills = capped
+                openClawHubCacheTimestamp = now
+                return capped
+            } catch {
+                lastError = error
+            }
+        }
+
+        throw lastError ?? NSError(
+            domain: "Clawdex",
+            code: 41_001,
+            userInfo: [NSLocalizedDescriptionKey: "Unable to reach OpenClawHub API."]
+        )
+    }
+
+    private func openClawHubApiBaseCandidates() -> [URL] {
+        var out: [URL] = []
+        if let envBase = ProcessInfo.processInfo.environment[openClawHubApiBaseEnv]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !envBase.isEmpty,
+            let url = URL(string: envBase) {
+            out.append(url)
+        }
+        if let convex = URL(string: "https://wry-manatee-359.convex.site") {
+            out.append(convex)
+        }
+        if let web = URL(string: "https://clawhub.ai") {
+            out.append(web)
+        }
+        return out
+    }
+
+    private func fetchOpenClawHubSkillPages(
+        baseURL: URL,
+        limit: Int,
+        maxPages: Int,
+        sort: String?,
+        dir: String?,
+        into output: inout [String: OpenClawHubSkill]
+    ) throws {
+        var cursor: String?
+        for _ in 0..<maxPages {
+            if Thread.current.isCancelled {
+                return
+            }
+            let page = try fetchOpenClawHubSkillPage(
+                baseURL: baseURL,
+                limit: limit,
+                cursor: cursor,
+                sort: sort,
+                dir: dir
+            )
+            guard let items = page["items"] as? [[String: Any]], !items.isEmpty else {
+                return
+            }
+            for item in items {
+                if let skill = parseOpenClawHubSkill(item) {
+                    output[skill.slug] = skill
+                }
+            }
+            let next = (page["nextCursor"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let next, !next.isEmpty {
+                cursor = next
+            } else {
+                return
+            }
+        }
+    }
+
+    private func fetchOpenClawHubSkillPage(
+        baseURL: URL,
+        limit: Int,
+        cursor: String?,
+        sort: String?,
+        dir: String?
+    ) throws -> [String: Any] {
+        guard var components = URLComponents(
+            url: baseURL.appendingPathComponent("/api/v1/skills"),
+            resolvingAgainstBaseURL: false
+        ) else {
+            throw NSError(
+                domain: "Clawdex",
+                code: 41_002,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid OpenClawHub API URL."]
+            )
+        }
+
+        var queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+        if let cursor, !cursor.isEmpty {
+            queryItems.append(URLQueryItem(name: "cursor", value: cursor))
+        }
+        if let sort, !sort.isEmpty {
+            queryItems.append(URLQueryItem(name: "sort", value: sort))
+        }
+        if let dir, !dir.isEmpty {
+            queryItems.append(URLQueryItem(name: "dir", value: dir))
+        }
+        components.queryItems = queryItems
+
+        guard let url = components.url else {
+            throw NSError(
+                domain: "Clawdex",
+                code: 41_003,
+                userInfo: [NSLocalizedDescriptionKey: "Failed to build OpenClawHub request URL."]
+            )
+        }
+
+        let data = try Data(contentsOf: url)
+        let json = try JSONSerialization.jsonObject(with: data)
+        guard let object = json as? [String: Any] else {
+            throw NSError(
+                domain: "Clawdex",
+                code: 41_004,
+                userInfo: [NSLocalizedDescriptionKey: "Unexpected OpenClawHub response shape."]
+            )
+        }
+        return object
+    }
+
+    private func parseOpenClawHubSkill(_ raw: [String: Any]) -> OpenClawHubSkill? {
+        guard let slug = (raw["slug"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !slug.isEmpty else { return nil }
+
+        let displayName = ((raw["displayName"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines))
+            .flatMap { $0.isEmpty ? nil : $0 } ?? slug
+        let summary = (raw["summary"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let stats = raw["stats"] as? [String: Any] ?? [:]
+        let tags = raw["tags"] as? [String: Any] ?? [:]
+        let latestVersion = (tags["latest"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return OpenClawHubSkill(
+            id: slug,
+            slug: slug,
+            displayName: displayName,
+            summary: summary,
+            latestVersion: latestVersion,
+            downloads: intFromAny(stats["downloads"]) ?? 0,
+            stars: intFromAny(stats["stars"]) ?? 0,
+            installsAllTime: intFromAny(stats["installsAllTime"]) ?? 0,
+            installsCurrent: intFromAny(stats["installsCurrent"]) ?? 0,
+            versions: intFromAny(stats["versions"]) ?? 0
+        )
+    }
+
+    private func filterOpenClawHubSkills(_ all: [OpenClawHubSkill], query: String) -> [OpenClawHubSkill] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if trimmed.isEmpty {
+            return Array(
+                all
+                    .sorted { lhs, rhs in
+                        if lhs.downloads == rhs.downloads {
+                            return lhs.stars > rhs.stars
+                        }
+                        return lhs.downloads > rhs.downloads
+                    }
+                    .prefix(40)
+            )
+        }
+
+        let tokens = trimmed
+            .split(separator: " ")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if tokens.isEmpty {
+            return Array(all.prefix(40))
+        }
+
+        let ranked = all.compactMap { skill -> (OpenClawHubSkill, Int)? in
+            let slug = skill.slug.lowercased()
+            let name = skill.displayName.lowercased()
+            let summary = skill.summary.lowercased()
+            let haystack = "\(slug) \(name) \(summary)"
+            var score = 0
+            for token in tokens {
+                guard haystack.contains(token) else {
+                    return nil
+                }
+                if slug.hasPrefix(token) || name.hasPrefix(token) {
+                    score += 80
+                }
+                if slug.contains(token) {
+                    score += 40
+                }
+                if name.contains(token) {
+                    score += 35
+                }
+                if summary.contains(token) {
+                    score += 20
+                }
+            }
+            score += min(skill.downloads / 200, 50)
+            score += min(skill.stars / 5, 25)
+            return (skill, score)
+        }
+
+        return ranked
+            .sorted { lhs, rhs in
+                if lhs.1 == rhs.1 {
+                    if lhs.0.downloads == rhs.0.downloads {
+                        return lhs.0.stars > rhs.0.stars
+                    }
+                    return lhs.0.downloads > rhs.0.downloads
+                }
+                return lhs.1 > rhs.1
+            }
+            .map { $0.0 }
+            .prefix(40)
+            .map { $0 }
     }
 
     private func normalizeCitationsMode(_ raw: String) -> String {
@@ -1082,6 +1450,7 @@ final class RuntimeManager: ObservableObject {
 
         var env = ProcessInfo.processInfo.environment
         env["CLAWDEX_APP"] = "1"
+        applyClawdexEnvironmentOverrides(&env)
         process.environment = env
 
         let outPipe = Pipe()
@@ -1107,6 +1476,23 @@ final class RuntimeManager: ObservableObject {
         }
         return (stdout.trimmingCharacters(in: .whitespacesAndNewlines),
                 stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func applyClawdexEnvironmentOverrides(_ env: inout [String: String]) {
+        if let bundledDir = bundledClaudePluginsDir() {
+            env[bundledClaudePluginsEnv] = bundledDir.path
+        }
+    }
+
+    private func bundledClaudePluginsDir() -> URL? {
+        guard let bundled = Bundle.main.resourceURL?
+            .appendingPathComponent("claude-plugins", isDirectory: true) else {
+            return nil
+        }
+        guard FileManager.default.fileExists(atPath: bundled.path) else {
+            return nil
+        }
+        return bundled
     }
 
     private func toolInstallPaths() throws -> (codex: URL, clawdex: URL, clawdexd: URL) {
@@ -1263,6 +1649,7 @@ final class RuntimeManager: ObservableObject {
             env["OPENAI_API_KEY"] = openAIKey
         }
         env["CLAWDEX_APP"] = "1"
+        applyClawdexEnvironmentOverrides(&env)
         p.environment = env
 
         let outPipe = Pipe()
@@ -1298,6 +1685,7 @@ final class RuntimeManager: ObservableObject {
             env["OPENAI_API_KEY"] = openAIKey
         }
         env["CLAWDEX_APP"] = "1"
+        applyClawdexEnvironmentOverrides(&env)
         p.environment = env
 
         let outPipe = Pipe()
