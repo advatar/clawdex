@@ -6,13 +6,13 @@
       "oneOf": [
         {"type": "object", "properties": {"kind": {"const": "at"}, "atMs": {"type": "number"}}, "required": ["kind", "atMs"], "additionalProperties": true},
         {"type": "object", "properties": {"kind": {"const": "every"}, "everyMs": {"type": "number"}, "anchorMs": {"type": "number"}}, "required": ["kind", "everyMs"], "additionalProperties": true},
-        {"type": "object", "properties": {"kind": {"const": "cron"}, "expr": {"type": "string"}, "tz": {"type": "string"}}, "required": ["kind", "expr"], "additionalProperties": true}
+        {"type": "object", "properties": {"kind": {"const": "cron"}, "expr": {"type": "string"}, "tz": {"type": "string"}, "staggerMs": {"type": "number", "minimum": 0}}, "required": ["kind", "expr"], "additionalProperties": true}
       ]
     },
     "cronPayloadPatch": {
       "oneOf": [
         {"type": "object", "properties": {"kind": {"const": "systemEvent"}, "text": {"type": "string"}}, "required": ["kind"], "additionalProperties": true},
-        {"type": "object", "properties": {"kind": {"const": "agentTurn"}, "message": {"type": "string"}, "model": {"type": "string"}, "thinking": {"type": "string"}, "timeoutSeconds": {"type": "number"}, "allowUnsafeExternalContent": {"type": "boolean"}, "deliver": {"type": "boolean"}, "channel": {"type": "string"}, "to": {"type": "string"}, "bestEffortDeliver": {"type": "boolean"}}, "required": ["kind"], "additionalProperties": true}
+        {"type": "object", "properties": {"kind": {"const": "agentTurn"}, "message": {"type": "string"}, "model": {"type": "string"}, "thinking": {"type": "string"}, "timeoutSeconds": {"type": "number", "minimum": 0}, "allowUnsafeExternalContent": {"type": "boolean"}, "deliver": {"type": "boolean"}, "channel": {"type": "string"}, "to": {"type": "string"}, "bestEffortDeliver": {"type": "boolean"}}, "required": ["kind"], "additionalProperties": true}
       ]
     },
     "cronIsolation": {

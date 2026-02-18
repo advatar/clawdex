@@ -28,7 +28,8 @@
           "properties": {
             "kind": {"const": "cron"},
             "expr": {"type": "string"},
-            "tz": {"type": "string"}
+            "tz": {"type": "string"},
+            "staggerMs": {"type": "number", "minimum": 0}
           },
           "required": ["kind", "expr"],
           "additionalProperties": true
@@ -53,7 +54,7 @@
             "message": {"type": "string"},
             "model": {"type": "string"},
             "thinking": {"type": "string"},
-            "timeoutSeconds": {"type": "number"},
+            "timeoutSeconds": {"type": "number", "minimum": 0},
             "allowUnsafeExternalContent": {"type": "boolean"},
             "deliver": {"type": "boolean"},
             "channel": {"type": "string"},

@@ -846,6 +846,7 @@ fn sanitize_cron_schedule(value: &Value) -> Value {
                 "cron" => {
                     insert_field(&mut out, map, "expr");
                     insert_field(&mut out, map, "tz");
+                    insert_field(&mut out, map, "staggerMs");
                 }
                 _ => {}
             }
@@ -1240,6 +1241,7 @@ fn normalize_cron_schedule_for_validation(schedule: &mut Map<String, Value>) {
             ("cron", "expr"),
             ("timezone", "tz"),
             ("timeZone", "tz"),
+            ("stagger_ms", "staggerMs"),
         ],
     );
 
@@ -1398,6 +1400,61 @@ mod tests {
             "mediaUrl": "https://example.com/image.png"
         });
         assert!(validate_tool_arguments("message.send", &args).is_ok());
+    }
+
+    #[test]
+    fn validates_message_send_allows_thread_id() {
+        let args = json!({
+            "channel": "telegram",
+            "to": "chat-1",
+            "text": "hi",
+            "threadId": "topic-42"
+        });
+        assert!(validate_tool_arguments("message.send", &args).is_ok());
+    }
+
+    #[test]
+    fn validates_cron_add_allows_stagger_ms() {
+        let args = json!({
+            "job": {
+                "name": "job",
+                "schedule": {
+                    "kind": "cron",
+                    "expr": "0 * * * *",
+                    "tz": "UTC",
+                    "staggerMs": 30000
+                },
+                "payload": { "kind": "systemEvent", "text": "hi" }
+            }
+        });
+        assert!(validate_tool_arguments("cron.add", &args).is_ok());
+    }
+
+    #[test]
+    fn sanitize_cron_job_keeps_stagger_ms() {
+        let sanitized = sanitize_tool_response(
+            "cron.add",
+            json!({
+                "id": "job-1",
+                "name": "job",
+                "enabled": true,
+                "schedule": {
+                    "kind": "cron",
+                    "expr": "0 * * * *",
+                    "tz": "UTC",
+                    "staggerMs": 30000
+                },
+                "sessionTarget": "main",
+                "wakeMode": "next-heartbeat",
+                "payload": { "kind": "systemEvent", "text": "hi" }
+            }),
+        );
+        assert_eq!(
+            sanitized
+                .pointer("/schedule/staggerMs")
+                .and_then(|value| value.as_i64()),
+            Some(30000)
+        );
     }
 
     #[test]

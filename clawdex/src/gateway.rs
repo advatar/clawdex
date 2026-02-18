@@ -1833,6 +1833,12 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .filter(|s| !s.trim().is_empty());
+    let thread_id = args
+        .get("threadId")
+        .or_else(|| args.get("thread_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     let idempotency_key = args
         .get("idempotency_key")
@@ -2014,6 +2020,9 @@ fn send_message_with_mode(paths: &ClawdPaths, args: &Value, mode: SendMode) -> R
     if let Some(text) = text {
         entry["text"] = Value::String(text.clone());
         entry["message"] = Value::String(text);
+    }
+    if let Some(thread_id) = thread_id {
+        entry["threadId"] = Value::String(thread_id);
     }
     if let Some(attachments) = attachments {
         entry["attachments"] = Value::Array(attachments);
@@ -3146,6 +3155,42 @@ mod tests {
         assert_eq!(
             aliased.get("sessionKey").and_then(|v| v.as_str()),
             Some("telegram:group")
+        );
+
+        let _ = std::fs::remove_dir_all(base);
+        Ok(())
+    }
+
+    #[test]
+    fn send_message_queue_preserves_thread_id() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("clawdex-send-thread-{}", Uuid::new_v4()));
+        let state_dir = base.join("state");
+        let workspace_dir = base.join("workspace");
+        std::fs::create_dir_all(&workspace_dir)?;
+
+        let (_cfg, paths) = crate::config::load_config(Some(state_dir), Some(workspace_dir))?;
+        let result = send_message_with_mode(
+            &paths,
+            &json!({
+                "channel": "telegram",
+                "to": "chat-1",
+                "text": "hello",
+                "threadId": "topic-42"
+            }),
+            SendMode::Queue,
+        )?;
+        assert_eq!(
+            result
+                .pointer("/message/threadId")
+                .and_then(|value| value.as_str()),
+            Some("topic-42")
+        );
+
+        let outbox = read_json_lines(&outbox_path(&paths), None)?;
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(
+            outbox[0].get("threadId").and_then(|value| value.as_str()),
+            Some("topic-42")
         );
 
         let _ = std::fs::remove_dir_all(base);

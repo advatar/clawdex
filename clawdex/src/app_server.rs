@@ -8,13 +8,12 @@ use anyhow::{Context, Result};
 use codex_app_server_protocol::{
     AskForApproval, ClientInfo, ClientRequest, CommandExecutionApprovalDecision,
     CommandExecutionRequestApprovalParams, CommandExecutionRequestApprovalResponse,
-    FileChangeApprovalDecision, FileChangeRequestApprovalParams,
-    FileChangeRequestApprovalResponse, InitializeCapabilities, InitializeParams, JSONRPCMessage,
-    JSONRPCNotification, JSONRPCRequest, JSONRPCResponse, RequestId, ServerNotification,
-    SandboxPolicy, ServerRequest, ThreadForkParams, ThreadForkResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartParams, ToolRequestUserInputAnswer,
-    ToolRequestUserInputParams, ToolRequestUserInputResponse, TurnStartParams, TurnStatus,
-    TurnInterruptParams, TurnInterruptResponse,
+    FileChangeApprovalDecision, FileChangeRequestApprovalParams, FileChangeRequestApprovalResponse,
+    InitializeCapabilities, InitializeParams, JSONRPCMessage, JSONRPCNotification, JSONRPCRequest,
+    JSONRPCResponse, RequestId, SandboxPolicy, ServerNotification, ServerRequest, ThreadForkParams,
+    ThreadForkResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
+    ToolRequestUserInputAnswer, ToolRequestUserInputParams, ToolRequestUserInputResponse,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStatus,
     UserInput as V2UserInput,
 };
 use serde::de::DeserializeOwned;
@@ -370,8 +369,9 @@ impl CodexClient {
                 }
                 ServerNotification::ItemCompleted(payload) => {
                     if payload.thread_id == thread_id && payload.turn_id == turn_id {
-                        if let codex_app_server_protocol::ThreadItem::AgentMessage { text, .. } =
-                            payload.item
+                        if let codex_app_server_protocol::ThreadItem::AgentMessage {
+                            text, ..
+                        } = payload.item
                         {
                             last_agent_message = Some(text);
                         }
@@ -496,17 +496,17 @@ impl CodexClient {
             if trimmed.is_empty() {
                 continue;
             }
-            let parsed: serde_json::Value = serde_json::from_str(trimmed)
-                .context("invalid JSON-RPC from codex app-server")?;
-            let message: JSONRPCMessage = serde_json::from_value(parsed)
-                .context("invalid JSON-RPC message")?;
+            let parsed: serde_json::Value =
+                serde_json::from_str(trimmed).context("invalid JSON-RPC from codex app-server")?;
+            let message: JSONRPCMessage =
+                serde_json::from_value(parsed).context("invalid JSON-RPC message")?;
             return Ok(message);
         }
     }
 
     fn handle_server_request(&mut self, request: JSONRPCRequest) -> Result<()> {
-        let server_request = ServerRequest::try_from(request)
-            .context("failed to deserialize ServerRequest")?;
+        let server_request =
+            ServerRequest::try_from(request).context("failed to deserialize ServerRequest")?;
 
         match server_request {
             ServerRequest::CommandExecutionRequestApproval { request_id, params } => {
@@ -596,6 +596,8 @@ fn notification_kind(notification: &ServerNotification) -> &'static str {
     match notification {
         ServerNotification::Error(_) => "error",
         ServerNotification::ThreadStarted(_) => "thread_started",
+        ServerNotification::ThreadArchived(_) => "thread_archived",
+        ServerNotification::ThreadUnarchived(_) => "thread_unarchived",
         ServerNotification::AppListUpdated(_) => "app_list_updated",
         ServerNotification::ThreadNameUpdated(_) => "thread_name_updated",
         ServerNotification::ThreadTokenUsageUpdated(_) => "thread_token_usage_updated",
@@ -619,14 +621,79 @@ fn notification_kind(notification: &ServerNotification) -> &'static str {
         ServerNotification::ReasoningSummaryPartAdded(_) => "reasoning_summary_part_added",
         ServerNotification::ReasoningTextDelta(_) => "reasoning_text_delta",
         ServerNotification::ContextCompacted(_) => "context_compacted",
+        ServerNotification::ModelRerouted(_) => "model_rerouted",
         ServerNotification::DeprecationNotice(_) => "deprecation_notice",
         ServerNotification::ConfigWarning(_) => "config_warning",
+        ServerNotification::FuzzyFileSearchSessionUpdated(_) => "fuzzy_file_search_session_updated",
+        ServerNotification::FuzzyFileSearchSessionCompleted(_) => {
+            "fuzzy_file_search_session_completed"
+        }
         ServerNotification::WindowsWorldWritableWarning(_) => "windows_world_writable_warning",
         ServerNotification::AccountLoginCompleted(_) => "account_login_completed",
         ServerNotification::AuthStatusChange(_) => "auth_status_change",
         ServerNotification::LoginChatGptComplete(_) => "login_chatgpt_complete",
         ServerNotification::SessionConfigured(_) => "session_configured",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_app_server_protocol::{
+        FuzzyFileSearchSessionCompletedNotification, FuzzyFileSearchSessionUpdatedNotification,
+        ModelRerouteReason, ModelReroutedNotification, ThreadArchivedNotification,
+        ThreadUnarchivedNotification,
+    };
+
+    #[test]
+    fn notification_kind_maps_new_codex_variants() {
+        assert_eq!(
+            notification_kind(&ServerNotification::ThreadArchived(
+                ThreadArchivedNotification {
+                    thread_id: "thread-1".to_string(),
+                }
+            )),
+            "thread_archived"
+        );
+        assert_eq!(
+            notification_kind(&ServerNotification::ThreadUnarchived(
+                ThreadUnarchivedNotification {
+                    thread_id: "thread-1".to_string(),
+                }
+            )),
+            "thread_unarchived"
+        );
+        assert_eq!(
+            notification_kind(&ServerNotification::ModelRerouted(
+                ModelReroutedNotification {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    from_model: "gpt-5".to_string(),
+                    to_model: "gpt-5-mini".to_string(),
+                    reason: ModelRerouteReason::HighRiskCyberActivity,
+                }
+            )),
+            "model_rerouted"
+        );
+        assert_eq!(
+            notification_kind(&ServerNotification::FuzzyFileSearchSessionUpdated(
+                FuzzyFileSearchSessionUpdatedNotification {
+                    session_id: "session-1".to_string(),
+                    query: "needle".to_string(),
+                    files: Vec::new(),
+                }
+            )),
+            "fuzzy_file_search_session_updated"
+        );
+        assert_eq!(
+            notification_kind(&ServerNotification::FuzzyFileSearchSessionCompleted(
+                FuzzyFileSearchSessionCompletedNotification {
+                    session_id: "session-1".to_string(),
+                }
+            )),
+            "fuzzy_file_search_session_completed"
+        );
     }
 }
 

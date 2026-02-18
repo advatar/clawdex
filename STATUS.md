@@ -1,6 +1,7 @@
 # Status
 
 Active:
+- [x] Upstream submodule sync sweep: bump `codex` + `openclaw`, then backport newly inherited bug fixes/parity deltas into `clawdex` and evaluate opportunistic Codex feature adoption.
 - [x] Integrate `clawdex_phase2_5_overlay.patch` by adding canonical plugin-overlay sync helpers (overlay rebuild + Codex link + merged MCP output).
 - [x] Integrate `clawdex_phase2_5_compliance.patch` by adding a lightweight `policies` module (`RiskLevel`, `ActionIntent`, checkpoint helpers).
 - [x] Integrate `clawdex_phase3_arguments_preprocess.patch` by adding a standalone `skill_renderer::render_skill` helper with argument substitution + optional shell preprocess lines.
