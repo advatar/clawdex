@@ -2365,8 +2365,19 @@ pub fn record_incoming(paths: &ClawdPaths, payload: &Value) -> Result<Value> {
         .and_then(|v| v.as_str())
         .context("incoming requires from")?;
     let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let agent_id = payload
+        .get("agentId")
+        .or_else(|| payload.get("agent_id"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string());
 
-    let session_key = format!("{channel}:{from}");
+    let session_key = if let Some(agent_id) = agent_id.clone() {
+        format!("agent:{agent_id}:{channel}:{from}")
+    } else {
+        format!("{channel}:{from}")
+    };
     let received_at_ms = now_ms();
     let attachments = process_attachments(paths, &cfg, payload.get("attachments"))?;
     let mut entry = json!({
@@ -2374,6 +2385,7 @@ pub fn record_incoming(paths: &ClawdPaths, payload: &Value) -> Result<Value> {
         "sessionKey": session_key,
         "channel": channel,
         "from": from,
+        "agentId": agent_id,
         "accountId": payload.get("accountId").and_then(|v| v.as_str()),
         "text": text,
         "receivedAtMs": received_at_ms,
@@ -3155,6 +3167,54 @@ mod tests {
         assert_eq!(
             aliased.get("sessionKey").and_then(|v| v.as_str()),
             Some("telegram:group")
+        );
+
+        let _ = std::fs::remove_dir_all(base);
+        Ok(())
+    }
+
+    #[test]
+    fn record_incoming_namespaces_session_key_with_agent_id() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("clawdex-incoming-agent-{}", Uuid::new_v4()));
+        let state_dir = base.join("state");
+        let workspace_dir = base.join("workspace");
+        std::fs::create_dir_all(&workspace_dir)?;
+
+        let (_cfg, paths) = crate::config::load_config(Some(state_dir), Some(workspace_dir))?;
+        let recorded = record_incoming(
+            &paths,
+            &json!({
+                "channel": "telegram",
+                "from": "group-1",
+                "text": "hello",
+                "agentId": "kline",
+            }),
+        )?;
+
+        assert_eq!(
+            recorded
+                .pointer("/message/sessionKey")
+                .and_then(|value| value.as_str()),
+            Some("agent:kline:telegram:group-1")
+        );
+        assert_eq!(
+            recorded
+                .pointer("/message/agentId")
+                .and_then(|value| value.as_str()),
+            Some("kline")
+        );
+
+        let resolved = resolve_target(
+            &paths,
+            &json!({ "sessionKey": "agent:kline:telegram:group-1" }),
+        )?;
+        assert_eq!(
+            resolved.get("ok").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            resolved.get("channel").and_then(|value| value.as_str()),
+            Some("telegram")
         );
 
         let _ = std::fs::remove_dir_all(base);

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -42,6 +43,32 @@ struct DeliveryPlan {
     to: Option<String>,
     best_effort: bool,
     requested: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgentBackendKind {
+    Codex,
+    Kline,
+}
+
+#[derive(Debug, Clone)]
+struct ExternalAgentBackend {
+    kind: AgentBackendKind,
+    url: String,
+    token: Option<String>,
+    timeout_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct AgentBackendRouting {
+    default_agent_id: String,
+    backends: HashMap<String, ExternalAgentBackend>,
+}
+
+#[derive(Debug, Clone)]
+struct AgentTurnOutcome {
+    message: String,
+    warnings: Vec<String>,
 }
 
 pub fn run_daemon(
@@ -94,6 +121,7 @@ pub fn run_daemon_loop(
         config_overrides: resolve_codex_overrides(&cfg),
     };
     let mut runner = CodexRunner::start(runner_cfg)?;
+    let agent_routing = resolve_agent_backend_routing(&cfg);
 
     let heartbeat_enabled = resolve_heartbeat_enabled(&cfg);
     let interval = resolve_heartbeat_interval_ms(&cfg);
@@ -128,10 +156,10 @@ pub fn run_daemon_loop(
             );
         }
 
-        // Drain inbound messages from the gateway and run Codex turns.
+        // Drain inbound messages from the gateway and run agent turns.
         let inbound = gateway::drain_inbox(&paths)?;
         for entry in inbound {
-            handle_incoming_message(&mut runner, &paths, entry)?;
+            handle_incoming_message(&mut runner, &agent_routing, &paths, entry)?;
         }
 
         // Drain pending jobs (wakeMode = next-heartbeat or manual cron.run)
@@ -1003,6 +1031,7 @@ pub fn deliver_heartbeat_response_for_test(
 
 fn handle_incoming_message(
     runner: &mut CodexRunner,
+    routing: &AgentBackendRouting,
     paths: &ClawdPaths,
     entry: serde_json::Value,
 ) -> Result<()> {
@@ -1016,11 +1045,10 @@ fn handle_incoming_message(
     }
     let session_key = resolve_inbound_session_key(&entry);
     let _ = sessions::append_session_message(paths, &session_key, "user", text);
-    let outcome = if session_key == "agent:main:main" {
-        runner.run_main(text)?
-    } else {
-        runner.run_isolated(&session_key, text)?
-    };
+    let outcome = run_incoming_turn(runner, routing, &session_key, text)?;
+    for warning in &outcome.warnings {
+        eprintln!("[clawdex][agent] session {} warning: {}", session_key, warning);
+    }
     let response = outcome.message.trim();
     if response.is_empty() {
         return Ok(());
@@ -1036,13 +1064,34 @@ fn handle_incoming_message(
 }
 
 fn resolve_inbound_session_key(entry: &serde_json::Value) -> String {
+    let agent_id = entry
+        .get("agentId")
+        .or_else(|| entry.get("agent_id"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string());
+
     if let Some(key) = entry.get("sessionKey").and_then(|v| v.as_str()) {
-        return key.to_string();
+        let key = key.trim();
+        if key.is_empty() {
+            return "agent:main:main".to_string();
+        }
+        if key.starts_with("agent:") || agent_id.is_none() {
+            return key.to_string();
+        }
+        return format!("agent:{}:{key}", agent_id.unwrap_or_default());
     }
     let channel = entry.get("channel").and_then(|v| v.as_str()).unwrap_or("");
     let from = entry.get("from").and_then(|v| v.as_str()).unwrap_or("");
     if !channel.is_empty() && !from.is_empty() {
+        if let Some(agent_id) = agent_id {
+            return format!("agent:{agent_id}:{channel}:{from}");
+        }
         return format!("{channel}:{from}");
+    }
+    if let Some(agent_id) = agent_id {
+        return format!("agent:{agent_id}:main");
     }
     "agent:main:main".to_string()
 }
@@ -1077,6 +1126,221 @@ fn resolve_codex_overrides(cfg: &ClawdConfig) -> Vec<String> {
         .as_ref()
         .and_then(|c| c.config_overrides.clone())
         .unwrap_or_default()
+}
+
+fn resolve_agent_backend_routing(cfg: &ClawdConfig) -> AgentBackendRouting {
+    let default_agent_id = cfg
+        .agents
+        .as_ref()
+        .and_then(|agents| agents.default_agent_id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("main")
+        .to_string();
+
+    let mut backends = HashMap::new();
+    if let Some(configured) = cfg
+        .agents
+        .as_ref()
+        .and_then(|agents| agents.backends.as_ref())
+    {
+        for (agent_id, backend) in configured {
+            let normalized_agent_id = agent_id.trim();
+            if normalized_agent_id.is_empty() {
+                continue;
+            }
+            let kind = match backend
+                .kind
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("codex")
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "kline" => AgentBackendKind::Kline,
+                _ => AgentBackendKind::Codex,
+            };
+            if kind == AgentBackendKind::Codex {
+                continue;
+            }
+            let Some(url) = backend
+                .url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                eprintln!(
+                    "[clawdex][agents] backend for agent `{}` is missing url; using codex",
+                    normalized_agent_id
+                );
+                continue;
+            };
+            let timeout_ms = backend.timeout_ms.unwrap_or(30_000).clamp(1_000, 120_000);
+            let token = resolve_external_backend_token(backend);
+            backends.insert(
+                normalized_agent_id.to_string(),
+                ExternalAgentBackend {
+                    kind,
+                    url: url.to_string(),
+                    token,
+                    timeout_ms,
+                },
+            );
+        }
+    }
+
+    AgentBackendRouting {
+        default_agent_id,
+        backends,
+    }
+}
+
+fn resolve_external_backend_token(backend: &crate::config::AgentBackendConfig) -> Option<String> {
+    let from_env = backend
+        .token_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|env_name| std::env::var(env_name).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    from_env.or_else(|| {
+        backend
+            .token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string())
+    })
+}
+
+fn run_incoming_turn(
+    runner: &mut CodexRunner,
+    routing: &AgentBackendRouting,
+    session_key: &str,
+    text: &str,
+) -> Result<AgentTurnOutcome> {
+    let agent_id = resolve_agent_id_for_session(session_key, &routing.default_agent_id);
+    if let Some(external) = routing.backends.get(&agent_id) {
+        return run_external_agent_turn(external, &agent_id, session_key, text);
+    }
+
+    let outcome = if session_key == "agent:main:main" {
+        runner.run_main(text)?
+    } else {
+        runner.run_isolated(session_key, text)?
+    };
+    Ok(AgentTurnOutcome {
+        message: outcome.message,
+        warnings: outcome.warnings,
+    })
+}
+
+fn resolve_agent_id_for_session(session_key: &str, default_agent_id: &str) -> String {
+    let trimmed = session_key.trim();
+    if let Some(rest) = trimmed.strip_prefix("agent:") {
+        if let Some((agent_id, _)) = rest.split_once(':') {
+            let agent_id = agent_id.trim();
+            if !agent_id.is_empty() {
+                return agent_id.to_string();
+            }
+        }
+    }
+    default_agent_id.to_string()
+}
+
+fn run_external_agent_turn(
+    backend: &ExternalAgentBackend,
+    agent_id: &str,
+    session_key: &str,
+    message: &str,
+) -> Result<AgentTurnOutcome> {
+    match backend.kind {
+        AgentBackendKind::Kline => run_kline_turn(backend, agent_id, session_key, message),
+        AgentBackendKind::Codex => anyhow::bail!("external codex backend is not supported"),
+    }
+}
+
+fn run_kline_turn(
+    backend: &ExternalAgentBackend,
+    agent_id: &str,
+    session_key: &str,
+    message: &str,
+) -> Result<AgentTurnOutcome> {
+    let endpoint = format!(
+        "{}/v1/agent/turn",
+        backend.url.trim_end_matches('/').trim_end_matches('\\')
+    );
+    let client = Client::builder()
+        .timeout(Duration::from_millis(backend.timeout_ms))
+        .build()
+        .context("build kline backend client")?;
+
+    let mut request = client.post(&endpoint).json(&json!({
+        "agentId": agent_id,
+        "sessionKey": session_key,
+        "message": message,
+    }));
+    if let Some(token) = backend.token.as_deref() {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request
+        .send()
+        .with_context(|| format!("kline backend request failed: {}", endpoint))?;
+    let status = response.status();
+    let body = response
+        .json::<Value>()
+        .unwrap_or_else(|_| json!({ "ok": status.is_success() }));
+    if !status.is_success() {
+        let detail = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .or_else(|| body.get("message").and_then(|v| v.as_str()))
+            .unwrap_or("kline backend request failed");
+        anyhow::bail!("kline backend HTTP {}: {}", status, detail);
+    }
+
+    let Some(message) = extract_backend_message(&body) else {
+        anyhow::bail!("kline backend response missing message");
+    };
+    let warnings = extract_backend_warnings(&body);
+    Ok(AgentTurnOutcome { message, warnings })
+}
+
+fn extract_backend_message(value: &Value) -> Option<String> {
+    for candidate in [
+        value.get("message"),
+        value.get("response"),
+        value.get("text"),
+        value.get("result").and_then(|v| v.get("message")),
+        value.get("result").and_then(|v| v.get("response")),
+        value.get("result").and_then(|v| v.get("text")),
+    ] {
+        if let Some(message) = candidate.and_then(|v| v.as_str()) {
+            let trimmed = message.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_backend_warnings(value: &Value) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Some(items) = value
+        .get("warnings")
+        .or_else(|| value.get("result").and_then(|v| v.get("warnings")))
+        .and_then(|v| v.as_array())
+    {
+        for item in items {
+            if let Some(text) = item.as_str().map(str::trim).filter(|text| !text.is_empty()) {
+                warnings.push(text.to_string());
+            }
+        }
+    }
+    warnings
 }
 
 fn parse_approval_policy(raw: &str) -> AskForApproval {
@@ -1213,5 +1477,42 @@ fn acquire_job_lock(paths: &ClawdPaths, job_id: &str) -> Result<Option<JobLock>>
         }
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
         Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn resolve_inbound_session_key_namespaces_with_agent_id() {
+        let key = resolve_inbound_session_key(&json!({
+            "agentId": "kline",
+            "channel": "telegram",
+            "from": "1234"
+        }));
+        assert_eq!(key, "agent:kline:telegram:1234");
+    }
+
+    #[test]
+    fn resolve_inbound_session_key_prefixes_existing_non_namespaced_key() {
+        let key = resolve_inbound_session_key(&json!({
+            "agentId": "kline",
+            "sessionKey": "telegram:1234"
+        }));
+        assert_eq!(key, "agent:kline:telegram:1234");
+    }
+
+    #[test]
+    fn resolve_agent_id_for_session_prefers_session_namespace() {
+        let agent_id = resolve_agent_id_for_session("agent:kline:telegram:1234", "main");
+        assert_eq!(agent_id, "kline");
+    }
+
+    #[test]
+    fn resolve_agent_id_for_session_falls_back_to_default() {
+        let agent_id = resolve_agent_id_for_session("telegram:1234", "kline");
+        assert_eq!(agent_id, "kline");
     }
 }

@@ -16,6 +16,7 @@ pub struct ClawdConfig {
     pub memory: Option<MemoryConfig>,
     pub context: Option<ContextConfig>,
     pub codex: Option<CodexConfig>,
+    pub agents: Option<AgentsConfig>,
     pub gateway: Option<GatewayConfig>,
 }
 
@@ -132,6 +133,23 @@ pub struct CodexConfig {
     pub path: Option<String>,
     pub approval_policy: Option<String>,
     pub config_overrides: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentsConfig {
+    pub default_agent_id: Option<String>,
+    pub backends: Option<std::collections::HashMap<String, AgentBackendConfig>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentBackendConfig {
+    pub kind: Option<String>,
+    pub url: Option<String>,
+    pub token: Option<String>,
+    #[serde(alias = "tokenEnv")]
+    pub token_env: Option<String>,
+    #[serde(alias = "timeoutMs")]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

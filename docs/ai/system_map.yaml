@@ -2,7 +2,7 @@ version: 1
 services:
   - name: clawdex-gateway
     owner: clawdex
-    description: HTTP gateway for OpenClaw-compatible routing.
+    description: HTTP gateway for OpenClaw-compatible routing; supports inbound `agentId` tagging to persist namespaced session keys (`agent:<id>:...`) for backend-aware daemon dispatch.
     command: clawdex gateway --bind 127.0.0.1:18789
     ports:
       - name: http
@@ -14,7 +14,7 @@ services:
       - workspace_dir
   - name: clawdex-daemon
     owner: clawdex
-    description: Daemon runtime exposing HTTP admin/task APIs plus local Unix socket JSON-RPC IPC (`daemon.request`).
+    description: Daemon runtime exposing HTTP admin/task APIs plus local Unix socket JSON-RPC IPC (`daemon.request`); routes sessions to local Codex or configured external agent backends (for example Kline via `agents.backends.<id>.kind: kline`).
     command: clawdexd --bind 127.0.0.1:18791 --ipc-uds ~/.codex/clawdex/daemon.sock
     ports:
       - name: http

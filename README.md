@@ -270,6 +270,18 @@ Example `config.json5`:
     approval_policy: "on-request",
     config_overrides: ["model=gpt-5.2-codex"]
   },
+  agents: {
+    default_agent_id: "main",
+    backends: {
+      // Route any session with `agent:kline:*` to this backend.
+      kline: {
+        kind: "kline",
+        url: "http://127.0.0.1:18888",
+        tokenEnv: "KLINE_BACKEND_TOKEN",
+        timeoutMs: 30000
+      }
+    }
+  },
   gateway: {
     bind: "127.0.0.1:18789",
     route_ttl_ms: 86400000,
@@ -308,6 +320,14 @@ Workspace policy notes:
 - `permissions.mcp.serverPolicies` is enforced for built-in MCP tool families (`cron`, `memory`, `gateway`, `artifacts`, `heartbeat`); `allow_once`/`ask_every_time` are rejected in stdio mode (use `allow_always` or `deny`).
 - `permissions.mcp.plugins` overrides MCP enablement per plugin id (true/false).
 - `context.maxInputChars` applies an input budget to long task/daemon prompts before turn execution.
+- `agents.default_agent_id` sets the fallback agent id for non-namespaced session keys.
+- `agents.backends.<agentId>.kind: "kline"` routes daemon turns for `agent:<agentId>:...` sessions to a Kline HTTP backend.
+- `agents.backends.<agentId>.tokenEnv` is preferred over inline `token`.
+
+Kline backend quick start:
+1. Configure `agents.backends.kline` in `~/.codex/clawdex/config.json5`.
+2. Send inbound messages with `agentId: "kline"` to clawdex gateway `/v1/incoming`.
+3. Daemon will dispatch those `agent:kline:*` sessions to Kline backend automatically.
 
 ---
 
