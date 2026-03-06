@@ -121,6 +121,7 @@ pub fn workspace_sandbox_policy(policy: &WorkspacePolicy) -> Result<Option<Sandb
     if policy.read_only {
         return Ok(Some(SandboxPolicy::ReadOnly {
             access: ReadOnlyAccess::FullAccess,
+            network_access: policy.network_access,
         }));
     }
     let mut roots = Vec::new();

@@ -596,9 +596,12 @@ fn notification_kind(notification: &ServerNotification) -> &'static str {
     match notification {
         ServerNotification::Error(_) => "error",
         ServerNotification::ThreadStarted(_) => "thread_started",
+        ServerNotification::ThreadStatusChanged(_) => "thread_status_changed",
         ServerNotification::ThreadArchived(_) => "thread_archived",
         ServerNotification::ThreadUnarchived(_) => "thread_unarchived",
+        ServerNotification::ThreadClosed(_) => "thread_closed",
         ServerNotification::AppListUpdated(_) => "app_list_updated",
+        ServerNotification::SkillsChanged(_) => "skills_changed",
         ServerNotification::ThreadNameUpdated(_) => "thread_name_updated",
         ServerNotification::ThreadTokenUsageUpdated(_) => "thread_token_usage_updated",
         ServerNotification::TurnStarted(_) => "turn_started",
@@ -613,6 +616,7 @@ fn notification_kind(notification: &ServerNotification) -> &'static str {
         ServerNotification::CommandExecutionOutputDelta(_) => "command_execution_output_delta",
         ServerNotification::TerminalInteraction(_) => "terminal_interaction",
         ServerNotification::FileChangeOutputDelta(_) => "file_change_output_delta",
+        ServerNotification::ServerRequestResolved(_) => "server_request_resolved",
         ServerNotification::McpToolCallProgress(_) => "mcp_tool_call_progress",
         ServerNotification::McpServerOauthLoginCompleted(_) => "mcp_server_oauth_login_completed",
         ServerNotification::AccountUpdated(_) => "account_updated",
@@ -628,11 +632,16 @@ fn notification_kind(notification: &ServerNotification) -> &'static str {
         ServerNotification::FuzzyFileSearchSessionCompleted(_) => {
             "fuzzy_file_search_session_completed"
         }
+        ServerNotification::ThreadRealtimeStarted(_) => "thread_realtime_started",
+        ServerNotification::ThreadRealtimeItemAdded(_) => "thread_realtime_item_added",
+        ServerNotification::ThreadRealtimeOutputAudioDelta(_) => {
+            "thread_realtime_output_audio_delta"
+        }
+        ServerNotification::ThreadRealtimeError(_) => "thread_realtime_error",
+        ServerNotification::ThreadRealtimeClosed(_) => "thread_realtime_closed",
         ServerNotification::WindowsWorldWritableWarning(_) => "windows_world_writable_warning",
+        ServerNotification::WindowsSandboxSetupCompleted(_) => "windows_sandbox_setup_completed",
         ServerNotification::AccountLoginCompleted(_) => "account_login_completed",
-        ServerNotification::AuthStatusChange(_) => "auth_status_change",
-        ServerNotification::LoginChatGptComplete(_) => "login_chatgpt_complete",
-        ServerNotification::SessionConfigured(_) => "session_configured",
         _ => "unknown",
     }
 }

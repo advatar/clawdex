@@ -1,6 +1,7 @@
 # Status
 
 Active:
+- [x] 2026-03-06 codex compatibility follow-up: adapt `clawdex` to current `codex` protocol changes surfaced by the submodule bump (`ServerNotification` variants and `SandboxPolicy::ReadOnly` fields) and restore `cargo test`.
 - [x] 2026-03-06 submodule sync run: merge latest `openai/main` into `codex` while retaining fork-only security-scan commits, fast-forward `openclaw` to latest `openclaw/main`, then bump pinned SHAs in this repo.
 - [x] 2026-02-25 submodule sync + backport run: update `openclaw` to upstream `main`, sync `codex` with `openai/main` while retaining fork-only security-scan commits, then bump pinned SHAs in this repo.
 - [x] Upstream submodule sync sweep: bump `codex` + `openclaw`, then backport newly inherited bug fixes/parity deltas into `clawdex` and evaluate opportunistic Codex feature adoption.
