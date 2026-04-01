@@ -1,6 +1,7 @@
 # Status
 
 Active:
+- [x] 2026-04-01 submodule sync run: update all configured submodules to their latest reachable upstream heads, bump pinned SHAs in this repo, initialize the missing `Packages/DeepThink` + `plugins/get-shit-done` checkouts, and preserve the pre-existing dirty `openclaw` worktree.
 - [x] 2026-03-06 codex compatibility follow-up: adapt `clawdex` to current `codex` protocol changes surfaced by the submodule bump (`ServerNotification` variants and `SandboxPolicy::ReadOnly` fields) and restore `cargo test`.
 - [x] 2026-03-06 submodule sync run: merge latest `openai/main` into `codex` while retaining fork-only security-scan commits, fast-forward `openclaw` to latest `openclaw/main`, then bump pinned SHAs in this repo.
 - [x] 2026-02-25 submodule sync + backport run: update `openclaw` to upstream `main`, sync `codex` with `openai/main` while retaining fork-only security-scan commits, then bump pinned SHAs in this repo.
@@ -52,7 +53,7 @@ Upstream Sync (Submodules):
 - [x] Codex sync policy is now explicit: prioritize `openclaw` parity bumps; review/bump `codex` opportunistically when integration deltas require it, and capture port tasks before implementation.
 - [x] Keep submodule bump commits isolated (one `chore(submodules)` commit), and land parity/feature ports as separate commits with tests.
   - [x] 2026-02-24 submodule sync run: fast-forward all configured submodules and bump pinned SHAs in the superproject.
-  - Latest bump: 2026-03-06 (codex `86a5254f0`, openclaw `9aceb5137`, DeepThink `ca01ce4bd`, get-shit-done `b85247a3b`)
+  - Latest bump: 2026-04-01 (codex `547f7071f`, openclaw `5c8d9da749`, DeepThink `ca01ce4bd`, get-shit-done `b85247a3b`)
   - [x] Port OpenClaw cron webhook delivery parity: accept `delivery.mode="webhook"` (including `sessionTarget="main"`), validate http(s) webhook targets, and emit daemon webhook callbacks with optional `cron.webhookToken`.
   - [x] Backport OpenClaw gateway send parity update: allow attachment-only / media-only sends (`message` optional in gateway send params) with regression tests.
   - [x] Security sweep on each openclaw bump: review published GH advisories + merged security PRs, run dependency audit, and patch/backport applicable fixes.

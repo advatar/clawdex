@@ -560,6 +560,7 @@ dependencies = [
  "anyhow",
  "clap",
  "codex-experimental-api-macros",
+ "codex-git-utils",
  "codex-protocol",
  "codex-utils-absolute-path",
  "inventory",
@@ -601,15 +602,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-git"
+name = "codex-git-utils"
 version = "0.0.0"
 dependencies = [
+ "codex-utils-absolute-path",
+ "futures",
  "once_cell",
  "regex",
  "schemars 0.8.22",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "ts-rs",
  "walkdir",
 ]
@@ -619,13 +623,15 @@ name = "codex-protocol"
 version = "0.0.0"
 dependencies = [
  "codex-execpolicy",
- "codex-git",
+ "codex-git-utils",
  "codex-utils-absolute-path",
  "codex-utils-image",
+ "codex-utils-string",
+ "codex-utils-template",
  "icu_decimal",
  "icu_locale_core",
  "icu_provider",
- "mime_guess",
+ "quick-xml 0.38.4",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -665,9 +671,21 @@ dependencies = [
  "base64 0.22.1",
  "codex-utils-cache",
  "image 0.25.9",
+ "mime_guess",
  "thiserror 2.0.18",
  "tokio",
 ]
+
+[[package]]
+name = "codex-utils-string"
+version = "0.0.0"
+dependencies = [
+ "regex-lite",
+]
+
+[[package]]
+name = "codex-utils-template"
+version = "0.0.0"
 
 [[package]]
 name = "color_quant"
@@ -3280,6 +3298,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
 dependencies = [
  "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -3523,6 +3542,12 @@ dependencies = [
  "memchr",
  "regex-syntax 0.8.9",
 ]
+
+[[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "regex-syntax"
